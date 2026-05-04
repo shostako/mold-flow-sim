@@ -1,0 +1,84 @@
+{
+  "_meta": {
+    "model": "Cross-WLF",
+    "note": "教育・概念検証用の代表値。実機検討にはベンダー実測データを使うこと。",
+    "equation": "eta(gamma_dot, T) = eta0(T) / (1 + (eta0*gamma_dot / tau_star)^(1-n)); eta0(T) = D1 * exp(-A1*(T-T*)/(A2 + (T-T*))); T* = D2 + D3*P",
+    "units": {
+      "T": "K",
+      "P": "Pa",
+      "tau_star": "Pa",
+      "D1": "Pa.s",
+      "A1": "-",
+      "A2": "K",
+      "D2": "K",
+      "D3": "K/Pa"
+    }
+  },
+  "materials": {
+    "PP": {
+      "name": "Polypropylene (generic)",
+      "n": 0.2538,
+      "tau_star": 2.508e4,
+      "D1": 1.41e11,
+      "D2": 263.15,
+      "D3": 0.0,
+      "A1": 27.39,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [453.15, 533.15],
+      "T_mold_recommended": [293.15, 333.15],
+      "density_melt_kgm3": 738
+    },
+    "ABS": {
+      "name": "ABS (generic)",
+      "n": 0.3286,
+      "tau_star": 2.060e5,
+      "D1": 2.51e13,
+      "D2": 373.15,
+      "D3": 0.0,
+      "A1": 29.49,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [493.15, 543.15],
+      "T_mold_recommended": [313.15, 353.15],
+      "density_melt_kgm3": 938
+    },
+    "PC": {
+      "name": "Polycarbonate (generic)",
+      "n": 0.2876,
+      "tau_star": 1.240e5,
+      "D1": 1.73e15,
+      "D2": 417.15,
+      "D3": 0.0,
+      "A1": 37.30,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [553.15, 603.15],
+      "T_mold_recommended": [353.15, 393.15],
+      "density_melt_kgm3": 1085
+    },
+    "PA66": {
+      "name": "Polyamide 66 (generic)",
+      "n": 0.3220,
+      "tau_star": 1.210e5,
+      "D1": 2.51e11,
+      "D2": 489.15,
+      "D3": 0.0,
+      "A1": 24.97,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [543.15, 583.15],
+      "T_mold_recommended": [333.15, 363.15],
+      "density_melt_kgm3": 980
+    },
+    "PMMA": {
+      "name": "Polymethyl methacrylate (generic)",
+      "n": 0.2466,
+      "tau_star": 2.690e4,
+      "D1": 4.41e12,
+      "D2": 378.15,
+      "D3": 0.0,
+      "A1": 30.39,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [503.15, 553.15],
+      "T_mold_recommended": [333.15, 363.15],
+      "density_melt_kgm3": 1080
+    }
+  }
+}

@@ -1,0 +1,226 @@
+"""Streamlit UI for the simplified mold flow simulator.
+
+Run:
+    streamlit run app.py
+"""
+from __future__ import annotations
+
+import io
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import streamlit as st
+from PIL import Image
+
+from core import (
+    HeleShawSolver,
+    MaterialDB,
+    build_demo_geometry,
+    geometry_from_image,
+    render_fill_animation,
+    render_pressure_map,
+    render_weldlines,
+)
+from core.geometry import Geometry
+
+
+st.set_page_config(page_title="Mold Flow Sim (simplified)", layout="wide")
+st.title("射出成形 簡易流動解析")
+st.caption(
+    "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time。"
+    "教育・概念検証用。実機検討は本気のCAEを使ってくれ。"
+)
+
+
+@st.cache_resource
+def _load_db() -> MaterialDB:
+    return MaterialDB()
+
+
+db = _load_db()
+material_keys = list(db.keys())
+
+
+# ----------------------- sidebar: inputs -----------------------
+with st.sidebar:
+    st.header("ジオメトリ")
+    geom_source = st.radio("入力", ["Demo plate (synthetic)", "画像から生成 (PNG/JPG)"])
+
+    if geom_source.startswith("Demo"):
+        plate_w = st.slider("製品幅 [mm]", 40.0, 240.0, 120.0, step=5.0)
+        plate_h = st.slider("製品高 [mm]", 30.0, 160.0, 80.0, step=5.0)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+        runner_thk = st.slider("ランナー肉厚 [mm]", 1.0, 8.0, 4.0, step=0.1)
+        sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
+        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
+        gate_count = st.slider("ゲート数", 1, 4, 1)
+        upload = None
+    else:
+        upload = st.file_uploader("キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"])
+        plate_thk = st.slider("均一肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+        cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+        invert = st.checkbox("白を内部として扱う（反転）", value=False)
+        threshold = st.slider("二値化しきい値", 16, 240, 128)
+
+    st.header("材料")
+    material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP"))
+    mat = db[material_key]
+    st.caption(f"{mat.name}")
+    st.caption(
+        f"推奨 melt: {mat.T_melt_recommended[0]-273.15:.0f}–{mat.T_melt_recommended[1]-273.15:.0f} ℃, "
+        f"mold: {mat.T_mold_recommended[0]-273.15:.0f}–{mat.T_mold_recommended[1]-273.15:.0f} ℃"
+    )
+
+    st.header("射出条件")
+    melt_C = st.slider("樹脂温度 [℃]",
+                      int(mat.T_melt_recommended[0] - 273.15) - 20,
+                      int(mat.T_melt_recommended[1] - 273.15) + 20,
+                      int(np.mean(mat.T_melt_recommended) - 273.15))
+    mold_C = st.slider("金型温度 [℃]",
+                      int(mat.T_mold_recommended[0] - 273.15) - 10,
+                      int(mat.T_mold_recommended[1] - 273.15) + 30,
+                      int(np.mean(mat.T_mold_recommended) - 273.15))
+    inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 100.0, step=5.0)
+    inj_Q = st.slider("射出体積流量 [cm³/s]", 1.0, 80.0, 20.0, step=1.0)
+
+    st.header("射出圧縮成形 (ICM)")
+    icm = st.checkbox("圧縮成形ON", value=False)
+    if icm:
+        comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 2.5, 1.5, step=0.05)
+        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 0.9, 0.6, step=0.05)
+    else:
+        comp_factor = 1.0
+        comp_frac = 0.0
+
+    st.header("出力")
+    num_frames = st.slider("アニメーションフレーム数", 12, 60, 30)
+
+    do_run = st.button("解析実行", type="primary")
+
+
+# ----------------------- main panel -----------------------
+def build_geometry() -> Geometry:
+    if geom_source.startswith("Demo"):
+        return build_demo_geometry(
+            plate_w_mm=plate_w,
+            plate_h_mm=plate_h,
+            plate_thk_mm=plate_thk,
+            runner_thk_mm=runner_thk,
+            sprue_thk_mm=sprue_thk,
+            cell_size_mm=cell_size,
+            gate_count=gate_count,
+        )
+    if upload is None:
+        st.warning("画像をアップロードしてくれ。")
+        st.stop()
+    img_bytes = upload.read()
+    tmp_path = Path(tempfile.mkdtemp()) / upload.name
+    tmp_path.write_bytes(img_bytes)
+    g = geometry_from_image(
+        tmp_path,
+        cell_size_mm=cell_size,
+        plate_thk_mm=plate_thk,
+        invert=invert,
+        threshold=threshold,
+    )
+    if not g.gates:
+        # default gate: leftmost cavity column, vertical center
+        ys, xs = np.where(g.mask)
+        if ys.size == 0:
+            st.error("キャビティ領域が検出できなかった。しきい値か反転を見直せ。")
+            st.stop()
+        ix = int(xs.min())
+        col_ys = ys[xs == xs.min()]
+        iy = int(np.median(col_ys))
+        g.add_gate(iy, ix)
+    return g
+
+
+col_left, col_right = st.columns([1, 1.3])
+
+with col_left:
+    st.subheader("ジオメトリ プレビュー")
+    geom = build_geometry()
+    fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
+    st.write(f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³")
+    fig_buf = io.BytesIO()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5, 4), dpi=110)
+    extent = [0, geom.nx * geom.cell_size_mm, 0, geom.ny * geom.cell_size_mm]
+    im = ax.imshow(fig_data, origin="lower", extent=extent, cmap="cividis")
+    for (iy, ix) in geom.gates:
+        ax.plot((ix + 0.5) * geom.cell_size_mm, (iy + 0.5) * geom.cell_size_mm,
+                "ro", markersize=8, markeredgecolor="white")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_aspect("equal")
+    ax.set_title("thickness map [mm], gates=red")
+    fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="h [mm]")
+    fig.tight_layout()
+    fig.savefig(fig_buf, format="png")
+    plt.close(fig)
+    st.image(fig_buf.getvalue())
+
+
+if do_run:
+    with st.spinner("Hele-Shaw方程式を解いている…"):
+        solver = HeleShawSolver(
+            geometry=geom,
+            material=mat,
+            melt_temperature_K=melt_C + 273.15,
+            mold_temperature_K=mold_C + 273.15,
+            injection_velocity_mms=inj_v,
+            injection_volume_flow_cm3s=inj_Q,
+            compression_molding=icm,
+            compression_factor=comp_factor,
+            compression_fraction=comp_frac,
+        )
+        result = solver.solve(num_frames=num_frames)
+
+    with col_right:
+        st.subheader("結果")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("総充填時間 T_fill", f"{result.total_fill_time_s:.3f} s")
+        c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
+        c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        gif_path = render_fill_animation(result, tmp_dir / "fill.gif",
+                                         num_frames=num_frames, fps=8)
+        press_path = render_pressure_map(result, tmp_dir / "pressure.png")
+        weld_path = render_weldlines(result, tmp_dir / "weld.png")
+
+        st.markdown("**充填先端アニメーション**")
+        st.image(str(gif_path))
+
+        with st.expander("圧力マップ"):
+            st.image(str(press_path))
+            st.caption("0=ゲート遠端、1=ゲート。実圧力スケールではなく相対分布。")
+
+        with st.expander("等値線・ウェルドライン候補・エアトラップ"):
+            st.image(str(weld_path))
+            st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
+
+        with st.expander("生データ"):
+            st.json(result.metadata)
+else:
+    with col_right:
+        st.info("左側でパラメータを設定して「解析実行」を押せ。")
+        st.markdown(
+            """
+            **物理モデル**
+            - Hele-Shaw近似（薄肉樹脂流動）
+            - Cross-WLF粘度モデル（温度・せん断速度依存）
+            - Pseudo-Conduction法（楕円型方程式 ∇·(S∇τ)=1 の一発解）
+            - 流動先端 = τの等値面、絶対時間 = τ正規化×(V/Q)
+
+            **モデル化していないもの（重要）**
+            - 過渡熱結合（金型壁での冷却・固化層形成）
+            - 真の3D流れ（コーナー効果、ジェッティング）
+            - 結晶化・収縮・反り
+            - パッキング段階の保圧
+
+            真面目な型設計ならMoldflowなりMoldex3Dなり買え。
+            """
+        )

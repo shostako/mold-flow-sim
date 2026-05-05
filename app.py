@@ -45,7 +45,7 @@ material_keys = list(db.keys())
 
 # ----------------------- sidebar: inputs -----------------------
 with st.sidebar:
-    st.header("ジオメトリ")
+    st.header("成形品設計")
     geom_source = st.radio(
         "入力",
         [
@@ -53,35 +53,36 @@ with st.sidebar:
             "Film gate (parametric)",
             "画像から生成 (PNG/JPG)",
         ],
+        index=1,
     )
 
     if geom_source.startswith("Demo"):
-        plate_w = st.slider("製品幅 [mm]", 40.0, 240.0, 120.0, step=5.0)
+        plate_w = st.slider("製品幅 [mm]", 40.0, 300.0, 120.0, step=5.0)
         plate_h = st.slider("製品高 [mm]", 30.0, 160.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 2.0, step=0.1)
         runner_thk = st.slider("ランナー肉厚 [mm]", 1.0, 8.0, 4.0, step=0.1)
         sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
         gate_count = st.slider("ゲート数", 1, 4, 1)
         upload = None
     elif geom_source.startswith("Film gate"):
-        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 240.0, 120.0, step=5.0)
-        plate_h = st.slider("製品高 Hp [mm]", 30.0, 160.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+        plate_h = st.slider("製品高 Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 0.4, step=0.1)
 
         st.markdown("**ランナー上面投影**")
         runner_long = st.slider(
             "長辺 L_long [mm] (≤ 製品幅)",
             min_value=10.0,
             max_value=float(plate_w),
-            value=float(min(80.0, plate_w * 0.8)),
+            value=float(min(250.0, plate_w)),
             step=1.0,
         )
         runner_short_d = st.slider(
             "短辺直径 d [mm] (≤ 長辺)",
             min_value=4.0,
             max_value=float(runner_long),
-            value=float(min(12.0, runner_long * 0.4)),
+            value=float(min(10.0, runner_long)),
             step=0.5,
         )
         runner_depth = st.slider(
@@ -93,12 +94,12 @@ with st.sidebar:
         )
 
         st.markdown("**ランナー肉厚**")
-        runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 4.0, step=0.1)
+        runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 2.5, step=0.1)
         flat_ratio = st.slider(
             "厚肉部の比率 D_flat / D",
             0.0,
             1.0,
-            0.4,
+            0.35,
             step=0.05,
             help="0で全スロープ（製品まで連続変化）、1で全フラット（製品との段差大）",
         )
@@ -108,23 +109,17 @@ with st.sidebar:
             "バルブゲート径 [mm] (≤ d)",
             min_value=1.0,
             max_value=float(runner_short_d),
-            value=float(min(4.0, runner_short_d * 0.5)),
+            value=float(min(3.0, runner_short_d)),
             step=0.5,
         )
 
-        st.markdown("**製品-ランナー接続**")
-        gate_w = st.slider(
-            "ゲート幅 W_gate [mm] (≤ L_long)",
-            min_value=2.0,
-            max_value=float(runner_long),
-            value=float(min(60.0, runner_long * 0.75)),
-            step=1.0,
-        )
+        # 製品の長辺とランナー長辺は直接接続（くびれ＝ゲート土手なし）
+        gate_w = runner_long
 
         st.markdown("**フローバランサー（中央肉盗み）**")
         balancer_on = st.checkbox(
             "肉盗み（▽）を有効化",
-            value=False,
+            value=True,
             help=(
                 "ランナー中央軸に逆三角形の薄領域を作り、中央への流れを"
                 "意図的に阻害して長辺全体から均一に充填させるLGP系の手法。"
@@ -143,22 +138,22 @@ with st.sidebar:
                 "▽の高さ H_bal / D",
                 0.1,
                 0.95,
-                0.7,
+                0.70,
                 step=0.05,
             )
             bal_base_width_ratio = st.slider(
-                "底辺幅 W_bal / W_gate",
+                "底辺幅 W_bal / L_long",
                 0.1,
                 1.0,
-                0.6,
+                0.60,
                 step=0.05,
             )
             bal_target_thk = st.slider(
                 "肉盗み残り肉厚 [mm] (≤ 製品肉厚 が目安)",
-                0.2,
+                0.05,
                 float(plate_thk),
-                float(plate_thk),
-                step=0.1,
+                float(min(0.30, plate_thk)),
+                step=0.05,
                 help="製品肉厚と同じならキャビティ天井が製品平面と完全に揃う",
             )
         else:
@@ -167,13 +162,13 @@ with st.sidebar:
             bal_base_width_ratio = 0.6
             bal_target_thk = float(plate_thk)
 
-        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
+        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     else:
         upload = st.file_uploader(
             "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
         )
-        plate_thk = st.slider("均一肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+        plate_thk = st.slider("均一肉厚 [mm]", 0.2, 5.0, 2.0, step=0.1)
         cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
         invert = st.checkbox("白を内部として扱う（反転）", value=False)
         threshold = st.slider("二値化しきい値", 16, 240, 128)
@@ -188,26 +183,30 @@ with st.sidebar:
     )
 
     st.header("射出条件")
+    _melt_min = int(mat.T_melt_recommended[0] - 273.15) - 20
+    _melt_max = int(mat.T_melt_recommended[1] - 273.15) + 20
     melt_C = st.slider(
         "樹脂温度 [℃]",
-        int(mat.T_melt_recommended[0] - 273.15) - 20,
-        int(mat.T_melt_recommended[1] - 273.15) + 20,
-        int(np.mean(mat.T_melt_recommended) - 273.15),
+        _melt_min,
+        _melt_max,
+        max(_melt_min, min(260, _melt_max)),
     )
+    _mold_min = int(mat.T_mold_recommended[0] - 273.15) - 10
+    _mold_max = int(mat.T_mold_recommended[1] - 273.15) + 30
     mold_C = st.slider(
         "金型温度 [℃]",
-        int(mat.T_mold_recommended[0] - 273.15) - 10,
-        int(mat.T_mold_recommended[1] - 273.15) + 30,
-        int(np.mean(mat.T_mold_recommended) - 273.15),
+        _mold_min,
+        _mold_max,
+        max(_mold_min, min(50, _mold_max)),
     )
-    inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 100.0, step=5.0)
+    inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
     inj_Q = st.slider("射出体積流量 [cm³/s]", 1.0, 80.0, 20.0, step=1.0)
 
     st.header("射出圧縮成形 (ICM)")
-    icm = st.checkbox("圧縮成形ON", value=False)
+    icm = st.checkbox("圧縮成形ON", value=True)
     if icm:
-        comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 2.5, 1.5, step=0.05)
-        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 0.9, 0.6, step=0.05)
+        comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 2.5, 2.5, step=0.05)
+        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 0.9, 0.60, step=0.05)
     else:
         comp_factor = 1.0
         comp_frac = 0.0
@@ -284,7 +283,7 @@ def build_geometry() -> Geometry:
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
-    st.subheader("ジオメトリ プレビュー")
+    st.subheader("成形品設計図")
     geom = build_geometry()
     fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
     st.write(

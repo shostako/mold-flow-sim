@@ -14,9 +14,11 @@ import numpy as np
 import streamlit as st
 
 from core import (
+    FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
     build_demo_geometry,
+    build_film_gate_geometry,
     geometry_from_image,
     render_fill_animation,
     render_pressure_map,
@@ -44,7 +46,14 @@ material_keys = list(db.keys())
 # ----------------------- sidebar: inputs -----------------------
 with st.sidebar:
     st.header("ジオメトリ")
-    geom_source = st.radio("入力", ["Demo plate (synthetic)", "画像から生成 (PNG/JPG)"])
+    geom_source = st.radio(
+        "入力",
+        [
+            "Demo plate (synthetic)",
+            "Film gate (parametric)",
+            "画像から生成 (PNG/JPG)",
+        ],
+    )
 
     if geom_source.startswith("Demo"):
         plate_w = st.slider("製品幅 [mm]", 40.0, 240.0, 120.0, step=5.0)
@@ -54,6 +63,65 @@ with st.sidebar:
         sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
         gate_count = st.slider("ゲート数", 1, 4, 1)
+        upload = None
+    elif geom_source.startswith("Film gate"):
+        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 240.0, 120.0, step=5.0)
+        plate_h = st.slider("製品高 Hp [mm]", 30.0, 160.0, 80.0, step=5.0)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
+
+        st.markdown("**ランナー上面投影**")
+        runner_long = st.slider(
+            "長辺 L_long [mm] (≤ 製品幅)",
+            min_value=10.0,
+            max_value=float(plate_w),
+            value=float(min(80.0, plate_w * 0.8)),
+            step=1.0,
+        )
+        runner_short_d = st.slider(
+            "短辺直径 d [mm] (≤ 長辺)",
+            min_value=4.0,
+            max_value=float(runner_long),
+            value=float(min(12.0, runner_long * 0.4)),
+            step=0.5,
+        )
+        runner_depth = st.slider(
+            "ランナー高さ D [mm] (長辺〜短辺直径線距離)",
+            5.0,
+            60.0,
+            20.0,
+            step=1.0,
+        )
+
+        st.markdown("**ランナー肉厚**")
+        runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 4.0, step=0.1)
+        flat_ratio = st.slider(
+            "厚肉部の比率 D_flat / D",
+            0.0,
+            1.0,
+            0.4,
+            step=0.05,
+            help="0で全スロープ（製品まで連続変化）、1で全フラット（製品との段差大）",
+        )
+
+        st.markdown("**バルブゲート**")
+        valve_d = st.slider(
+            "バルブゲート径 [mm] (≤ d)",
+            min_value=1.0,
+            max_value=float(runner_short_d),
+            value=float(min(4.0, runner_short_d * 0.5)),
+            step=0.5,
+        )
+
+        st.markdown("**製品-ランナー接続**")
+        gate_w = st.slider(
+            "ゲート幅 W_gate [mm] (≤ L_long)",
+            min_value=2.0,
+            max_value=float(runner_long),
+            value=float(min(60.0, runner_long * 0.75)),
+            step=1.0,
+        )
+
+        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
         upload = None
     else:
         upload = st.file_uploader(
@@ -116,6 +184,26 @@ def build_geometry() -> Geometry:
             cell_size_mm=cell_size,
             gate_count=gate_count,
         )
+    if geom_source.startswith("Film gate"):
+        try:
+            cfg = FilmGateConfig(
+                plate_w_mm=plate_w,
+                plate_h_mm=plate_h,
+                plate_thk_mm=plate_thk,
+                runner_long_mm=runner_long,
+                runner_short_diameter_mm=runner_short_d,
+                runner_depth_mm=runner_depth,
+                runner_thk_mm=runner_thk_film,
+                runner_flat_depth_mm=runner_depth * flat_ratio,
+                runner_slope_depth_mm=runner_depth * (1.0 - flat_ratio),
+                valve_gate_diameter_mm=valve_d,
+                gate_width_mm=gate_w,
+                cell_size_mm=cell_size,
+            )
+            return build_film_gate_geometry(cfg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
     if upload is None:
         st.warning("画像をアップロードしてくれ。")
         st.stop()

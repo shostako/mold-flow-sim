@@ -159,6 +159,24 @@ class FilmGateConfig:
     - ``gate_width_mm`` (W_gate) must be ``≤ runner_long_mm``.
     - ``valve_gate_diameter_mm`` (d_valve) must be ``≤ runner_short_diameter_mm``.
     - ``runner_flat_depth_mm + runner_slope_depth_mm`` must equal ``runner_depth_mm``.
+    - ``0 ≤ plate_split_height_mm ≤ plate_h_mm`` (0 disables the split and
+      the plate is uniform at ``plate_thk_mm``).
+
+    Optional plate split (gate-side / far-side two-zone thickness):
+
+    When ``plate_split_height_mm > 0`` the plate body is split at
+    ``y = y_long_edge + plate_split_height_mm`` into
+
+    - a **gate-side band** of thickness ``plate_lower_thk_mm`` (occupying
+      the strip ``y_long_edge ≤ y < y_long_edge + plate_split_height_mm``)
+    - a **far-side band** of thickness ``plate_upper_thk_mm`` (the rest
+      of the plate up to ``y_plate_top``).
+
+    The runner slope zone interpolates from ``runner_thk_mm`` at the
+    ``D_flat`` boundary line down to ``plate_lower_thk_mm`` at the long
+    edge so the gate-side plate stays continuous with the runner exit.
+    ``plate_lower_thk_mm`` / ``plate_upper_thk_mm`` default to
+    ``plate_thk_mm`` when ``None``.
 
     Optional flow balancer (▽-shaped local thinning, used in LGP-style
     film-gate molds to defeat the natural radial flow pattern from the
@@ -207,6 +225,32 @@ class FilmGateConfig:
     balancer_base_distance_from_gate_mm: float = 0.0  # base y-offset from y_short_edge
     balancer_target_thickness_mm: float = 0.0  # h_bal: cavity thickness inside ▽
 
+    # ----- optional gate-side / far-side plate split -----
+    plate_split_height_mm: float = 0.0  # 0 disables the split (uniform plate)
+    plate_lower_thk_mm: float | None = None  # gate-side band (y_long .. y_long+split)
+    plate_upper_thk_mm: float | None = None  # far-side band (y_long+split .. y_plate_top)
+
+    def resolved_plate_zones(self) -> tuple[float, float, float]:
+        """Return ``(split_height_mm, lower_thk_mm, upper_thk_mm)``.
+
+        For uniform mode (``plate_split_height_mm == 0``) the result is
+        ``(0.0, plate_thk_mm, plate_thk_mm)``. Otherwise ``None`` fields
+        fall back to ``plate_thk_mm``.
+        """
+        if self.plate_split_height_mm > 0:
+            lower = (
+                self.plate_lower_thk_mm
+                if self.plate_lower_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            upper = (
+                self.plate_upper_thk_mm
+                if self.plate_upper_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            return float(self.plate_split_height_mm), float(lower), float(upper)
+        return 0.0, float(self.plate_thk_mm), float(self.plate_thk_mm)
+
     def validate(self) -> None:
         eps = 1e-6
         if self.runner_long_mm > self.plate_w_mm + eps:
@@ -251,6 +295,19 @@ class FilmGateConfig:
                 raise ValueError(f"{name} must be positive (got {val})")
         if self.runner_flat_depth_mm < 0 or self.runner_slope_depth_mm < 0:
             raise ValueError("runner_flat_depth_mm and runner_slope_depth_mm must be ≥ 0")
+
+        # plate split validation
+        if self.plate_split_height_mm < 0:
+            raise ValueError(f"plate_split_height_mm ({self.plate_split_height_mm}) must be ≥ 0")
+        if self.plate_split_height_mm > self.plate_h_mm + eps:
+            raise ValueError(
+                f"plate_split_height_mm ({self.plate_split_height_mm}) must be ≤ "
+                f"plate_h_mm ({self.plate_h_mm})"
+            )
+        if self.plate_lower_thk_mm is not None and self.plate_lower_thk_mm <= 0:
+            raise ValueError(f"plate_lower_thk_mm ({self.plate_lower_thk_mm}) must be > 0 when set")
+        if self.plate_upper_thk_mm is not None and self.plate_upper_thk_mm <= 0:
+            raise ValueError(f"plate_upper_thk_mm ({self.plate_upper_thk_mm}) must be > 0 when set")
 
         if self.balancer_enabled:
             if self.balancer_target_thickness_mm <= 0:
@@ -304,8 +361,14 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
 
     - half-circle and trapezoid flat zone (lower ``D_flat``): ``h_runner``
     - trapezoid slope zone (upper ``D_slope``): linear interpolation from
-      ``h_runner`` (at the boundary line) to ``plate_thk_mm`` (at the long edge)
-    - plate body: ``plate_thk_mm``
+      ``h_runner`` (at the boundary line) to ``plate_lower_thk_mm`` (at the
+      long edge, equal to ``plate_thk_mm`` in uniform mode)
+    - plate body, gate-side band (height ``plate_split_height_mm``):
+      ``plate_lower_thk_mm``
+    - plate body, far-side band: ``plate_upper_thk_mm``
+
+    In uniform mode (``plate_split_height_mm == 0``) both bands collapse
+    to ``plate_thk_mm``.
 
     Plate-runner connection:
 
@@ -326,7 +389,7 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
     D_flat = cfg.runner_flat_depth_mm
     D_slope = cfg.runner_slope_depth_mm
     h_runner = cfg.runner_thk_mm
-    h_plate = cfg.plate_thk_mm
+    split_h, h_plate_lower, h_plate_upper = cfg.resolved_plate_zones()
     W_gate = cfg.gate_width_mm
     d_valve = cfg.valve_gate_diameter_mm
     dx = cfg.cell_size_mm
@@ -375,15 +438,21 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
     thk[flat_zone] = h_runner
 
     # trapezoid slope zone (y_short + D_flat < y ≤ y_long)
+    # — interpolate from h_runner down to the gate-side plate thickness so
+    #   the runner exit is continuous with the plate's gate-side band.
     slope_zone = in_trapezoid & (yy > y_short + D_flat)
     if D_slope > 1e-12:
         t_slope = np.clip((yy - (y_short + D_flat)) / D_slope, 0.0, 1.0)
     else:
         t_slope = np.ones_like(yy)
-    thk_slope = h_runner + (h_plate - h_runner) * t_slope
+    thk_slope = h_runner + (h_plate_lower - h_runner) * t_slope
     thk[slope_zone] = thk_slope[slope_zone]
 
-    thk[in_plate] = h_plate
+    # plate body — split into gate-side / far-side bands when split_h > 0
+    thk[in_plate] = h_plate_lower
+    if split_h > 0:
+        upper_zone = in_plate & (yy >= y_long + split_h)
+        thk[upper_zone] = h_plate_upper
 
     # --- optional flow balancer (▽ local thinning) ---
     if cfg.balancer_enabled:

@@ -43,10 +43,11 @@ git clone https://github.com/shostako/mold-flow-sim.git
 cd mold-flow-sim
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .                     # ランタイムのみ
+pip install -e ".[dev]"              # 開発用（ruff, pytest 含む）
 ```
 
-Python 3.11 以上推奨。
+Python 3.11 以上必須。
 
 ## 実行
 

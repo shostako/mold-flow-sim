@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mold-flow-sim"
+version = "0.1.0"
+description = "Simplified injection-molding flow analyzer (Hele-Shaw + Cross-WLF + Pseudo-Conduction). Educational / early-screening use."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "shostako" }]
+keywords = ["injection-molding", "cae", "hele-shaw", "flow-analysis", "simulation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "Pillow>=10.0",
+    "streamlit>=1.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Repository = "https://github.com/shostako/mold-flow-sim"
+Issues = "https://github.com/shostako/mold-flow-sim/issues"
+
+[tool.setuptools]
+packages = ["core"]
+
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+
+# ---------- ruff ----------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "outputs", "assets"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]  # line-length is enforced by the formatter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------- pytest ----------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:matplotlib",
+    "ignore::DeprecationWarning:streamlit",
+]

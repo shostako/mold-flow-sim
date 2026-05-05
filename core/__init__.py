@@ -9,7 +9,14 @@ from .geometry import (
 )
 from .materials import MaterialDB, cross_wlf_viscosity
 from .solver import FlowResult, HeleShawSolver
-from .visualizer import export_frames, render_fill_animation, render_pressure_map, render_weldlines
+from .visualizer import (
+    export_frames,
+    render_core_layer_map,
+    render_fill_animation,
+    render_pressure_map,
+    render_skin_layer_map,
+    render_weldlines,
+)
 
 __all__ = [
     "MaterialDB",
@@ -24,5 +31,7 @@ __all__ = [
     "render_fill_animation",
     "render_pressure_map",
     "render_weldlines",
+    "render_skin_layer_map",
+    "render_core_layer_map",
     "export_frames",
 ]

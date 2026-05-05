@@ -3,6 +3,7 @@
     "model": "Cross-WLF",
     "note": "教育・概念検証用の代表値。実機検討にはベンダー実測データを使うこと。",
     "equation": "eta(gamma_dot, T) = eta0(T) / (1 + (eta0*gamma_dot / tau_star)^(1-n)); eta0(T) = D1 * exp(-A1*(T-T*)/(A2 + (T-T*))); T* = D2 + D3*P",
+    "skin_layer": "Skin layer growth approximated by Neumann/Stefan form s(t) = c_skin * sqrt(alpha * t); thermal_diffusivity_m2_s = alpha [m^2/s]. Default c_skin is set in the solver and may be overridden per-material in future revisions.",
     "units": {
       "T": "K",
       "P": "Pa",
@@ -11,7 +12,8 @@
       "A1": "-",
       "A2": "K",
       "D2": "K",
-      "D3": "K/Pa"
+      "D3": "K/Pa",
+      "thermal_diffusivity_m2_s": "m^2/s"
     }
   },
   "materials": {
@@ -26,7 +28,8 @@
       "A2_tilde": 51.6,
       "T_melt_recommended": [453.15, 533.15],
       "T_mold_recommended": [293.15, 333.15],
-      "density_melt_kgm3": 738
+      "density_melt_kgm3": 738,
+      "thermal_diffusivity_m2_s": 9.0e-8
     },
     "ABS": {
       "name": "ABS (generic)",
@@ -39,7 +42,8 @@
       "A2_tilde": 51.6,
       "T_melt_recommended": [493.15, 543.15],
       "T_mold_recommended": [313.15, 353.15],
-      "density_melt_kgm3": 938
+      "density_melt_kgm3": 938,
+      "thermal_diffusivity_m2_s": 1.0e-7
     },
     "PC": {
       "name": "Polycarbonate (generic)",
@@ -52,7 +56,8 @@
       "A2_tilde": 51.6,
       "T_melt_recommended": [553.15, 603.15],
       "T_mold_recommended": [353.15, 393.15],
-      "density_melt_kgm3": 1085
+      "density_melt_kgm3": 1085,
+      "thermal_diffusivity_m2_s": 1.3e-7
     },
     "PA66": {
       "name": "Polyamide 66 (generic)",
@@ -65,7 +70,8 @@
       "A2_tilde": 51.6,
       "T_melt_recommended": [543.15, 583.15],
       "T_mold_recommended": [333.15, 363.15],
-      "density_melt_kgm3": 980
+      "density_melt_kgm3": 980,
+      "thermal_diffusivity_m2_s": 1.0e-7
     },
     "PMMA": {
       "name": "Polymethyl methacrylate (generic)",
@@ -78,7 +84,8 @@
       "A2_tilde": 51.6,
       "T_melt_recommended": [503.15, 553.15],
       "T_mold_recommended": [333.15, 363.15],
-      "density_melt_kgm3": 1080
+      "density_melt_kgm3": 1080,
+      "thermal_diffusivity_m2_s": 1.1e-7
     }
   }
 }

@@ -26,17 +26,17 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 24 tests
+.venv/bin/pytest tests/                        # 39 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
 ```
 
 `run_demo.py` のケース定義は2系統：
-- `DEMO_CASES`（7件）— `build_demo_geometry` 系（プレート+ランナー+スプルー合成形状）
-- `FILM_GATE_CASES`（3件）— `build_film_gate_geometry` 系（パラメトリックフィルムゲート）
+- `DEMO_CASES`（8件）— `build_demo_geometry` 系（プレート+ランナー+スプルー合成形状）。`PP_skin_layer` がスキン層モデル ON のサンプル
+- `FILM_GATE_CASES`（4件）— `build_film_gate_geometry` 系（パラメトリックフィルムゲート、バランサー含む）
 
-`--cases` はどちらの系列のキーも受け付ける。出力先は `outputs/<label>/{fill.gif, pressure.png, weld_airtraps.png, frames/}`。`outputs/` は gitignore 済み。
+`--cases` はどちらの系列のキーも受け付ける。出力先は `outputs/<label>/{fill.gif, pressure.png, weld_airtraps.png, frames/}`、スキン層 ON ならさらに `skin.png / core.png` が追加される。`outputs/` は gitignore 済み。
 
 ## アーキテクチャ
 
@@ -68,6 +68,24 @@ S = h³ / (12·η_eff)   ← Hele-Shaw コンダクタンス
 - 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を `compression_factor` 倍に膨らませて、`T_fill` を `compression_fraction/compression_factor + (1-compression_fraction)` で短縮する**等価モデル**。
 - ウェルドライン: 8近傍中6個以上が自分より小さい `τ` を持つセル（合流リッジヒューリスティック）。
 - エアトラップ: `τ` の局所最大点（最後に充填されるセル）。
+
+#### スキン層モデル（`skin_layer_enabled=True`）
+
+壁面で樹脂が固化して育つスキン層を Stefan/Neumann 形で取り込む。コアのバルク温度低下は引き続き無視（Neumann 近似で熱結合を切離）。
+
+```
+s(t) = c_skin · √(α · t)              ← スキン厚さ [m]
+h_core(x,y) = max(h - 2·s, h_min)     ← コア層（流動経路）
+S = h_core³ / (12·η)                  ← Hele-Shaw コンダクタンス
+```
+
+- `α` (= `material.thermal_diffusivity_m2_s`) は樹脂の熱拡散率。`data/materials.json` に5樹脂分。代表値（PP=9e-8, ABS=1e-7, PC=1.3e-7, PA66=1e-7, PMMA=1.1e-7 m²/s）。
+- `c_skin` (= `skin_growth_constant`) は無次元の成長定数。`0.0` で OFF と数値同一、`1.0` 付近が物理的代表値。
+- `s` は τ に依存し、τ は `S(h_core)` に依存するので **fixed-point 反復**で釣り合わせる：1) baseline (`h_core=h`) で τ_baseline を解く → 2) `t_arrival = (τ/τ_max)·T_fill` から `s_new`、`h_core_new` を計算 → 3) 新しい `S` で τ を再解 → 4) `‖Δτ‖` が `skin_convergence_tol` を下回るか `skin_max_iterations` に達するまで反復。
+- **絶対時間スケーリング**: 反復後の `τ_max` が baseline の `τ_max_0` に対して何倍に膨らんだかで `T_fill` を比例倍する（圧力一定近似 = 流量が抵抗増分だけ細る）。
+- **short shot**: 反復後に `h - 2·s ≤ h_min` となったセルを `short_shot_mask` に記録。本来流路が遮断されるが、数値安定性のため `h_core` には `min_core_thickness_mm` 以上のフロアが残る。可視化で赤マーク。
+- 出力: `FlowResult.skin_thickness_mm`, `core_thickness_mm`, `short_shot_mask`、metadata に `skin_iterations / skin_converged / T_fill_inflation / short_shot_cells / short_shot_fraction`。
+- 可視化: `render_skin_layer_map(result, path)` でスキン厚マップ、`render_core_layer_map(result, path)` でコア層 + short shot。
 
 ### `build_film_gate_geometry` の形状仕様
 
@@ -119,7 +137,7 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ### 意図的にモデル化していないもの
 
-- 過渡熱結合（壁面冷却・固化層形成）
+- コアのバルク温度低下と粘度の動的更新（スキン層は Stefan/Neumann 近似で扱うが、コア温度は melt のまま固定）
 - 真の3D流れ、ジェッティング、コーナー効果
 - 結晶化・収縮反り
 - パッキング段階の保圧
@@ -130,13 +148,14 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ## テスト
 
-`tests/` 配下に3ファイル、合計 **24テスト**：
+`tests/` 配下に4ファイル、合計 **39テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
-- `test_geometry_film_gate.py` — 15件: シルエット / 厚み / ゲート土手 / 体積スケール / 5パラメータ検証 / solver 統合
+- `test_geometry_film_gate.py` — 24件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー / solver 統合
+- `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 
-新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py`。
+新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`。
 
 ## 開発ワークフロー
 
@@ -157,7 +176,7 @@ git checkout main && git pull
 **push 前に必ず**:
 - `ruff check .` （CI と同じ lint）
 - `ruff format --check .` （format check は CI で別ステップ。`ruff check` だけでは検出されない）
-- `pytest tests/` （24件全部 pass を確認）
+- `pytest tests/` （39件全部 pass を確認）
 
 CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上記3つを走らせる。Node.js 20 actions の deprecation warning が出るが2026-06-02までは無害。
 

@@ -26,8 +26,10 @@ from core import (
     build_demo_geometry,
     build_film_gate_geometry,
     export_frames,
+    render_core_layer_map,
     render_fill_animation,
     render_pressure_map,
+    render_skin_layer_map,
     render_weldlines,
 )
 
@@ -45,6 +47,10 @@ def _solve_and_export(
     compression: bool = False,
     compression_factor: float = 1.5,
     compression_fraction: float = 0.6,
+    skin_layer: bool = False,
+    skin_growth_constant: float = 0.5,
+    skin_max_iterations: int = 5,
+    skin_convergence_tol: float = 1e-3,
     num_frames: int = 30,
 ) -> None:
     db = MaterialDB()
@@ -58,12 +64,21 @@ def _solve_and_export(
         compression_molding=compression,
         compression_factor=compression_factor,
         compression_fraction=compression_fraction,
+        skin_layer_enabled=skin_layer,
+        skin_growth_constant=skin_growth_constant,
+        skin_max_iterations=skin_max_iterations,
+        skin_convergence_tol=skin_convergence_tol,
     )
     print(f"[{label}] solving... cells={int(geom.mask.sum())} V={geom.volume_cm3():.2f} cm^3")
     result = solver.solve(num_frames=num_frames)
+    extra = ""
+    if skin_layer:
+        short = int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
+        inflation = result.metadata.get("T_fill_inflation", 1.0)
+        extra = f"  skin: x{inflation:.2f} T_fill, short_shot {short}/{int(geom.mask.sum())}"
     print(
         f"[{label}] T_fill={result.total_fill_time_s:.3f} s  "
-        f"eta_eff={result.viscosity_Pa_s:.1f} Pa.s"
+        f"eta_eff={result.viscosity_Pa_s:.1f} Pa.s{extra}"
     )
 
     out_dir = out_root / label
@@ -72,6 +87,9 @@ def _solve_and_export(
     render_fill_animation(result, out_dir / "fill.gif", num_frames=num_frames, fps=8)
     render_pressure_map(result, out_dir / "pressure.png")
     render_weldlines(result, out_dir / "weld_airtraps.png")
+    if skin_layer and result.skin_thickness_mm is not None:
+        render_skin_layer_map(result, out_dir / "skin.png")
+        render_core_layer_map(result, out_dir / "core.png")
     export_frames(result, out_dir / "frames", num_frames=8)
 
 
@@ -158,6 +176,16 @@ DEMO_CASES: dict[str, dict] = {
         inj_velocity_mms=100.0,
         inj_Q_cm3s=20.0,
         gate_count=2,
+    ),
+    "PP_skin_layer": dict(
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+        plate_thk_mm=1.5,  # thinner plate so the skin layer is visible
+        skin_layer=True,
+        skin_growth_constant=0.5,
     ),
 }
 

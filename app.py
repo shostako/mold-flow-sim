@@ -20,8 +20,10 @@ from core import (
     build_demo_geometry,
     build_film_gate_geometry,
     geometry_from_image,
+    render_core_layer_map,
     render_fill_animation,
     render_pressure_map,
+    render_skin_layer_map,
     render_weldlines,
 )
 from core.geometry import Geometry
@@ -202,6 +204,46 @@ with st.sidebar:
     inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
     inj_Q = st.slider("射出体積流量 [cm³/s]", 1.0, 80.0, 20.0, step=1.0)
 
+    st.header("スキン層モデル")
+    skin_on = st.checkbox(
+        "スキン層形成を考慮",
+        value=True,
+        help=(
+            "金型壁面で樹脂が固化してスキン層が育つ現象を Stefan/Neumann 形 "
+            "s(t) = c_skin · √(α·t) で取り込む。流路はコア層 h_core = h - 2·s "
+            "のみを通る。コアが閉塞したセルは short shot 候補。バルクのコア "
+            "温度低下や粘度の動的追跡は引き続き無視。"
+        ),
+    )
+    if skin_on:
+        c_skin = st.slider(
+            "スキン層成長定数 c_skin",
+            0.0,
+            2.0,
+            0.5,
+            step=0.05,
+            help="0で OFF と同等。1.0 付近が物理的代表値。薄肉ほど効果大。",
+        )
+        skin_max_iter = st.slider(
+            "fixed-point 反復上限",
+            1,
+            10,
+            5,
+            help="τ ↔ h_core 結合の反復回数。3〜5で十分なケースが多い。",
+        )
+        skin_tol_log10 = st.slider(
+            "収束判定 log10(tol)",
+            -5,
+            -1,
+            -3,
+            help="τ場の相対L2変化が 10^tol を下回ったら収束。",
+        )
+        skin_tol = 10.0 ** float(skin_tol_log10)
+    else:
+        c_skin = 0.0
+        skin_max_iter = 5
+        skin_tol = 1e-3
+
     st.header("射出圧縮成形 (ICM)")
     icm = st.checkbox("圧縮成形ON", value=True)
     if icm:
@@ -326,6 +368,10 @@ if do_run:
             compression_molding=icm,
             compression_factor=comp_factor,
             compression_fraction=comp_frac,
+            skin_layer_enabled=skin_on,
+            skin_growth_constant=c_skin,
+            skin_max_iterations=skin_max_iter,
+            skin_convergence_tol=skin_tol,
         )
         result = solver.solve(num_frames=num_frames)
 
@@ -335,6 +381,40 @@ if do_run:
         c1.metric("総充填時間 T_fill", f"{result.total_fill_time_s:.3f} s")
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
+
+        if skin_on:
+            inflation = result.metadata.get("T_fill_inflation", 1.0)
+            short_count = (
+                int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
+            )
+            cells_total = int(geom.mask.sum())
+            short_pct = 100.0 * short_count / max(cells_total, 1)
+            iters = result.metadata.get("skin_iterations", 0)
+            converged = result.metadata.get("skin_converged", False)
+            s1, s2, s3 = st.columns(3)
+            s1.metric(
+                "T_fill 増分（スキン層）",
+                f"×{inflation:.2f}",
+                help="スキン層なしの T_fill_baseline に対する倍率（圧力一定近似）",
+            )
+            s2.metric(
+                "short shot セル",
+                f"{short_count} / {cells_total}",
+                f"{short_pct:.1f} %",
+                delta_color="inverse",
+            )
+            s3.metric(
+                "fixed-point 反復",
+                f"{iters} 回",
+                "収束" if converged else "上限到達",
+                delta_color="off" if converged else "inverse",
+            )
+            if result.skin_thickness_mm is not None:
+                s_max_mm = float(np.nanmax(result.skin_thickness_mm[geom.mask]))
+                h_core_min = float(np.nanmin(result.core_thickness_mm[geom.mask]))
+                st.caption(
+                    f"スキン最大 {s_max_mm * 1e3:.1f} μm,  コア最小 h_core = {h_core_min:.3f} mm"
+                )
 
         tmp_dir = Path(tempfile.mkdtemp())
         gif_path = render_fill_animation(result, tmp_dir / "fill.gif", num_frames=num_frames, fps=8)
@@ -352,6 +432,17 @@ if do_run:
             st.image(str(weld_path))
             st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
 
+        if skin_on and result.skin_thickness_mm is not None:
+            skin_path = render_skin_layer_map(result, tmp_dir / "skin.png")
+            core_path = render_core_layer_map(result, tmp_dir / "core.png")
+            with st.expander("スキン層 / コア層 / short shot"):
+                st.image(str(skin_path))
+                st.caption("スキン層厚さ s(x,y) [mm]。流動が遅いほど・薄肉ほど s が大きい。")
+                st.image(str(core_path))
+                st.caption(
+                    "コア層 h_core = h - 2s。赤マーク = スキン同士が会合した short shot 候補。"
+                )
+
         with st.expander("生データ"):
             st.json(result.metadata)
 else:
@@ -364,9 +455,12 @@ else:
             - Cross-WLF粘度モデル（温度・せん断速度依存）
             - Pseudo-Conduction法（楕円型方程式 ∇·(S∇τ)=1 の一発解）
             - 流動先端 = τの等値面、絶対時間 = τ正規化×(V/Q)
+            - スキン層モデル（オプション）：Stefan/Neumann 形 s(t)=c_skin·√(αt)
+              で壁面固化を取り込み、コア層 h_core = h - 2s のみが流路として効く。
+              τ ↔ h_core を fixed-point 反復で釣り合わせる。
 
             **モデル化していないもの（重要）**
-            - 過渡熱結合（金型壁での冷却・固化層形成）
+            - コアのバルク温度低下（粘度の動的更新は無し、Neumann近似で熱結合を切離）
             - 真の3D流れ（コーナー効果、ジェッティング）
             - 結晶化・収縮・反り
             - パッキング段階の保圧

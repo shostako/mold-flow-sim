@@ -213,6 +213,30 @@ def _film_gate_cfg_full_aperture_thin_runner() -> FilmGateConfig:
     )
 
 
+def _film_gate_cfg_with_balancer() -> FilmGateConfig:
+    """LGP-style flow balancer: same outer geometry as the default case
+    but with a ▽-shaped local thinning carved in the runner centerline."""
+    return FilmGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=2.0,
+        runner_long_mm=80.0,
+        runner_short_diameter_mm=12.0,
+        runner_depth_mm=20.0,
+        runner_thk_mm=4.0,
+        runner_flat_depth_mm=8.0,
+        runner_slope_depth_mm=12.0,
+        valve_gate_diameter_mm=4.0,
+        gate_width_mm=60.0,
+        cell_size_mm=1.0,
+        balancer_enabled=True,
+        balancer_base_width_mm=36.0,  # 0.6 × W_gate
+        balancer_height_mm=14.0,  # 0.7 × D
+        balancer_base_distance_from_gate_mm=20.0,  # base at long edge (= D)
+        balancer_target_thickness_mm=2.0,  # = plate_thk (parallel to plate)
+    )
+
+
 FILM_GATE_CASES: dict[str, dict] = {
     "FilmGate_PP_default": dict(
         cfg=_film_gate_cfg_default(),
@@ -232,6 +256,14 @@ FILM_GATE_CASES: dict[str, dict] = {
     ),
     "FilmGate_PP_full_thin": dict(
         cfg=_film_gate_cfg_full_aperture_thin_runner(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+    ),
+    "FilmGate_PP_balancer": dict(
+        cfg=_film_gate_cfg_with_balancer(),
         material_key="PP",
         melt_K=503.15,
         mold_K=313.15,

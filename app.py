@@ -121,6 +121,52 @@ with st.sidebar:
             step=1.0,
         )
 
+        st.markdown("**フローバランサー（中央肉盗み）**")
+        balancer_on = st.checkbox(
+            "肉盗み（▽）を有効化",
+            value=False,
+            help=(
+                "ランナー中央軸に逆三角形の薄領域を作り、中央への流れを"
+                "意図的に阻害して長辺全体から均一に充填させるLGP系の手法。"
+            ),
+        )
+        if balancer_on:
+            bal_offset_ratio = st.slider(
+                "底辺位置 / D（ゲートからの距離 ÷ ランナー深さ）",
+                0.5,
+                1.0,
+                1.0,
+                step=0.05,
+                help="1.0で底辺が長辺と一致（製品まで肉盗みが届く）",
+            )
+            bal_height_ratio = st.slider(
+                "▽の高さ H_bal / D",
+                0.1,
+                0.95,
+                0.7,
+                step=0.05,
+            )
+            bal_base_width_ratio = st.slider(
+                "底辺幅 W_bal / W_gate",
+                0.1,
+                1.0,
+                0.6,
+                step=0.05,
+            )
+            bal_target_thk = st.slider(
+                "肉盗み残り肉厚 [mm] (≤ 製品肉厚 が目安)",
+                0.2,
+                float(plate_thk),
+                float(plate_thk),
+                step=0.1,
+                help="製品肉厚と同じならキャビティ天井が製品平面と完全に揃う",
+            )
+        else:
+            bal_offset_ratio = 1.0
+            bal_height_ratio = 0.7
+            bal_base_width_ratio = 0.6
+            bal_target_thk = float(plate_thk)
+
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
         upload = None
     else:
@@ -199,6 +245,11 @@ def build_geometry() -> Geometry:
                 valve_gate_diameter_mm=valve_d,
                 gate_width_mm=gate_w,
                 cell_size_mm=cell_size,
+                balancer_enabled=balancer_on,
+                balancer_base_width_mm=gate_w * bal_base_width_ratio,
+                balancer_height_mm=runner_depth * bal_height_ratio,
+                balancer_base_distance_from_gate_mm=runner_depth * bal_offset_ratio,
+                balancer_target_thickness_mm=bal_target_thk,
             )
             return build_film_gate_geometry(cfg)
         except ValueError as exc:

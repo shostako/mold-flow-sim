@@ -24,6 +24,10 @@ class Material:
     T_melt_recommended: tuple[float, float]
     T_mold_recommended: tuple[float, float]
     density_melt_kgm3: float
+    # Thermal diffusivity α [m^2/s], used by the skin-layer (Stefan/Neumann)
+    # model: s(t) = c_skin · sqrt(α · t). Generic values for educational use;
+    # 1e-7 m^2/s is a typical melt-polymer order of magnitude.
+    thermal_diffusivity_m2_s: float = 1.0e-7
 
 
 class MaterialDB:
@@ -52,6 +56,7 @@ class MaterialDB:
                 T_melt_recommended=tuple(m["T_melt_recommended"]),
                 T_mold_recommended=tuple(m["T_mold_recommended"]),
                 density_melt_kgm3=m.get("density_melt_kgm3", 1000.0),
+                thermal_diffusivity_m2_s=m.get("thermal_diffusivity_m2_s", 1.0e-7),
             )
 
     @property

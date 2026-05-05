@@ -248,6 +248,130 @@ def render_weldlines(
     return output_path
 
 
+def render_skin_layer_map(
+    result: FlowResult,
+    output_path: str | Path,
+    cmap: str = "magma",
+) -> Path:
+    """Plot the skin-layer thickness s(x,y) [mm] computed by the solver.
+
+    Returns the original output path even when the result has no skin
+    field (skin-layer model disabled); in that case no file is written.
+    """
+    output_path = Path(output_path)
+    if result.skin_thickness_mm is None:
+        return output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    s_field = np.where(g.mask, result.skin_thickness_mm, np.nan)
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+    s_max = float(np.nanmax(s_field)) if np.any(~np.isnan(s_field)) else 0.0
+    if s_max <= 0:
+        s_max = 1e-6
+    norm = mcolors.Normalize(vmin=0.0, vmax=s_max)
+    im = ax.imshow(
+        s_field,
+        origin="lower",
+        extent=extent,
+        cmap=cmap,
+        norm=norm,
+        interpolation="nearest",
+    )
+    for iy, ix in g.gates:
+        ax.plot(
+            (ix + 0.5) * g.cell_size_mm,
+            (iy + 0.5) * g.cell_size_mm,
+            marker="o",
+            color="lime",
+            markersize=8,
+            markeredgecolor="black",
+        )
+    ax.set_xlim(0, extent[1])
+    ax.set_ylim(0, extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title(
+        f"Skin layer thickness s(x,y) — max {s_max * 1e3:.1f} μm "
+        f"(c_skin={result.metadata.get('skin_growth_constant', '?')})"
+    )
+    cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("skin thickness [mm]")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_core_layer_map(
+    result: FlowResult,
+    output_path: str | Path,
+    cmap: str = "viridis",
+) -> Path:
+    """Plot the live core thickness h_core(x,y) = h - 2*s [mm]."""
+    output_path = Path(output_path)
+    if result.core_thickness_mm is None:
+        return output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    h_core = np.where(g.mask, result.core_thickness_mm, np.nan)
+    h_open = np.where(g.mask, g.thickness_mm, np.nan)
+    h_max = float(np.nanmax(h_open)) if np.any(~np.isnan(h_open)) else 1.0
+    if h_max <= 0:
+        h_max = 1.0
+    norm = mcolors.Normalize(vmin=0.0, vmax=h_max)
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+    im = ax.imshow(
+        h_core,
+        origin="lower",
+        extent=extent,
+        cmap=cmap,
+        norm=norm,
+        interpolation="nearest",
+    )
+    for iy, ix in g.gates:
+        ax.plot(
+            (ix + 0.5) * g.cell_size_mm,
+            (iy + 0.5) * g.cell_size_mm,
+            marker="o",
+            color="red",
+            markersize=8,
+            markeredgecolor="white",
+        )
+    if result.short_shot_mask is not None and result.short_shot_mask.any():
+        iy_arr, ix_arr = np.where(result.short_shot_mask)
+        ax.scatter(
+            (ix_arr + 0.5) * g.cell_size_mm,
+            (iy_arr + 0.5) * g.cell_size_mm,
+            marker="s",
+            color="#e74c3c",
+            s=4,
+            linewidths=0,
+            label="short shot",
+        )
+        ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlim(0, extent[1])
+    ax.set_ylim(0, extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    short_count = int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
+    ax.set_title(f"Core thickness h_core = h - 2s [mm]  (short shot cells: {short_count})")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("h_core [mm]")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
 def export_frames(
     result: FlowResult,
     output_dir: str | Path,

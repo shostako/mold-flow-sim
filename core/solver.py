@@ -15,11 +15,30 @@ total fill time T_fill = V_cavity / Q reproduces the time evolution of
 the flow front as level sets of tau.
 
 Caveats:
-- Iso-thermal (no thermal coupling).
 - Single representative shear rate (no local rate iteration).
 - Compression molding modeled as an effective thickness inflation
   during the first compress_fraction of the fill, lowering local
   flow resistance.
+
+Skin-layer model (optional, ``skin_layer_enabled=True``):
+
+The skin layer that forms when melt contacts the cold mold wall is
+approximated by a Stefan/Neumann form
+
+    s(t) = c_skin * sqrt(alpha * t)
+
+where ``alpha`` is the material's thermal diffusivity and ``c_skin``
+is a non-dimensional growth constant. The flow conducts only through
+the live core ``h_core = max(h - 2 * s, h_min)`` and the conductance
+becomes ``S = h_core^3 / (12 * eta)``. Because ``s`` depends on the
+arrival time and the arrival time depends on ``S``, the fields are
+solved by fixed-point iteration. When the skin layers from opposite
+walls meet (``h - 2 * s <= h_min``) the cell is flagged as a
+short-shot candidate and the absolute fill time ``T_fill`` is scaled
+up by the relative growth of ``tau_max`` (constant-pressure proxy:
+the inflated runtime mirrors the resistance increase). Bulk-melt
+cooling and dynamic viscosity coupling remain disabled — the model
+captures the wall-side freezing front in isolation.
 """
 
 from __future__ import annotations
@@ -41,10 +60,14 @@ class FlowResult:
     pressure_norm: np.ndarray  # normalized pressure (1 at gate, 0 at last fill)
     weld_score: np.ndarray  # heuristic weld-line indicator [0..1]
     air_traps: np.ndarray  # bool mask of air-trap cells (local tau maxima)
-    total_fill_time_s: float  # T_fill from volume / Q
+    total_fill_time_s: float  # T_fill from volume / Q (scaled when skin layer ON)
     viscosity_Pa_s: float  # effective representative viscosity used
     geometry: Geometry
     metadata: dict
+    # Skin-layer model outputs (None when ``skin_layer_enabled`` is False).
+    skin_thickness_mm: np.ndarray | None = None  # s(x,y) [mm]
+    core_thickness_mm: np.ndarray | None = None  # h_core(x,y) = h - 2*s [mm]
+    short_shot_mask: np.ndarray | None = None  # cells where the two skins met
 
 
 @dataclass
@@ -63,6 +86,13 @@ class HeleShawSolver:
 
     pressure_iters: int = 1  # placeholder for future iteration on viscosity
 
+    # ----- skin-layer (Stefan/Neumann) model -----
+    skin_layer_enabled: bool = False
+    skin_growth_constant: float = 1.0  # c_skin in s(t) = c_skin * sqrt(alpha * t)
+    skin_max_iterations: int = 5  # fixed-point iterations for tau ↔ h_core coupling
+    skin_convergence_tol: float = 1e-3  # relative L2 change in tau between iterations
+    min_core_thickness_mm: float = 0.01  # h_core floor; cells at this floor are short shots
+
     def _effective_viscosity(self) -> float:
         # bulk temperature ~ weighted average (melt dominates while flowing)
         T_bulk = 0.7 * self.melt_temperature_K + 0.3 * self.mold_temperature_K
@@ -73,12 +103,32 @@ class HeleShawSolver:
         eta = float(cross_wlf_viscosity(self.material, T_bulk, gamma_dot, 0.0))
         return eta
 
-    def _conductance_field(self, eta: float) -> np.ndarray:
-        """S = h^3 / (12 * eta) in SI units; h in m, eta in Pa.s, S in m^3/(Pa.s)."""
+    def _open_thickness_field(self) -> np.ndarray:
+        """Cavity thickness used as the skin-free reference (mm).
+
+        Equivalent to ``geometry.thickness_mm``, expanded by
+        ``compression_factor`` when compression molding is active. The
+        skin-layer model carves into this reference field.
+        """
         h_mm = self.geometry.thickness_mm.copy()
         if self.compression_molding:
-            # uniform thickness inflation during open state — increases conductance
             h_mm = h_mm * float(self.compression_factor)
+        return h_mm
+
+    def _conductance_field(
+        self,
+        eta: float,
+        thickness_mm: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """S = h^3 / (12 * eta) in SI units; h in m, eta in Pa.s, S in m^3/(Pa.s).
+
+        ``thickness_mm`` is the local effective gap (e.g. ``h_core`` when the
+        skin-layer model is active). Defaults to the open cavity thickness.
+        """
+        if thickness_mm is None:
+            h_mm = self._open_thickness_field()
+        else:
+            h_mm = thickness_mm
         h_m = h_mm * 1e-3
         S = (h_m**3) / (12.0 * max(eta, 1e-3))
         S[~self.geometry.mask] = 0.0
@@ -132,57 +182,168 @@ class HeleShawSolver:
 
         return A.tocsr(), b, idx
 
+    def _solve_tau_field(self, S: np.ndarray, dirichlet: np.ndarray) -> tuple[np.ndarray, float]:
+        """Solve the elliptic system for a given conductance field S.
+
+        Returns ``(tau_grid, tau_max)`` where ``tau_grid`` is NaN outside
+        the cavity mask and ``tau_max`` is positive (clamped to 1.0 if the
+        solve degenerates).
+        """
+        A, b, _ = self._build_linear_system(S, dirichlet)
+        tau_vec = spla.spsolve(A, b)
+        ny, nx = self.geometry.shape
+        tau = np.full(self.geometry.shape, np.nan, dtype=float)
+        flat_indices = np.where(self.geometry.mask.ravel())[0]
+        for k, fi in enumerate(flat_indices):
+            iy, ix = divmod(fi, nx)
+            tau[iy, ix] = tau_vec[k]
+        tau_max = float(np.nanmax(tau)) if np.any(~np.isnan(tau)) else 1.0
+        if tau_max <= 0:
+            tau_max = 1.0
+        return tau, tau_max
+
     def solve(self, num_frames: int = 24) -> FlowResult:
         if not self.geometry.gates:
             raise ValueError("Geometry has no gates")
 
         eta = self._effective_viscosity()
-        S = self._conductance_field(eta)
 
         dirichlet = np.zeros(self.geometry.shape, dtype=bool)
         for iy, ix in self.geometry.gates:
             dirichlet[iy, ix] = True
 
-        A, b, idx = self._build_linear_system(S, dirichlet)
-        tau_vec = spla.spsolve(A, b)
+        h_open = self._open_thickness_field()  # mm
+        cavity_mask = self.geometry.mask
 
-        tau = np.full(self.geometry.shape, np.nan, dtype=float)
-        ny, nx = self.geometry.shape
-        for iy in range(ny):
-            for ix in range(nx):
-                k = idx[iy, ix]
-                if k >= 0:
-                    tau[iy, ix] = tau_vec[k]
-
-        tau_max = float(np.nanmax(tau))
-        if tau_max <= 0:
-            tau_max = 1.0
-
-        # absolute time scaling
+        # absolute time scaling baseline (skin-layer-free, constant Q)
         V_cm3 = self.geometry.volume_cm3()
         if self.injection_volume_flow_cm3s is None:
-            # fallback: assume 1.5 s baseline for any volume; user can override
-            T_fill = 1.5
+            T_fill_baseline = 1.5
         else:
             Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
-            T_fill = V_cm3 / Q
-
-        # if compression molding active, fill time partially shortened:
+            T_fill_baseline = V_cm3 / Q
         if self.compression_molding:
-            T_fill = T_fill * (
+            T_fill_baseline = T_fill_baseline * (
                 self.compression_fraction / max(self.compression_factor, 1e-3)
                 + (1.0 - self.compression_fraction)
             )
 
-        fill_time_s = (tau / tau_max) * T_fill
+        # baseline solve (no skin) — also serves as the tau_max reference
+        S0 = self._conductance_field(eta, h_open)
+        tau, tau_max = self._solve_tau_field(S0, dirichlet)
+        tau_max_baseline = tau_max
+        T_fill = T_fill_baseline
+
+        skin_thk_mm: np.ndarray | None = None
+        h_core_mm: np.ndarray | None = None
+        short_shot_mask: np.ndarray | None = None
+        skin_iters_done = 0
+        skin_converged = False
+
+        if self.skin_layer_enabled:
+            alpha = max(float(self.material.thermal_diffusivity_m2_s), 0.0)
+            c_skin = max(float(self.skin_growth_constant), 0.0)
+            min_core = max(float(self.min_core_thickness_mm), 1e-6)
+            tol = max(float(self.skin_convergence_tol), 0.0)
+
+            skin_thk_mm = np.zeros_like(h_open)
+            h_core_mm = h_open.copy()
+
+            for it in range(int(max(self.skin_max_iterations, 1))):
+                msk = cavity_mask & ~np.isnan(tau)
+                # arrival time per cell, scaled to current best estimate of T_fill
+                t_arr = np.zeros_like(tau)
+                t_arr[msk] = (tau[msk] / tau_max) * T_fill
+
+                # skin layer thickness: s(t) = c_skin * sqrt(alpha * t) (m → mm)
+                s_m = c_skin * np.sqrt(alpha * np.maximum(t_arr, 0.0))
+                s_mm_new = (s_m * 1.0e3).astype(float)
+                # cap so that h_core can never go below min_core
+                s_mm_max = np.maximum((h_open - min_core) / 2.0, 0.0)
+                s_mm_new = np.minimum(s_mm_new, s_mm_max)
+                s_mm_new[~cavity_mask] = 0.0
+
+                h_core_new = h_open - 2.0 * s_mm_new
+                h_core_new = np.maximum(h_core_new, min_core)
+                h_core_new[~cavity_mask] = 0.0
+
+                # re-solve for tau with the carved core
+                S_new = self._conductance_field(eta, h_core_new)
+                tau_new, tau_max_new = self._solve_tau_field(S_new, dirichlet)
+
+                # constant-pressure proxy: T_fill grows with the resistance
+                T_fill_new = T_fill_baseline * (
+                    tau_max_new / tau_max_baseline if tau_max_baseline > 0 else 1.0
+                )
+
+                # convergence check on tau (relative L2 over masked cells)
+                msk_new = cavity_mask & ~np.isnan(tau_new) & ~np.isnan(tau)
+                if msk_new.any():
+                    diff = float(np.linalg.norm(tau_new[msk_new] - tau[msk_new]))
+                    base = float(np.linalg.norm(tau[msk_new])) + 1e-12
+                    rel = diff / base
+                else:
+                    rel = 0.0
+
+                tau = tau_new
+                tau_max = tau_max_new
+                T_fill = T_fill_new
+                skin_thk_mm = s_mm_new
+                h_core_mm = h_core_new
+                skin_iters_done = it + 1
+                if rel < tol:
+                    skin_converged = True
+                    break
+
+            short_shot_mask = (
+                cavity_mask
+                & ((h_open - 2.0 * skin_thk_mm) <= min_core + 1e-9)
+                & (h_open > min_core + 1e-9)  # ignore cells whose open gap is already tiny
+            )
+
+        # absolute time scaling per cell
+        msk = ~np.isnan(tau)
+        fill_time_s = np.full_like(tau, np.nan)
+        fill_time_s[msk] = (tau[msk] / tau_max) * T_fill
 
         # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at far field
         pressure_norm = np.full_like(tau, np.nan)
-        msk = ~np.isnan(tau)
         pressure_norm[msk] = 1.0 - tau[msk] / tau_max
 
         weld_score = self._compute_weld_score(tau)
         air_traps = self._compute_air_traps(tau)
+
+        metadata = {
+            "material": self.material.name,
+            "melt_K": self.melt_temperature_K,
+            "mold_K": self.mold_temperature_K,
+            "injection_velocity_mms": self.injection_velocity_mms,
+            "injection_Q_cm3s": self.injection_volume_flow_cm3s,
+            "compression": self.compression_molding,
+            "compression_factor": self.compression_factor,
+            "compression_fraction": self.compression_fraction,
+            "tau_max": tau_max,
+            "tau_max_baseline": tau_max_baseline,
+            "volume_cm3": V_cm3,
+            "num_frames": num_frames,
+            "skin_layer_enabled": self.skin_layer_enabled,
+        }
+        if self.skin_layer_enabled:
+            cells_total = max(int(cavity_mask.sum()), 1)
+            short_count = int(short_shot_mask.sum()) if short_shot_mask is not None else 0
+            metadata.update(
+                {
+                    "skin_growth_constant": self.skin_growth_constant,
+                    "thermal_diffusivity_m2_s": self.material.thermal_diffusivity_m2_s,
+                    "skin_iterations": skin_iters_done,
+                    "skin_converged": skin_converged,
+                    "min_core_thickness_mm": self.min_core_thickness_mm,
+                    "T_fill_baseline_s": T_fill_baseline,
+                    "T_fill_inflation": (T_fill / T_fill_baseline if T_fill_baseline > 0 else 1.0),
+                    "short_shot_cells": short_count,
+                    "short_shot_fraction": short_count / cells_total,
+                }
+            )
 
         return FlowResult(
             tau=tau,
@@ -193,19 +354,10 @@ class HeleShawSolver:
             total_fill_time_s=float(T_fill),
             viscosity_Pa_s=eta,
             geometry=self.geometry,
-            metadata={
-                "material": self.material.name,
-                "melt_K": self.melt_temperature_K,
-                "mold_K": self.mold_temperature_K,
-                "injection_velocity_mms": self.injection_velocity_mms,
-                "injection_Q_cm3s": self.injection_volume_flow_cm3s,
-                "compression": self.compression_molding,
-                "compression_factor": self.compression_factor,
-                "compression_fraction": self.compression_fraction,
-                "tau_max": tau_max,
-                "volume_cm3": V_cm3,
-                "num_frames": num_frames,
-            },
+            metadata=metadata,
+            skin_thickness_mm=skin_thk_mm,
+            core_thickness_mm=h_core_mm,
+            short_shot_mask=short_shot_mask,
         )
 
     @staticmethod

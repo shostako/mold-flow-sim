@@ -97,6 +97,26 @@ y_circle_bottom = pad                        ← 半円下端
 
 **厚みプロファイル**: 半円・台形 flat zone は `h_runner` 一定、台形 slope zone (`y_short + D_flat 〜 y_long`) は `h_runner → plate_thk` 線形補間、製品本体は `plate_thk`。
 
+#### オプション機能：フローバランサー（▽ 肉盗み）
+
+LGP（導光板）系の実機技術。バルブゲート1点からの放射状（楕円状）流動先端を、製品長辺全幅から均一充填に近づけるための**中央肉盗み**。
+
+5パラメータ（`balancer_enabled=True` 時のみ有効）：
+
+| パラメータ | 意味 | 制約 |
+|----------|------|------|
+| `balancer_enabled` | bool トグル | — |
+| `balancer_base_width_mm` (W_bal) | ▽底辺幅（長辺側） | `≤ W_gate` |
+| `balancer_height_mm` (H_bal) | ▽の頂点〜底辺距離 | apex がバルブゲート円を侵さないこと |
+| `balancer_base_distance_from_gate_mm` | 底辺位置の半円中心からの y距離 | `≤ D` |
+| `balancer_target_thickness_mm` (h_bal) | ▽内のキャビティ厚（一定） | `> 0`、通常 `= plate_thk` |
+
+**実装**: ▽内のセルは `thickness_mm` を `h_bal` で**上書き**（既存 slope zone の補間値より小さい値で潰す）。`h_bal = plate_thk` のとき、▽内のキャビティ天井が**製品本体の天面と同じ高さ**になる。これが「製品平面と平行」（実機の肉盗み加工で底面を水平に削る形状）の数学表現。
+
+**物理**: コンダクタンス `S = h³/(12η)` の `h` を ▽ 内で下げると、流路抵抗が `h³` で激増する。樹脂は ▽ を避けて両端側に回り込むため、製品下辺の左右端への到達タイミングが中央と揃う方向に補正される。
+
+**設計の勘所**: `h_bal` を小さくする・`W_bal` を広げる・`H_bal/D` 比を上げると効果が強くなる。ただし極端にすると射出圧が跳ね上がる（実機）/ Pseudo-Conduction 解の数値条件が悪化する（このシミュレータ）。`run_demo.py` の `FilmGate_PP_balancer` がチューニング起点ケース。
+
 ### 意図的にモデル化していないもの
 
 - 過渡熱結合（壁面冷却・固化層形成）

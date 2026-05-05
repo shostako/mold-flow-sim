@@ -402,3 +402,135 @@ def test_balancer_validation_rejects_apex_into_valve_gate() -> None:
             balancer_base_distance_from_gate_mm=10.0,
             balancer_height_mm=8.0,  # apex at y_short + 2 mm < 4 mm
         ).validate()
+
+
+# ---------- gate-side / far-side plate split ----------
+
+
+def _split_cfg(**overrides) -> FilmGateConfig:
+    """Helper: 2-zone plate (gate-side / far-side) with safe defaults."""
+    base = dict(
+        plate_w_mm=120.0,
+        plate_h_mm=50.0,
+        plate_thk_mm=0.4,  # legacy fallback (irrelevant when split is on)
+        runner_long_mm=80.0,
+        runner_short_diameter_mm=12.0,
+        runner_depth_mm=20.0,
+        runner_thk_mm=2.5,
+        runner_flat_depth_mm=8.0,
+        runner_slope_depth_mm=12.0,
+        valve_gate_diameter_mm=4.0,
+        gate_width_mm=80.0,
+        cell_size_mm=1.0,
+        pad_mm=5.0,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+    base.update(overrides)
+    return FilmGateConfig(**base)
+
+
+def test_plate_split_off_uses_uniform_thickness() -> None:
+    """``plate_split_height_mm == 0`` must reproduce the uniform-mode geometry."""
+    cfg_uniform = _default_cfg(plate_thk_mm=0.4, plate_h_mm=50.0)
+    cfg_explicit_off = _default_cfg(
+        plate_thk_mm=0.4,
+        plate_h_mm=50.0,
+        plate_split_height_mm=0.0,
+        plate_lower_thk_mm=0.30,  # ignored in uniform mode
+        plate_upper_thk_mm=0.55,  # ignored in uniform mode
+    )
+    g_uniform = build_film_gate_geometry(cfg_uniform)
+    g_off = build_film_gate_geometry(cfg_explicit_off)
+    assert np.array_equal(g_uniform.mask, g_off.mask)
+    assert np.allclose(g_uniform.thickness_mm, g_off.thickness_mm)
+
+
+def test_plate_split_creates_two_thickness_bands() -> None:
+    """Inside the plate body, the gate-side strip must carry plate_lower_thk_mm
+    and the far-side strip must carry plate_upper_thk_mm."""
+    cfg = _split_cfg()
+    g = build_film_gate_geometry(cfg)
+
+    pad = cfg.pad_mm
+    iy_idx, ix_idx = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    y_long = pad + cfg.runner_short_diameter_mm / 2 + cfg.runner_depth_mm
+    y_split = y_long + cfg.plate_split_height_mm
+
+    in_plate = (yy >= y_long) & (yy <= y_long + cfg.plate_h_mm) & g.mask
+    lower_band = in_plate & (yy < y_split)
+    upper_band = in_plate & (yy >= y_split)
+
+    assert lower_band.any() and upper_band.any()
+    np.testing.assert_allclose(g.thickness_mm[lower_band], cfg.plate_lower_thk_mm, atol=1e-9)
+    np.testing.assert_allclose(g.thickness_mm[upper_band], cfg.plate_upper_thk_mm, atol=1e-9)
+
+
+def test_plate_split_runner_slope_terminates_at_lower_band() -> None:
+    """Runner slope zone must aim at the gate-side band (plate_lower_thk_mm),
+    not the far-side band — i.e. the runner exit stays continuous with the
+    plate it actually feeds. The exact end value depends on cell size, so
+    the assertion checks the trajectory rather than the literal floor."""
+    cfg = _split_cfg()
+    g = build_film_gate_geometry(cfg)
+
+    pad = cfg.pad_mm
+    iy_idx, ix_idx = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    xx = (ix_idx + 0.5) * cfg.cell_size_mm
+    cx = pad + cfg.plate_w_mm / 2
+
+    y_long = pad + cfg.runner_short_diameter_mm / 2 + cfg.runner_depth_mm
+    # last cell-row inside the slope zone, on the centerline
+    last_slope = (yy < y_long) & (yy >= y_long - cfg.cell_size_mm * 1.5) & g.mask
+    on_axis = last_slope & (np.abs(xx - cx) < cfg.cell_size_mm)
+    sample = g.thickness_mm[on_axis]
+    assert sample.size > 0
+
+    val = float(sample.min())
+    # 1) The slope's terminal value is well below the far-side thickness:
+    #    if it had been interpolating toward plate_upper_thk_mm it would
+    #    sit above plate_lower_thk_mm and likely above the upper band too.
+    assert val < cfg.plate_upper_thk_mm, (
+        f"slope-zone end value {val} should be below plate_upper_thk_mm "
+        f"{cfg.plate_upper_thk_mm} (the slope must aim at the gate-side band)"
+    )
+    # 2) The slope has already crossed past the midpoint of
+    #    (h_runner, plate_lower_thk_mm), confirming the trajectory.
+    midpoint = 0.5 * (cfg.runner_thk_mm + cfg.plate_lower_thk_mm)
+    assert val < midpoint, (
+        f"slope-zone end value {val} should be past the "
+        f"(h_runner, plate_lower_thk_mm) midpoint {midpoint}"
+    )
+
+
+def test_plate_split_validation_rejects_split_above_plate_height() -> None:
+    with pytest.raises(ValueError, match="plate_split_height_mm"):
+        _split_cfg(plate_split_height_mm=70.0).validate()  # plate_h_mm = 50
+
+
+def test_plate_split_validation_rejects_negative_lower_thickness() -> None:
+    with pytest.raises(ValueError, match="plate_lower_thk_mm"):
+        _split_cfg(plate_lower_thk_mm=0.0).validate()
+
+
+def test_plate_split_validation_rejects_negative_upper_thickness() -> None:
+    with pytest.raises(ValueError, match="plate_upper_thk_mm"):
+        _split_cfg(plate_upper_thk_mm=-0.1).validate()
+
+
+def test_plate_split_lower_defaults_to_plate_thk() -> None:
+    """When ``plate_lower_thk_mm`` is None, the gate-side band falls back
+    to ``plate_thk_mm`` while the far-side band uses its own value."""
+    cfg = _split_cfg(plate_lower_thk_mm=None, plate_upper_thk_mm=0.6)
+    g = build_film_gate_geometry(cfg)
+    pad = cfg.pad_mm
+    iy_idx, _ = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    y_long = pad + cfg.runner_short_diameter_mm / 2 + cfg.runner_depth_mm
+    in_plate = (yy >= y_long) & g.mask
+    lower_band = in_plate & (yy < y_long + cfg.plate_split_height_mm)
+    assert lower_band.any()
+    np.testing.assert_allclose(g.thickness_mm[lower_band], cfg.plate_thk_mm, atol=1e-9)

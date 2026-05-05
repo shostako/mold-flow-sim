@@ -26,7 +26,7 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 39 tests
+.venv/bin/pytest tests/                        # 46 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
@@ -101,7 +101,7 @@ y_short_edge   = pad + d/2                  ← 半円中心 = 台形短辺 = �
 y_circle_bottom = pad                        ← 半円下端
 ```
 
-**11パラメータ + バリデーション制約**:
+**11パラメータ + プレート分割3パラメータ + バリデーション制約**:
 
 | グループ | 記号 | 制約 |
 |---------|------|------|
@@ -110,10 +110,11 @@ y_circle_bottom = pad                        ← 半円下端
 | ランナー肉厚 | `runner_thk (h_runner) / runner_flat_depth (D_flat) / runner_slope_depth (D_slope)` | `D_flat + D_slope = D` |
 | バルブゲート | `valve_gate_diameter (d_valve)` | `d_valve ≤ d` |
 | 接続 | `gate_width (W_gate)` | `W_gate ≤ L_long` |
+| プレート分割 | `plate_split_height_mm / plate_lower_thk_mm / plate_upper_thk_mm` | `0 ≤ split ≤ Hp`、`0` で均一モード |
 
 **ゲート土手の実装**: 製品最下行のうち中央 `W_gate` 幅以外を `mask=False` に強制。台形最上行は `L_long` 全幅で残す（土手は製品側で形成）。
 
-**厚みプロファイル**: 半円・台形 flat zone は `h_runner` 一定、台形 slope zone (`y_short + D_flat 〜 y_long`) は `h_runner → plate_thk` 線形補間、製品本体は `plate_thk`。
+**厚みプロファイル**: 半円・台形 flat zone は `h_runner` 一定、台形 slope zone (`y_short + D_flat 〜 y_long`) は `h_runner → plate_lower_thk` 線形補間、製品本体は ゲート側 `[y_long, y_long + split]` が `plate_lower_thk`、反ゲート側 `[y_long + split, y_plate_top]` が `plate_upper_thk`。`split = 0` の均一モードでは `plate_lower_thk = plate_upper_thk = plate_thk`、slope は `plate_thk` に補間して従来挙動と一致。
 
 #### オプション機能：フローバランサー（▽ 肉盗み）
 
@@ -148,11 +149,11 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ## テスト
 
-`tests/` 配下に4ファイル、合計 **39テスト**：
+`tests/` 配下に4ファイル、合計 **46テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
-- `test_geometry_film_gate.py` — 24件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー / solver 統合
+- `test_geometry_film_gate.py` — 31件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー / プレート分割（ゲート側/反ゲート側2層） / solver 統合
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 
 新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`。
@@ -176,7 +177,7 @@ git checkout main && git pull
 **push 前に必ず**:
 - `ruff check .` （CI と同じ lint）
 - `ruff format --check .` （format check は CI で別ステップ。`ruff check` だけでは検出されない）
-- `pytest tests/` （39件全部 pass を確認）
+- `pytest tests/` （46件全部 pass を確認）
 
 CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上記3つを走らせる。Node.js 20 actions の deprecation warning が出るが2026-06-02までは無害。
 

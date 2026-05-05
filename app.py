@@ -70,7 +70,36 @@ with st.sidebar:
     elif geom_source.startswith("Film gate"):
         plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
         plate_h = st.slider("製品高 Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 0.4, step=0.1)
+
+        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
+        plate_split = st.slider(
+            "段差位置 [mm]",
+            0.0,
+            float(plate_h),
+            min(20.0, float(plate_h)),
+            step=1.0,
+            help="ゲート側長辺からの距離。0 で均一肉厚（旧挙動）",
+        )
+        if plate_split > 0:
+            plate_lower_thk = st.slider(
+                "ゲート側肉厚 [mm]",
+                0.2,
+                5.0,
+                0.35,
+                step=0.05,
+            )
+            plate_upper_thk = st.slider(
+                "反ゲート側肉厚 [mm]",
+                0.2,
+                5.0,
+                0.50,
+                step=0.05,
+            )
+            plate_thk = float(plate_lower_thk)
+        else:
+            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 0.4, step=0.1)
+            plate_lower_thk = float(plate_thk)
+            plate_upper_thk = float(plate_thk)
 
         st.markdown("**ランナー上面投影**")
         runner_long = st.slider(
@@ -151,18 +180,18 @@ with st.sidebar:
                 step=0.05,
             )
             bal_target_thk = st.slider(
-                "肉盗み残り肉厚 [mm] (≤ 製品肉厚 が目安)",
+                "肉盗み残り肉厚 [mm] (≤ ゲート側肉厚 が目安)",
                 0.05,
-                float(plate_thk),
-                float(min(0.30, plate_thk)),
+                float(plate_lower_thk),
+                float(min(0.30, plate_lower_thk)),
                 step=0.05,
-                help="製品肉厚と同じならキャビティ天井が製品平面と完全に揃う",
+                help="ゲート側肉厚と同じならキャビティ天井がゲート側プレート平面と完全に揃う",
             )
         else:
             bal_offset_ratio = 1.0
             bal_height_ratio = 0.7
             bal_base_width_ratio = 0.6
-            bal_target_thk = float(plate_thk)
+            bal_target_thk = float(plate_lower_thk)
 
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
@@ -291,6 +320,9 @@ def build_geometry() -> Geometry:
                 balancer_height_mm=runner_depth * bal_height_ratio,
                 balancer_base_distance_from_gate_mm=runner_depth * bal_offset_ratio,
                 balancer_target_thickness_mm=bal_target_thk,
+                plate_split_height_mm=plate_split if plate_split > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
+                plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
             return build_film_gate_geometry(cfg)
         except ValueError as exc:

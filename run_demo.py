@@ -3,6 +3,7 @@
 Usage:
     python run_demo.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -12,10 +13,10 @@ from core import (
     HeleShawSolver,
     MaterialDB,
     build_demo_geometry,
+    export_frames,
     render_fill_animation,
     render_pressure_map,
     render_weldlines,
-    export_frames,
 )
 
 
@@ -54,7 +55,9 @@ def run_case(
     )
     print(f"[{label}] solving... cells={int(geom.mask.sum())} V={geom.volume_cm3():.2f} cm^3")
     result = solver.solve(num_frames=num_frames)
-    print(f"[{label}] T_fill={result.total_fill_time_s:.3f} s  eta_eff={result.viscosity_Pa_s:.1f} Pa.s")
+    print(
+        f"[{label}] T_fill={result.total_fill_time_s:.3f} s  eta_eff={result.viscosity_Pa_s:.1f} Pa.s"
+    )
 
     out_dir = out_root / label
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -68,31 +71,50 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="outputs", help="output root directory")
-    parser.add_argument("--cases", nargs="*", default=None,
-                        help="case keys to run (default: all)")
+    parser.add_argument("--cases", nargs="*", default=None, help="case keys to run (default: all)")
     args = parser.parse_args()
 
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
     cases = {
-        "PP_baseline": dict(material_key="PP", melt_K=503.15, mold_K=313.15,
-                            inj_velocity_mms=100.0, inj_Q_cm3s=20.0),
-        "PP_hot_melt": dict(material_key="PP", melt_K=533.15, mold_K=323.15,
-                            inj_velocity_mms=100.0, inj_Q_cm3s=20.0),
-        "PP_slow_inj": dict(material_key="PP", melt_K=503.15, mold_K=313.15,
-                            inj_velocity_mms=30.0, inj_Q_cm3s=6.0),
-        "PC_baseline": dict(material_key="PC", melt_K=583.15, mold_K=373.15,
-                            inj_velocity_mms=80.0, inj_Q_cm3s=15.0),
-        "PA66_baseline": dict(material_key="PA66", melt_K=563.15, mold_K=343.15,
-                              inj_velocity_mms=120.0, inj_Q_cm3s=25.0),
-        "PP_compression": dict(material_key="PP", melt_K=503.15, mold_K=313.15,
-                               inj_velocity_mms=80.0, inj_Q_cm3s=15.0,
-                               compression=True, compression_factor=1.6,
-                               compression_fraction=0.65),
-        "PP_dual_gate": dict(material_key="PP", melt_K=503.15, mold_K=313.15,
-                             inj_velocity_mms=100.0, inj_Q_cm3s=20.0,
-                             gate_count=2),
+        "PP_baseline": dict(
+            material_key="PP", melt_K=503.15, mold_K=313.15, inj_velocity_mms=100.0, inj_Q_cm3s=20.0
+        ),
+        "PP_hot_melt": dict(
+            material_key="PP", melt_K=533.15, mold_K=323.15, inj_velocity_mms=100.0, inj_Q_cm3s=20.0
+        ),
+        "PP_slow_inj": dict(
+            material_key="PP", melt_K=503.15, mold_K=313.15, inj_velocity_mms=30.0, inj_Q_cm3s=6.0
+        ),
+        "PC_baseline": dict(
+            material_key="PC", melt_K=583.15, mold_K=373.15, inj_velocity_mms=80.0, inj_Q_cm3s=15.0
+        ),
+        "PA66_baseline": dict(
+            material_key="PA66",
+            melt_K=563.15,
+            mold_K=343.15,
+            inj_velocity_mms=120.0,
+            inj_Q_cm3s=25.0,
+        ),
+        "PP_compression": dict(
+            material_key="PP",
+            melt_K=503.15,
+            mold_K=313.15,
+            inj_velocity_mms=80.0,
+            inj_Q_cm3s=15.0,
+            compression=True,
+            compression_factor=1.6,
+            compression_fraction=0.65,
+        ),
+        "PP_dual_gate": dict(
+            material_key="PP",
+            melt_K=503.15,
+            mold_K=313.15,
+            inj_velocity_mms=100.0,
+            inj_Q_cm3s=20.0,
+            gate_count=2,
+        ),
     }
 
     keys = args.cases or list(cases.keys())

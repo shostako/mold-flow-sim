@@ -1,10 +1,11 @@
 """Material database and Cross-WLF viscosity model."""
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
@@ -14,12 +15,12 @@ class Material:
     key: str
     name: str
     n: float
-    tau_star: float          # Pa
-    D1: float                # Pa.s
-    D2: float                # K
-    D3: float                # K/Pa
-    A1: float                # -
-    A2_tilde: float          # K
+    tau_star: float  # Pa
+    D1: float  # Pa.s
+    D2: float  # K
+    D3: float  # K/Pa
+    A1: float  # -
+    A2_tilde: float  # K
     T_melt_recommended: tuple[float, float]
     T_mold_recommended: tuple[float, float]
     density_melt_kgm3: float
@@ -109,5 +110,5 @@ def representative_shear_rate(injection_velocity_mms: float, thickness_mm: float
     gamma_dot ~ 6 * V_avg / h (Newtonian plate approximation as upper-bound proxy).
     """
     V = max(injection_velocity_mms * 1e-3, 1e-6)  # m/s
-    h = max(thickness_mm * 1e-3, 1e-5)            # m
+    h = max(thickness_mm * 1e-3, 1e-5)  # m
     return 6.0 * V / h

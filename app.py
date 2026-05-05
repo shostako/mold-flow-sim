@@ -3,6 +3,7 @@
 Run:
     streamlit run app.py
 """
+
 from __future__ import annotations
 
 import io
@@ -11,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import streamlit as st
-from PIL import Image
 
 from core import (
     HeleShawSolver,
@@ -23,7 +23,6 @@ from core import (
     render_weldlines,
 )
 from core.geometry import Geometry
-
 
 st.set_page_config(page_title="Mold Flow Sim (simplified)", layout="wide")
 st.title("射出成形 簡易流動解析")
@@ -57,7 +56,9 @@ with st.sidebar:
         gate_count = st.slider("ゲート数", 1, 4, 1)
         upload = None
     else:
-        upload = st.file_uploader("キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"])
+        upload = st.file_uploader(
+            "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
+        )
         plate_thk = st.slider("均一肉厚 [mm]", 0.6, 5.0, 2.0, step=0.1)
         cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
         invert = st.checkbox("白を内部として扱う（反転）", value=False)
@@ -68,19 +69,23 @@ with st.sidebar:
     mat = db[material_key]
     st.caption(f"{mat.name}")
     st.caption(
-        f"推奨 melt: {mat.T_melt_recommended[0]-273.15:.0f}–{mat.T_melt_recommended[1]-273.15:.0f} ℃, "
-        f"mold: {mat.T_mold_recommended[0]-273.15:.0f}–{mat.T_mold_recommended[1]-273.15:.0f} ℃"
+        f"推奨 melt: {mat.T_melt_recommended[0] - 273.15:.0f}–{mat.T_melt_recommended[1] - 273.15:.0f} ℃, "
+        f"mold: {mat.T_mold_recommended[0] - 273.15:.0f}–{mat.T_mold_recommended[1] - 273.15:.0f} ℃"
     )
 
     st.header("射出条件")
-    melt_C = st.slider("樹脂温度 [℃]",
-                      int(mat.T_melt_recommended[0] - 273.15) - 20,
-                      int(mat.T_melt_recommended[1] - 273.15) + 20,
-                      int(np.mean(mat.T_melt_recommended) - 273.15))
-    mold_C = st.slider("金型温度 [℃]",
-                      int(mat.T_mold_recommended[0] - 273.15) - 10,
-                      int(mat.T_mold_recommended[1] - 273.15) + 30,
-                      int(np.mean(mat.T_mold_recommended) - 273.15))
+    melt_C = st.slider(
+        "樹脂温度 [℃]",
+        int(mat.T_melt_recommended[0] - 273.15) - 20,
+        int(mat.T_melt_recommended[1] - 273.15) + 20,
+        int(np.mean(mat.T_melt_recommended) - 273.15),
+    )
+    mold_C = st.slider(
+        "金型温度 [℃]",
+        int(mat.T_mold_recommended[0] - 273.15) - 10,
+        int(mat.T_mold_recommended[1] - 273.15) + 30,
+        int(np.mean(mat.T_mold_recommended) - 273.15),
+    )
     inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 100.0, step=5.0)
     inj_Q = st.slider("射出体積流量 [cm³/s]", 1.0, 80.0, 20.0, step=1.0)
 
@@ -143,15 +148,23 @@ with col_left:
     st.subheader("ジオメトリ プレビュー")
     geom = build_geometry()
     fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
-    st.write(f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³")
+    st.write(
+        f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³"
+    )
     fig_buf = io.BytesIO()
     import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(5, 4), dpi=110)
     extent = [0, geom.nx * geom.cell_size_mm, 0, geom.ny * geom.cell_size_mm]
     im = ax.imshow(fig_data, origin="lower", extent=extent, cmap="cividis")
-    for (iy, ix) in geom.gates:
-        ax.plot((ix + 0.5) * geom.cell_size_mm, (iy + 0.5) * geom.cell_size_mm,
-                "ro", markersize=8, markeredgecolor="white")
+    for iy, ix in geom.gates:
+        ax.plot(
+            (ix + 0.5) * geom.cell_size_mm,
+            (iy + 0.5) * geom.cell_size_mm,
+            "ro",
+            markersize=8,
+            markeredgecolor="white",
+        )
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     ax.set_aspect("equal")
@@ -186,8 +199,7 @@ if do_run:
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
 
         tmp_dir = Path(tempfile.mkdtemp())
-        gif_path = render_fill_animation(result, tmp_dir / "fill.gif",
-                                         num_frames=num_frames, fps=8)
+        gif_path = render_fill_animation(result, tmp_dir / "fill.gif", num_frames=num_frames, fps=8)
         press_path = render_pressure_map(result, tmp_dir / "pressure.png")
         weld_path = render_weldlines(result, tmp_dir / "weld.png")
 

@@ -10,6 +10,7 @@ This module provides:
 - build_demo_geometry: synthetic cavity (rectangular plate + runner + sprue).
 - geometry_from_image: extract cavity mask from an image (PNG/SVG raster).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,9 +26,9 @@ except ImportError:  # pragma: no cover
 
 @dataclass
 class Geometry:
-    mask: np.ndarray            # bool [Ny, Nx]; True=in cavity
-    thickness_mm: np.ndarray    # float [Ny, Nx]; mm; valid only where mask
-    cell_size_mm: float         # square cell, mm
+    mask: np.ndarray  # bool [Ny, Nx]; True=in cavity
+    thickness_mm: np.ndarray  # float [Ny, Nx]; mm; valid only where mask
+    cell_size_mm: float  # square cell, mm
     gates: list[tuple[int, int]] = field(default_factory=list)  # [(iy, ix), ...]
     label: str = "cavity"
 
@@ -44,7 +45,7 @@ class Geometry:
         return self.mask.shape[1]
 
     def volume_cm3(self) -> float:
-        cell_area_mm2 = self.cell_size_mm ** 2
+        cell_area_mm2 = self.cell_size_mm**2
         vol_mm3 = float(np.sum(self.thickness_mm[self.mask]) * cell_area_mm2)
         return vol_mm3 / 1000.0
 

@@ -1,8 +1,9 @@
 """mold-flow-sim core package."""
-from .materials import MaterialDB, cross_wlf_viscosity
+
 from .geometry import Geometry, build_demo_geometry, geometry_from_image
-from .solver import HeleShawSolver, FlowResult
-from .visualizer import render_fill_animation, render_pressure_map, render_weldlines, export_frames
+from .materials import MaterialDB, cross_wlf_viscosity
+from .solver import FlowResult, HeleShawSolver
+from .visualizer import export_frames, render_fill_animation, render_pressure_map, render_weldlines
 
 __all__ = [
     "MaterialDB",

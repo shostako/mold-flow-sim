@@ -1,11 +1,11 @@
 """Visualization helpers: fill animation, pressure map, weld lines, air traps."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
-import numpy as np
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -84,7 +84,7 @@ def render_fill_animation(
     )
 
     # gate markers
-    for (iy, ix) in g.gates:
+    for iy, ix in g.gates:
         gx_mm = (ix + 0.5) * g.cell_size_mm
         gy_mm = (iy + 0.5) * g.cell_size_mm
         ax.plot(gx_mm, gy_mm, marker="o", color="red", markersize=8, markeredgecolor="white")
@@ -101,8 +101,7 @@ def render_fill_animation(
     else:
         bar_rect = None
 
-    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
-                        fraction=0.04, pad=0.02)
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("fill time [s]")
 
     def update(frame_idx):
@@ -113,7 +112,7 @@ def render_fill_animation(
         im.set_array(rgba)
         progress = float(filled[g.mask].sum()) / max(int(g.mask.sum()), 1)
         title_obj.set_text(
-            f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress*100:5.1f} %"
+            f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress * 100:5.1f} %"
         )
         if bar_rect is not None:
             bar_rect.set_width(progress)
@@ -144,7 +143,7 @@ def render_pressure_map(
     rgba[..., 3] = np.where(g.mask, 1.0, 0.0)
     ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
 
-    for (iy, ix) in g.gates:
+    for iy, ix in g.gates:
         gx_mm = (ix + 0.5) * g.cell_size_mm
         gy_mm = (iy + 0.5) * g.cell_size_mm
         ax.plot(gx_mm, gy_mm, marker="o", color="lime", markersize=8, markeredgecolor="black")
@@ -158,7 +157,9 @@ def render_pressure_map(
 
     cbar = fig.colorbar(
         plt.cm.ScalarMappable(norm=mcolors.Normalize(0, 1), cmap=cmap),
-        ax=ax, fraction=0.04, pad=0.02,
+        ax=ax,
+        fraction=0.04,
+        pad=0.02,
     )
     cbar.set_label("relative pressure")
 
@@ -182,10 +183,12 @@ def render_weldlines(
     _draw_geometry(ax, result)
 
     masked_t = np.where(g.mask, result.fill_time_s, np.nan)
-    levels = np.linspace(np.nanmin(masked_t[masked_t > 0]) if np.any(masked_t > 0) else 0,
-                         np.nanmax(masked_t), 12)
-    cs = ax.contour(masked_t, levels=levels, extent=extent, origin="lower",
-                    colors="#2980b9", linewidths=0.7)
+    levels = np.linspace(
+        np.nanmin(masked_t[masked_t > 0]) if np.any(masked_t > 0) else 0, np.nanmax(masked_t), 12
+    )
+    cs = ax.contour(
+        masked_t, levels=levels, extent=extent, origin="lower", colors="#2980b9", linewidths=0.7
+    )
     ax.clabel(cs, inline=True, fontsize=7, fmt="%.2fs")
 
     # weld lines (red overlay)
@@ -209,25 +212,34 @@ def render_weldlines(
         )
 
     # gates
-    for (iy, ix) in g.gates:
+    for iy, ix in g.gates:
         gx_mm = (ix + 0.5) * g.cell_size_mm
         gy_mm = (iy + 0.5) * g.cell_size_mm
-        ax.plot(gx_mm, gy_mm, marker="o", color="lime", markersize=8,
-                markeredgecolor="black", label="gate")
+        ax.plot(
+            gx_mm,
+            gy_mm,
+            marker="o",
+            color="lime",
+            markersize=8,
+            markeredgecolor="black",
+            label="gate",
+        )
 
     ax.set_xlim(0, extent[1])
     ax.set_ylim(0, extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
-    ax.set_title(f"Fill-time iso, weld lines (red), air traps (yellow x) — "
-                 f"T_fill = {result.total_fill_time_s:.3f} s, η ≈ {result.viscosity_Pa_s:.1f} Pa·s")
+    ax.set_title(
+        f"Fill-time iso, weld lines (red), air traps (yellow x) — "
+        f"T_fill = {result.total_fill_time_s:.3f} s, η ≈ {result.viscosity_Pa_s:.1f} Pa·s"
+    )
 
     handles, labels = ax.get_legend_handles_labels()
     if labels:
-        seen = {}
-        for h, l in zip(handles, labels):
-            seen[l] = h
+        seen: dict[str, object] = {}
+        for handle, label in zip(handles, labels, strict=False):
+            seen[label] = handle
         ax.legend(seen.values(), seen.keys(), loc="upper right", fontsize=8)
 
     fig.tight_layout()
@@ -262,14 +274,19 @@ def export_frames(
         rgba = rgba_full.copy()
         rgba[..., 3] = np.where(g.mask & filled, 1.0, 0.0)
         ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
-        for (iy, ix) in g.gates:
-            ax.plot((ix + 0.5) * g.cell_size_mm,
-                    (iy + 0.5) * g.cell_size_mm,
-                    marker="o", color="red", markersize=7, markeredgecolor="white")
+        for iy, ix in g.gates:
+            ax.plot(
+                (ix + 0.5) * g.cell_size_mm,
+                (iy + 0.5) * g.cell_size_mm,
+                marker="o",
+                color="red",
+                markersize=7,
+                markeredgecolor="white",
+            )
         ax.set_xlim(0, extent[1])
         ax.set_ylim(0, extent[3])
         ax.set_aspect("equal")
-        ax.set_title(f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(),1)*100:.1f}%")
+        ax.set_title(f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%")
         ax.set_xlabel("x [mm]")
         ax.set_ylabel("y [mm]")
         path = output_dir / f"frame_{k:03d}.png"

@@ -21,28 +21,28 @@ Caveats:
   during the first compress_fraction of the fill, lowering local
   flow resistance.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 from .geometry import Geometry
+from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 
 
 @dataclass
 class FlowResult:
-    tau: np.ndarray             # raw pseudo-conduction time field
-    fill_time_s: np.ndarray     # actual fill time per cell [s]
-    pressure_norm: np.ndarray   # normalized pressure (1 at gate, 0 at last fill)
-    weld_score: np.ndarray      # heuristic weld-line indicator [0..1]
-    air_traps: np.ndarray       # bool mask of air-trap cells (local tau maxima)
-    total_fill_time_s: float    # T_fill from volume / Q
-    viscosity_Pa_s: float       # effective representative viscosity used
+    tau: np.ndarray  # raw pseudo-conduction time field
+    fill_time_s: np.ndarray  # actual fill time per cell [s]
+    pressure_norm: np.ndarray  # normalized pressure (1 at gate, 0 at last fill)
+    weld_score: np.ndarray  # heuristic weld-line indicator [0..1]
+    air_traps: np.ndarray  # bool mask of air-trap cells (local tau maxima)
+    total_fill_time_s: float  # T_fill from volume / Q
+    viscosity_Pa_s: float  # effective representative viscosity used
     geometry: Geometry
     metadata: dict
 
@@ -54,20 +54,22 @@ class HeleShawSolver:
 
     melt_temperature_K: float = 503.15
     mold_temperature_K: float = 313.15
-    injection_velocity_mms: float = 100.0   # average flow front velocity scale
-    injection_volume_flow_cm3s: Optional[float] = None  # if None, derived from V/T_fill_default
+    injection_velocity_mms: float = 100.0  # average flow front velocity scale
+    injection_volume_flow_cm3s: float | None = None  # if None, derived from V/T_fill_default
 
     compression_molding: bool = False
-    compression_factor: float = 1.5         # h_effective / h_actual during compression phase
-    compression_fraction: float = 0.6       # fraction of fill time under compression-open state
+    compression_factor: float = 1.5  # h_effective / h_actual during compression phase
+    compression_fraction: float = 0.6  # fraction of fill time under compression-open state
 
-    pressure_iters: int = 1                 # placeholder for future iteration on viscosity
+    pressure_iters: int = 1  # placeholder for future iteration on viscosity
 
     def _effective_viscosity(self) -> float:
         # bulk temperature ~ weighted average (melt dominates while flowing)
         T_bulk = 0.7 * self.melt_temperature_K + 0.3 * self.mold_temperature_K
         thickness_mm_avg = float(np.mean(self.geometry.thickness_mm[self.geometry.mask]))
-        gamma_dot = representative_shear_rate(self.injection_velocity_mms, max(thickness_mm_avg, 0.5))
+        gamma_dot = representative_shear_rate(
+            self.injection_velocity_mms, max(thickness_mm_avg, 0.5)
+        )
         eta = float(cross_wlf_viscosity(self.material, T_bulk, gamma_dot, 0.0))
         return eta
 
@@ -78,7 +80,7 @@ class HeleShawSolver:
             # uniform thickness inflation during open state — increases conductance
             h_mm = h_mm * float(self.compression_factor)
         h_m = h_mm * 1e-3
-        S = (h_m ** 3) / (12.0 * max(eta, 1e-3))
+        S = (h_m**3) / (12.0 * max(eta, 1e-3))
         S[~self.geometry.mask] = 0.0
         return S
 
@@ -138,7 +140,7 @@ class HeleShawSolver:
         S = self._conductance_field(eta)
 
         dirichlet = np.zeros(self.geometry.shape, dtype=bool)
-        for (iy, ix) in self.geometry.gates:
+        for iy, ix in self.geometry.gates:
             dirichlet[iy, ix] = True
 
         A, b, idx = self._build_linear_system(S, dirichlet)
@@ -212,9 +214,7 @@ class HeleShawSolver:
         score = np.zeros_like(tau, dtype=float)
         ny, nx = tau.shape
         # 8-neighborhood
-        offsets = [(-1, -1), (-1, 0), (-1, 1),
-                   (0, -1),           (0, 1),
-                   (1, -1),  (1, 0),  (1, 1)]
+        offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
         for iy in range(1, ny - 1):
             for ix in range(1, nx - 1):
                 if np.isnan(tau[iy, ix]):

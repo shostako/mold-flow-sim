@@ -1,5 +1,9 @@
 # mold-flow-sim
 
+[![CI](https://github.com/shostako/mold-flow-sim/actions/workflows/ci.yml/badge.svg)](https://github.com/shostako/mold-flow-sim/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
 射出成形の流動解析を Hele-Shaw 近似 + Cross-WLF 粘度モデル + Pseudo-Conduction 法で
 **極端に簡略化した** Python シミュレータ。教育・初期スクリーニング・概念検証用。
 

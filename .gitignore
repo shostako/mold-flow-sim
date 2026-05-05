@@ -20,6 +20,9 @@ env/
 # Generated demo outputs (reproducible via run_demo.py)
 outputs/
 
+# External tool markers
+.codex
+
 # OS / editor
 .DS_Store
 Thumbs.db

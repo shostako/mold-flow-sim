@@ -159,6 +159,31 @@ class FilmGateConfig:
     - ``gate_width_mm`` (W_gate) must be ``≤ runner_long_mm``.
     - ``valve_gate_diameter_mm`` (d_valve) must be ``≤ runner_short_diameter_mm``.
     - ``runner_flat_depth_mm + runner_slope_depth_mm`` must equal ``runner_depth_mm``.
+
+    Optional flow balancer (▽-shaped local thinning, used in LGP-style
+    film-gate molds to defeat the natural radial flow pattern from the
+    valve gate). When ``balancer_enabled`` is ``True``, an inverted
+    isosceles triangle is carved into the runner thickness map:
+
+    - Apex (point) sits on the centerline at
+      ``y_apex = y_short_edge + (balancer_base_distance_from_gate_mm
+      − balancer_height_mm)``.
+    - Base (segment) sits on the centerline at
+      ``y_base = y_short_edge + balancer_base_distance_from_gate_mm``,
+      with width ``balancer_base_width_mm``.
+    - **Inside the triangle**, the cavity thickness is forced to
+      ``balancer_target_thickness_mm`` (a constant; default = plate_thk
+      means the cavity ceiling is flush with the plate top, i.e. the
+      mold-side coring face is parallel to the plate plane).
+
+    Balancer constraints:
+
+    - ``balancer_base_width_mm`` ``≤ gate_width_mm``.
+    - ``y_apex`` must clear the valve-gate disk
+      (``y_apex ≥ y_short_edge + valve_gate_diameter_mm/2``).
+    - ``y_base`` must not exceed the long edge
+      (``balancer_base_distance_from_gate_mm ≤ runner_depth_mm``).
+    - ``balancer_target_thickness_mm`` must be ``> 0``.
     """
 
     plate_w_mm: float
@@ -174,6 +199,13 @@ class FilmGateConfig:
     gate_width_mm: float  # W_gate: plate-runner aperture width on long edge
     cell_size_mm: float = 1.0
     pad_mm: float = 5.0
+
+    # ----- optional flow balancer (LGP-style local thinning) -----
+    balancer_enabled: bool = False
+    balancer_base_width_mm: float = 0.0  # W_bal: base-edge width on plate side
+    balancer_height_mm: float = 0.0  # H_bal: apex ↔ base distance
+    balancer_base_distance_from_gate_mm: float = 0.0  # base y-offset from y_short_edge
+    balancer_target_thickness_mm: float = 0.0  # h_bal: cavity thickness inside ▽
 
     def validate(self) -> None:
         eps = 1e-6
@@ -219,6 +251,44 @@ class FilmGateConfig:
                 raise ValueError(f"{name} must be positive (got {val})")
         if self.runner_flat_depth_mm < 0 or self.runner_slope_depth_mm < 0:
             raise ValueError("runner_flat_depth_mm and runner_slope_depth_mm must be ≥ 0")
+
+        if self.balancer_enabled:
+            if self.balancer_target_thickness_mm <= 0:
+                raise ValueError(
+                    f"balancer_target_thickness_mm must be > 0 when balancer_enabled "
+                    f"(got {self.balancer_target_thickness_mm})"
+                )
+            if self.balancer_base_width_mm <= 0 or self.balancer_height_mm <= 0:
+                raise ValueError(
+                    "balancer_base_width_mm and balancer_height_mm must be > 0 "
+                    "when balancer_enabled"
+                )
+            if self.balancer_base_distance_from_gate_mm <= 0:
+                raise ValueError(
+                    "balancer_base_distance_from_gate_mm must be > 0 when balancer_enabled"
+                )
+            if self.balancer_base_width_mm > self.gate_width_mm + eps:
+                raise ValueError(
+                    f"balancer_base_width_mm ({self.balancer_base_width_mm}) must be ≤ "
+                    f"gate_width_mm ({self.gate_width_mm})"
+                )
+            if self.balancer_base_distance_from_gate_mm > self.runner_depth_mm + eps:
+                raise ValueError(
+                    f"balancer_base_distance_from_gate_mm "
+                    f"({self.balancer_base_distance_from_gate_mm}) must be ≤ "
+                    f"runner_depth_mm ({self.runner_depth_mm}); "
+                    f"the balancer base would extend past the long edge"
+                )
+            apex_offset = self.balancer_base_distance_from_gate_mm - self.balancer_height_mm
+            valve_radius = self.valve_gate_diameter_mm / 2.0
+            if apex_offset < valve_radius - eps:
+                raise ValueError(
+                    f"balancer apex y-offset ({apex_offset:.3f} mm from short edge) "
+                    f"must be ≥ valve_gate_diameter/2 ({valve_radius:.3f} mm); "
+                    f"reduce balancer_height_mm or increase "
+                    f"balancer_base_distance_from_gate_mm so that the apex clears "
+                    f"the valve-gate disk"
+                )
 
 
 def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
@@ -314,6 +384,28 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
     thk[slope_zone] = thk_slope[slope_zone]
 
     thk[in_plate] = h_plate
+
+    # --- optional flow balancer (▽ local thinning) ---
+    if cfg.balancer_enabled:
+        W_bal = cfg.balancer_base_width_mm
+        H_bal = cfg.balancer_height_mm
+        base_offset = cfg.balancer_base_distance_from_gate_mm
+        h_bal = cfg.balancer_target_thickness_mm
+
+        y_apex = y_short + (base_offset - H_bal)
+        y_base = y_short + base_offset
+
+        # Inverted triangle (▽): apex is a point at y=y_apex, x=cx.
+        # Width at y is W_bal * (y - y_apex) / H_bal: 0 at apex, W_bal at base.
+        in_balancer_y = (yy >= y_apex) & (yy <= y_base)
+        with np.errstate(invalid="ignore"):
+            half_width_at_y = 0.5 * W_bal * np.clip((yy - y_apex) / max(H_bal, 1e-12), 0.0, 1.0)
+        in_balancer = in_balancer_y & (np.abs(xx - cx) <= half_width_at_y)
+
+        # Apply only inside the trapezoid (the balancer is a runner-side feature).
+        in_balancer = in_balancer & in_trapezoid
+        thk[in_balancer] = h_bal
+
     # cells masked out by gate-land closure stay thk=0; that's fine because
     # mask=False excludes them from the solve.
     thk[~mask] = 0.0

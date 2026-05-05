@@ -93,8 +93,7 @@ def test_strip_no_y_dependence() -> None:
     rel_std = col_std / np.where(col_mean > 1e-12, col_mean, 1.0)
     # Skip x=0 where τ=0 (degenerate) and look at the rest.
     assert float(np.nanmax(rel_std[1:])) < 1e-6, (
-        f"unexpected y-variation on a 1D strip: max rel std = "
-        f"{float(np.nanmax(rel_std[1:])):.2e}"
+        f"unexpected y-variation on a 1D strip: max rel std = {float(np.nanmax(rel_std[1:])):.2e}"
     )
 
 
@@ -138,8 +137,7 @@ def test_strip_mesh_refinement_reduces_error() -> None:
     err_fine = _strip_l2_error(nx_fine)
 
     assert err_fine < err_coarse, (
-        f"refinement did not improve accuracy: "
-        f"coarse={err_coarse:.4e}, fine={err_fine:.4e}"
+        f"refinement did not improve accuracy: coarse={err_coarse:.4e}, fine={err_fine:.4e}"
     )
 
 

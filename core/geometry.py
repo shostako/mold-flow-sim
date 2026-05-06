@@ -58,6 +58,19 @@ class Geometry:
             raise ValueError(f"gate ({iy},{ix}) is outside the cavity mask")
         self.gates.append((iy, ix))
 
+    def gate_origin_mm(self) -> tuple[float, float]:
+        """Return ``(x0, y0)`` in mm — the gate centroid used as the display
+        origin in the preview and every result-time map. Falls back to the
+        grid center / bottom (0, 0) corner when the geometry has no gates.
+        """
+        if not self.gates:
+            return float(self.nx * self.cell_size_mm) / 2.0, 0.0
+        gate_iys = np.fromiter((gy for gy, _ in self.gates), dtype=float)
+        gate_ixs = np.fromiter((gx for _, gx in self.gates), dtype=float)
+        x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
+        y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
+        return x0, y0
+
 
 def build_demo_geometry(
     plate_w_mm: float = 120.0,
@@ -180,28 +193,50 @@ class FilmGateConfig:
 
     Optional flow balancer (▽-shaped local thinning, used in LGP-style
     film-gate molds to defeat the natural radial flow pattern from the
-    valve gate). When ``balancer_enabled`` is ``True``, an inverted
-    isosceles triangle is carved into the runner thickness map:
+    valve gate). When ``balancer_enabled`` is ``True``, one or more
+    nested inverted isosceles triangles are carved into the runner
+    thickness map:
 
     - Apex (point) sits on the centerline at
       ``y_apex = y_short_edge + (balancer_base_distance_from_gate_mm
       − balancer_height_mm)``.
     - Base (segment) sits on the centerline at
-      ``y_base = y_short_edge + balancer_base_distance_from_gate_mm``,
-      with width ``balancer_base_width_mm``.
-    - **Inside the triangle**, the cavity thickness is forced to
-      ``balancer_target_thickness_mm`` (a constant; default = plate_thk
-      means the cavity ceiling is flush with the plate top, i.e. the
-      mold-side coring face is parallel to the plate plane).
+      ``y_base = y_short_edge + balancer_base_distance_from_gate_mm``.
+    - All stages share the same apex, base y-coordinate and height;
+      only the base-edge width and target thickness vary between stages.
+
+    Two equivalent ways to specify the balancer geometry:
+
+    1. **Scalar form (legacy, single stage)**: set
+       ``balancer_base_width_mm`` and ``balancer_target_thickness_mm``
+       to positive values. The whole triangle is filled with a single
+       thickness — exactly the original 1-stage behaviour.
+    2. **Tuple form (1..5 nested stages, center → outer)**: set
+       ``balancer_base_widths_mm`` and ``balancer_thicknesses_mm`` to
+       tuples of equal length, indexed center → outer. Stage 1 (the
+       centermost) carries the smallest width and smallest target
+       thickness; each successive stage paints a wider but slightly
+       thicker zone, and the inner stages overwrite the outer ones,
+       so the resulting cavity profile is a step-down toward the
+       centerline.
+
+    When both forms are provided the tuple form wins; an empty tuple
+    falls back to the scalar form. ``resolved_balancer_stages()``
+    returns the canonical ``[(W_k, h_k), ...]`` list.
 
     Balancer constraints:
 
-    - ``balancer_base_width_mm`` ``≤ gate_width_mm``.
+    - 1 ≤ stage count ≤ 5 (tuple form only; the scalar form is always
+      a single stage).
+    - All ``W_k`` and ``h_k`` strictly positive.
+    - ``balancer_base_widths_mm`` non-decreasing in center→outer order.
+    - ``balancer_thicknesses_mm`` non-decreasing in center→outer order
+      (the centermost stage is the thinnest).
+    - The outermost ``W_k`` must be ``≤ gate_width_mm``.
     - ``y_apex`` must clear the valve-gate disk
       (``y_apex ≥ y_short_edge + valve_gate_diameter_mm/2``).
     - ``y_base`` must not exceed the long edge
       (``balancer_base_distance_from_gate_mm ≤ runner_depth_mm``).
-    - ``balancer_target_thickness_mm`` must be ``> 0``.
     """
 
     plate_w_mm: float
@@ -220,15 +255,45 @@ class FilmGateConfig:
 
     # ----- optional flow balancer (LGP-style local thinning) -----
     balancer_enabled: bool = False
+    # Single-stage scalar form (legacy): leave at 0 / 0 when using the
+    # multi-stage tuple form below.
     balancer_base_width_mm: float = 0.0  # W_bal: base-edge width on plate side
     balancer_height_mm: float = 0.0  # H_bal: apex ↔ base distance
     balancer_base_distance_from_gate_mm: float = 0.0  # base y-offset from y_short_edge
     balancer_target_thickness_mm: float = 0.0  # h_bal: cavity thickness inside ▽
+    # Multi-stage tuple form (1..5 stages, center → outer). Empty tuples
+    # fall back to the scalar form above; mixed forms are rejected.
+    balancer_base_widths_mm: tuple[float, ...] = ()
+    balancer_thicknesses_mm: tuple[float, ...] = ()
 
     # ----- optional gate-side / far-side plate split -----
     plate_split_height_mm: float = 0.0  # 0 disables the split (uniform plate)
     plate_lower_thk_mm: float | None = None  # gate-side band (y_long .. y_long+split)
     plate_upper_thk_mm: float | None = None  # far-side band (y_long+split .. y_plate_top)
+
+    def resolved_balancer_stages(self) -> list[tuple[float, float]]:
+        """Return the canonical balancer stage list ``[(W_k, h_k), ...]`` in
+        center → outer order. Empty when the balancer is disabled.
+
+        Tuple form takes precedence; otherwise the scalar form is wrapped
+        as a single stage. Returns ``[]`` for incomplete inputs — actual
+        validation lives in :meth:`validate`.
+        """
+        if not self.balancer_enabled:
+            return []
+        widths_t = self.balancer_base_widths_mm
+        thicks_t = self.balancer_thicknesses_mm
+        if widths_t and thicks_t:
+            n = min(len(widths_t), len(thicks_t))
+            return [(float(widths_t[k]), float(thicks_t[k])) for k in range(n)]
+        if self.balancer_base_width_mm > 0 and self.balancer_target_thickness_mm > 0:
+            return [
+                (
+                    float(self.balancer_base_width_mm),
+                    float(self.balancer_target_thickness_mm),
+                )
+            ]
+        return []
 
     def resolved_plate_zones(self) -> tuple[float, float, float]:
         """Return ``(split_height_mm, lower_thk_mm, upper_thk_mm)``.
@@ -310,24 +375,12 @@ class FilmGateConfig:
             raise ValueError(f"plate_upper_thk_mm ({self.plate_upper_thk_mm}) must be > 0 when set")
 
         if self.balancer_enabled:
-            if self.balancer_target_thickness_mm <= 0:
-                raise ValueError(
-                    f"balancer_target_thickness_mm must be > 0 when balancer_enabled "
-                    f"(got {self.balancer_target_thickness_mm})"
-                )
-            if self.balancer_base_width_mm <= 0 or self.balancer_height_mm <= 0:
-                raise ValueError(
-                    "balancer_base_width_mm and balancer_height_mm must be > 0 "
-                    "when balancer_enabled"
-                )
+            # shared height / base-position constraints (independent of stage form)
+            if self.balancer_height_mm <= 0:
+                raise ValueError("balancer_height_mm must be > 0 when balancer_enabled")
             if self.balancer_base_distance_from_gate_mm <= 0:
                 raise ValueError(
                     "balancer_base_distance_from_gate_mm must be > 0 when balancer_enabled"
-                )
-            if self.balancer_base_width_mm > self.gate_width_mm + eps:
-                raise ValueError(
-                    f"balancer_base_width_mm ({self.balancer_base_width_mm}) must be ≤ "
-                    f"gate_width_mm ({self.gate_width_mm})"
                 )
             if self.balancer_base_distance_from_gate_mm > self.runner_depth_mm + eps:
                 raise ValueError(
@@ -346,6 +399,63 @@ class FilmGateConfig:
                     f"balancer_base_distance_from_gate_mm so that the apex clears "
                     f"the valve-gate disk"
                 )
+
+            # form-specific stage validation
+            widths_t = self.balancer_base_widths_mm
+            thicks_t = self.balancer_thicknesses_mm
+            tuple_form = bool(widths_t) or bool(thicks_t)
+
+            if tuple_form:
+                # at least one of the tuples is non-empty → tuple form takes over
+                if len(widths_t) != len(thicks_t):
+                    raise ValueError(
+                        f"balancer_base_widths_mm and balancer_thicknesses_mm must "
+                        f"have equal length (got {len(widths_t)} vs {len(thicks_t)})"
+                    )
+                if not (1 <= len(widths_t) <= 5):
+                    raise ValueError(
+                        f"balancer must have 1..5 stages "
+                        f"(got {len(widths_t)} from balancer_base_widths_mm)"
+                    )
+                if any(W <= 0 for W in widths_t) or any(h <= 0 for h in thicks_t):
+                    raise ValueError(
+                        "every entry in balancer_base_widths_mm and "
+                        "balancer_thicknesses_mm must be > 0"
+                    )
+                widths_list = [float(W) for W in widths_t]
+                thicks_list = [float(h) for h in thicks_t]
+                if any(
+                    widths_list[k] - widths_list[k - 1] < -eps for k in range(1, len(widths_list))
+                ):
+                    raise ValueError(
+                        "balancer_base_widths_mm must be non-decreasing in center→outer order"
+                    )
+                if any(
+                    thicks_list[k] - thicks_list[k - 1] < -eps for k in range(1, len(thicks_list))
+                ):
+                    raise ValueError(
+                        "balancer_thicknesses_mm must be non-decreasing in "
+                        "center→outer order (stage 1 is the centermost / thinnest)"
+                    )
+                if widths_list[-1] > self.gate_width_mm + eps:
+                    raise ValueError(
+                        f"outermost balancer base width ({widths_list[-1]}) must be "
+                        f"≤ gate_width_mm ({self.gate_width_mm})"
+                    )
+            else:
+                # scalar (single-stage) form
+                if self.balancer_target_thickness_mm <= 0:
+                    raise ValueError(
+                        f"balancer_target_thickness_mm must be > 0 when "
+                        f"balancer_enabled (got {self.balancer_target_thickness_mm})"
+                    )
+                if self.balancer_base_width_mm <= 0:
+                    raise ValueError("balancer_base_width_mm must be > 0 when balancer_enabled")
+                if self.balancer_base_width_mm > self.gate_width_mm + eps:
+                    raise ValueError(
+                        f"balancer_base_width_mm ({self.balancer_base_width_mm}) "
+                        f"must be ≤ gate_width_mm ({self.gate_width_mm})"
+                    )
 
 
 def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
@@ -454,26 +564,28 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
         upper_zone = in_plate & (yy >= y_long + split_h)
         thk[upper_zone] = h_plate_upper
 
-    # --- optional flow balancer (▽ local thinning) ---
+    # --- optional flow balancer (1..5 nested ▽ stages) ---
     if cfg.balancer_enabled:
-        W_bal = cfg.balancer_base_width_mm
         H_bal = cfg.balancer_height_mm
         base_offset = cfg.balancer_base_distance_from_gate_mm
-        h_bal = cfg.balancer_target_thickness_mm
 
         y_apex = y_short + (base_offset - H_bal)
         y_base = y_short + base_offset
 
-        # Inverted triangle (▽): apex is a point at y=y_apex, x=cx.
-        # Width at y is W_bal * (y - y_apex) / H_bal: 0 at apex, W_bal at base.
+        # All stages share the same y-band; only the half-width vs y differs
+        # (linear from 0 at apex to W_k/2 at base).
         in_balancer_y = (yy >= y_apex) & (yy <= y_base)
         with np.errstate(invalid="ignore"):
-            half_width_at_y = 0.5 * W_bal * np.clip((yy - y_apex) / max(H_bal, 1e-12), 0.0, 1.0)
-        in_balancer = in_balancer_y & (np.abs(xx - cx) <= half_width_at_y)
+            t_y = np.clip((yy - y_apex) / max(H_bal, 1e-12), 0.0, 1.0)
 
-        # Apply only inside the trapezoid (the balancer is a runner-side feature).
-        in_balancer = in_balancer & in_trapezoid
-        thk[in_balancer] = h_bal
+        stages = cfg.resolved_balancer_stages()  # center → outer
+        # Paint outer → inner so inner stages overwrite outer ones; the result
+        # is a step-down toward the centerline (h_outer in the outer ring,
+        # h_inner inside it, ..., h_1 in the centermost triangle).
+        for W_k, h_k in sorted(stages, key=lambda s: -s[0]):
+            half_w_k = 0.5 * W_k * t_y
+            in_stage = in_balancer_y & (np.abs(xx - cx) <= half_w_k) & in_trapezoid
+            thk[in_stage] = h_k
 
     # cells masked out by gate-land closure stay thk=0; that's fine because
     # mask=False excludes them from the solve.

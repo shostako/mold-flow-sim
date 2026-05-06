@@ -61,7 +61,7 @@ with st.sidebar:
     if geom_source.startswith("Demo"):
         plate_w = st.slider("製品幅 [mm]", 40.0, 300.0, 120.0, step=5.0)
         plate_h = st.slider("製品高 [mm]", 30.0, 160.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 2.0, step=0.1)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
         runner_thk = st.slider("ランナー肉厚 [mm]", 1.0, 8.0, 4.0, step=0.1)
         sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
@@ -84,20 +84,20 @@ with st.sidebar:
             plate_lower_thk = st.slider(
                 "ゲート側肉厚 [mm]",
                 0.2,
-                5.0,
+                2.0,
                 0.35,
                 step=0.05,
             )
             plate_upper_thk = st.slider(
                 "反ゲート側肉厚 [mm]",
                 0.2,
-                5.0,
+                2.0,
                 0.50,
                 step=0.05,
             )
             plate_thk = float(plate_lower_thk)
         else:
-            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 5.0, 0.4, step=0.1)
+            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
             plate_lower_thk = float(plate_thk)
             plate_upper_thk = float(plate_thk)
 
@@ -172,26 +172,67 @@ with st.sidebar:
                 0.70,
                 step=0.05,
             )
-            bal_base_width_ratio = st.slider(
-                "底辺幅 W_bal / L_long",
-                0.1,
-                1.0,
-                0.60,
-                step=0.05,
+
+            bal_stage_count = st.slider(
+                "肉盗み段数",
+                1,
+                5,
+                2,
+                step=1,
+                help=(
+                    "ネスト数。1=単一▽（旧挙動）、2以上で中央＋外側の階段状肉盗み。"
+                    "番号 1 が中央（最薄・最大抵抗）、番号 N が外側。"
+                ),
             )
-            bal_target_thk = st.slider(
-                "肉盗み残り肉厚 [mm] (≤ ゲート側肉厚 が目安)",
-                0.05,
-                float(plate_lower_thk),
-                float(min(0.30, plate_lower_thk)),
-                step=0.05,
-                help="ゲート側肉厚と同じならキャビティ天井がゲート側プレート平面と完全に揃う",
-            )
+            # default presets: width as a ratio of L_long, thickness as
+            # absolute mm values (clamped to ≤ plate_lower_thk).
+            _w_defaults = {
+                1: [0.60],
+                2: [0.30, 0.60],
+                3: [0.20, 0.45, 0.70],
+                4: [0.15, 0.35, 0.55, 0.80],
+                5: [0.10, 0.30, 0.50, 0.70, 0.95],
+            }
+            _h_defaults_abs = {
+                1: [0.30],
+                2: [0.25, 0.30],
+                3: [0.20, 0.25, 0.30],
+                4: [0.15, 0.20, 0.25, 0.30],
+                5: [0.10, 0.15, 0.20, 0.25, 0.30],
+            }
+            bal_widths_mm: list[float] = []
+            bal_thks: list[float] = []
+            for _k in range(1, bal_stage_count + 1):
+                _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
+                _label_suffix = f"（{_label}）" if _label else ""
+                _w_default = _w_defaults[bal_stage_count][_k - 1]
+                _h_default = max(
+                    0.05,
+                    min(_h_defaults_abs[bal_stage_count][_k - 1], plate_lower_thk),
+                )
+                _w_ratio = st.slider(
+                    f"底辺幅{_k} / L_long{_label_suffix}",
+                    0.05,
+                    1.0,
+                    _w_default,
+                    step=0.05,
+                    key=f"bal_w_{_k}",
+                )
+                _h_val = st.slider(
+                    f"残り肉厚{_k} [mm]{_label_suffix}",
+                    0.05,
+                    float(plate_lower_thk),
+                    float(_h_default),
+                    step=0.05,
+                    key=f"bal_h_{_k}",
+                )
+                bal_widths_mm.append(_w_ratio * runner_long)
+                bal_thks.append(float(_h_val))
         else:
             bal_offset_ratio = 1.0
             bal_height_ratio = 0.7
-            bal_base_width_ratio = 0.6
-            bal_target_thk = float(plate_lower_thk)
+            bal_widths_mm = []
+            bal_thks = []
 
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
@@ -199,7 +240,7 @@ with st.sidebar:
         upload = st.file_uploader(
             "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
         )
-        plate_thk = st.slider("均一肉厚 [mm]", 0.2, 5.0, 2.0, step=0.1)
+        plate_thk = st.slider("均一肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
         cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
         invert = st.checkbox("白を内部として扱う（反転）", value=False)
         threshold = st.slider("二値化しきい値", 16, 240, 128)
@@ -316,10 +357,10 @@ def build_geometry() -> Geometry:
                 gate_width_mm=gate_w,
                 cell_size_mm=cell_size,
                 balancer_enabled=balancer_on,
-                balancer_base_width_mm=gate_w * bal_base_width_ratio,
                 balancer_height_mm=runner_depth * bal_height_ratio,
                 balancer_base_distance_from_gate_mm=runner_depth * bal_offset_ratio,
-                balancer_target_thickness_mm=bal_target_thk,
+                balancer_base_widths_mm=tuple(bal_widths_mm),
+                balancer_thicknesses_mm=tuple(bal_thks),
                 plate_split_height_mm=plate_split if plate_split > 0 else 0.0,
                 plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
@@ -367,12 +408,23 @@ with col_left:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(5, 4), dpi=110)
-    extent = [0, geom.nx * geom.cell_size_mm, 0, geom.ny * geom.cell_size_mm]
+    # Recenter on the gate (≒ product center). Tick "0" lines up with the
+    # gate centroid; the half-circle on the gate-near side stays at y < 0
+    # without the bottom spine running through it, since the spine keeps
+    # its default position at the plot edge. Same convention is shared by
+    # every result-time map in core/visualizer.py.
+    x0_mm, y0_mm = geom.gate_origin_mm()
+    extent = [
+        -x0_mm,
+        geom.nx * geom.cell_size_mm - x0_mm,
+        -y0_mm,
+        geom.ny * geom.cell_size_mm - y0_mm,
+    ]
     im = ax.imshow(fig_data, origin="lower", extent=extent, cmap="cividis")
     for iy, ix in geom.gates:
         ax.plot(
-            (ix + 0.5) * geom.cell_size_mm,
-            (iy + 0.5) * geom.cell_size_mm,
+            (ix + 0.5) * geom.cell_size_mm - x0_mm,
+            (iy + 0.5) * geom.cell_size_mm - y0_mm,
             "ro",
             markersize=8,
             markeredgecolor="white",
@@ -380,12 +432,16 @@ with col_left:
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     ax.set_aspect("equal")
-    ax.set_title("thickness map [mm], gates=red")
+    ax.set_title("thickness map [mm]")
     fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="h [mm]")
     fig.tight_layout()
     fig.savefig(fig_buf, format="png")
     plt.close(fig)
     st.image(fig_buf.getvalue())
+    st.caption(
+        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。半円部は y < 0 側。"
+        "赤丸はバルブゲート位置。"
+    )
 
 
 if do_run:

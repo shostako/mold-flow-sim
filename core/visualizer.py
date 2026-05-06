@@ -16,11 +16,29 @@ from .solver import FlowResult
 
 
 def _base_extent(result: FlowResult) -> list[float]:
+    """Image extent in mm with the gate centroid placed at the origin.
+
+    All result-time maps (fill animation, pressure map, weld lines, skin /
+    core layers, frame snapshots) share this extent so axis ticks of "0"
+    line up with the valve gate. The bottom and left spines remain at the
+    plot edges, so a half-circle in the y < 0 region does not run into
+    the axis frame.
+    """
     g = result.geometry
     w_mm = g.nx * g.cell_size_mm
     h_mm = g.ny * g.cell_size_mm
-    # invert y so origin is bottom-left like a CAD view
-    return [0.0, w_mm, 0.0, h_mm]
+    x0, y0 = g.gate_origin_mm()
+    return [-x0, w_mm - x0, -y0, h_mm - y0]
+
+
+def _gate_xy_mm(result: FlowResult, iy: int, ix: int) -> tuple[float, float]:
+    """Cell (iy, ix) center in mm, expressed in the gate-centered frame."""
+    g = result.geometry
+    x0, y0 = g.gate_origin_mm()
+    return (
+        (ix + 0.5) * g.cell_size_mm - x0,
+        (iy + 0.5) * g.cell_size_mm - y0,
+    )
 
 
 def _draw_geometry(ax, result: FlowResult) -> None:
@@ -57,6 +75,7 @@ def render_fill_animation(
 
     g = result.geometry
     extent = _base_extent(result)
+    x0, y0 = g.gate_origin_mm()
     t_max = float(np.nanmax(result.fill_time_s))
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
@@ -64,8 +83,8 @@ def render_fill_animation(
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
-    ax.set_xlim(0, extent[1])
-    ax.set_ylim(0, extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
@@ -85,8 +104,8 @@ def render_fill_animation(
 
     # gate markers
     for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm
-        gy_mm = (iy + 0.5) * g.cell_size_mm
+        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
+        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
         ax.plot(gx_mm, gy_mm, marker="o", color="red", markersize=8, markeredgecolor="white")
 
     # progress bar
@@ -134,6 +153,7 @@ def render_pressure_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
+    x0, y0 = g.gate_origin_mm()
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -144,12 +164,12 @@ def render_pressure_map(
     ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
 
     for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm
-        gy_mm = (iy + 0.5) * g.cell_size_mm
+        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
+        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
         ax.plot(gx_mm, gy_mm, marker="o", color="lime", markersize=8, markeredgecolor="black")
 
-    ax.set_xlim(0, extent[1])
-    ax.set_ylim(0, extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
@@ -178,6 +198,7 @@ def render_weldlines(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
+    x0, y0 = g.gate_origin_mm()
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -202,8 +223,8 @@ def render_weldlines(
     iy_arr, ix_arr = np.where(result.air_traps)
     if iy_arr.size > 0:
         ax.scatter(
-            (ix_arr + 0.5) * g.cell_size_mm,
-            (iy_arr + 0.5) * g.cell_size_mm,
+            (ix_arr + 0.5) * g.cell_size_mm - x0,
+            (iy_arr + 0.5) * g.cell_size_mm - y0,
             marker="x",
             color="#f1c40f",
             s=40,
@@ -213,8 +234,8 @@ def render_weldlines(
 
     # gates
     for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm
-        gy_mm = (iy + 0.5) * g.cell_size_mm
+        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
+        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
         ax.plot(
             gx_mm,
             gy_mm,
@@ -225,8 +246,8 @@ def render_weldlines(
             label="gate",
         )
 
-    ax.set_xlim(0, extent[1])
-    ax.set_ylim(0, extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
@@ -264,6 +285,7 @@ def render_skin_layer_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
+    x0, y0 = g.gate_origin_mm()
 
     s_field = np.where(g.mask, result.skin_thickness_mm, np.nan)
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
@@ -282,15 +304,15 @@ def render_skin_layer_map(
     )
     for iy, ix in g.gates:
         ax.plot(
-            (ix + 0.5) * g.cell_size_mm,
-            (iy + 0.5) * g.cell_size_mm,
+            (ix + 0.5) * g.cell_size_mm - x0,
+            (iy + 0.5) * g.cell_size_mm - y0,
             marker="o",
             color="lime",
             markersize=8,
             markeredgecolor="black",
         )
-    ax.set_xlim(0, extent[1])
-    ax.set_ylim(0, extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
@@ -318,6 +340,7 @@ def render_core_layer_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
+    x0, y0 = g.gate_origin_mm()
 
     h_core = np.where(g.mask, result.core_thickness_mm, np.nan)
     h_open = np.where(g.mask, g.thickness_mm, np.nan)
@@ -338,8 +361,8 @@ def render_core_layer_map(
     )
     for iy, ix in g.gates:
         ax.plot(
-            (ix + 0.5) * g.cell_size_mm,
-            (iy + 0.5) * g.cell_size_mm,
+            (ix + 0.5) * g.cell_size_mm - x0,
+            (iy + 0.5) * g.cell_size_mm - y0,
             marker="o",
             color="red",
             markersize=8,
@@ -348,8 +371,8 @@ def render_core_layer_map(
     if result.short_shot_mask is not None and result.short_shot_mask.any():
         iy_arr, ix_arr = np.where(result.short_shot_mask)
         ax.scatter(
-            (ix_arr + 0.5) * g.cell_size_mm,
-            (iy_arr + 0.5) * g.cell_size_mm,
+            (ix_arr + 0.5) * g.cell_size_mm - x0,
+            (iy_arr + 0.5) * g.cell_size_mm - y0,
             marker="s",
             color="#e74c3c",
             s=4,
@@ -357,8 +380,8 @@ def render_core_layer_map(
             label="short shot",
         )
         ax.legend(loc="upper right", fontsize=8)
-    ax.set_xlim(0, extent[1])
-    ax.set_ylim(0, extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
@@ -383,6 +406,7 @@ def export_frames(
     output_dir.mkdir(parents=True, exist_ok=True)
     g = result.geometry
     extent = _base_extent(result)
+    x0, y0 = g.gate_origin_mm()
     t_max = float(np.nanmax(result.fill_time_s))
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
@@ -400,15 +424,15 @@ def export_frames(
         ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
         for iy, ix in g.gates:
             ax.plot(
-                (ix + 0.5) * g.cell_size_mm,
-                (iy + 0.5) * g.cell_size_mm,
+                (ix + 0.5) * g.cell_size_mm - x0,
+                (iy + 0.5) * g.cell_size_mm - y0,
                 marker="o",
                 color="red",
                 markersize=7,
                 markeredgecolor="white",
             )
-        ax.set_xlim(0, extent[1])
-        ax.set_ylim(0, extent[3])
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
         ax.set_aspect("equal")
         ax.set_title(f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%")
         ax.set_xlabel("x [mm]")

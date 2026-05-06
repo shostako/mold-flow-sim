@@ -47,7 +47,7 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 - **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表せん断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
 - **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`geometry_from_image`（画像閾値処理）。
 - **`solver.py`** — `HeleShawSolver` と結果 `FlowResult`。中核アルゴリズムは下記。
-- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。
+- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。
 
 ### 中核アルゴリズム（`solver.py`）
 
@@ -205,3 +205,10 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 `app.py` のサイドバー入力は3系統（`Demo plate` / `Film gate (parametric)` / `画像から生成`）。`run_demo.py` の `DEMO_CASES` / `FILM_GATE_CASES` も同じパラメータ群を扱う。**新パラメータを `HeleShawSolver` または `FilmGateConfig` に足すなら、UI と CLI の両方に反映する必要がある**。
 
 特に `FilmGateConfig` の `D_flat + D_slope = D` 制約は、UI 側では「`D_flat / D` の比率スライダー」で表現してこの制約を自動満足させている（`app.py` の `flat_ratio` 変数）。CLI 側は直接 `D_flat` / `D_slope` を渡すので、case 定義時に和が `D` になることを手動で保証する必要がある。
+
+その他の UI ↔ CLI ブリッジ方針：
+
+- **バランサー**: UI は段数 N をスライダーで選び、`balancer_base_widths_mm` / `balancer_thicknesses_mm` のタプルを構築して渡す。スカラー形（1段固定）は CLI の旧ケース互換のため温存。CLI で N段にするなら直接タプルを書く。
+- **プレート分割**: UI は「段差位置 [mm]」スライダーで `plate_split_height_mm` を出し、値が `0` のときはゲート側／反ゲート側の肉厚スライダーを隠して `plate_thk` 1本に統合、cfg には `plate_lower_thk_mm = plate_upper_thk_mm = None` を渡して uniform モードに落とす。CLI で uniform にしたいときも同じく `plate_split_height_mm=0` ＋ `plate_lower_thk_mm = plate_upper_thk_mm = None` で足りる。
+- **スキン層**: UI のトグルが `skin_layer_enabled`、スライダーが `skin_growth_constant`（`c_skin`）。CLI 側はソルバー kwargs に直接渡す（`run_demo.py` の `PP_skin_layer` 参照）。
+- **射出条件の単位系**: `injection_velocity_mms` / `injection_volume_flow_cm3s` の既定値は **実機ユニット域**（`eae5394` で再スケール済）。新ケースを足すときも実機相当の値を入れる前提で考える。CLI 既定値（`run_demo.py`）と UI 既定値（`app.py`）はこの方針で揃えてある。

@@ -1,0 +1,14 @@
+# Runtime dependencies for Streamlit Community Cloud deployment.
+#
+# This file mirrors the [project] dependencies in pyproject.toml.
+# Streamlit Cloud reads requirements.txt to provision the app environment.
+# Keep this in sync whenever pyproject.toml dependencies change.
+#
+# For local development, use pyproject.toml instead:
+#   uv pip install -e ".[dev]" --python .venv/bin/python
+
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+Pillow>=10.0
+streamlit>=1.28

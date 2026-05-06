@@ -10,6 +10,16 @@
 > ⚠ **これは Moldflow / Moldex3D の代替ではない。** 過渡熱結合・3D 流れ・固化層・
 > 結晶化・収縮反り・保圧 — どれもまだモデル化していない。実機の型設計検討は商用 CAE を使え。
 
+## Live demo
+
+Streamlit Community Cloud にホスト（無料枠）。ブラウザだけで触れる：
+
+🔗 **<https://mold-flow-sim.streamlit.app>** *(デプロイ後に確定URLに差し替え)*
+
+> 無料枠のため、初回アクセス時はコールドスタートで30秒〜1分待ち発生。
+> 計算はブラウザ側ではなく Streamlit Cloud の共有CPU（1 vCPU / 1 GB RAM）で走るので、
+> 高解像度メッシュ + スキン層反復は数十秒かかることがある。
+
 ## 何ができるか（現状）
 
 - 2D 構造格子上で薄肉キャビティの**疑似充填時間場** τ を一発解（楕円型方程式 ∇·(S∇τ)=1）
@@ -52,6 +62,9 @@ pip install -e ".[dev]"              # 開発用（ruff, pytest 含む）
 ```
 
 Python 3.11 以上必須。
+
+> `requirements.txt` / `runtime.txt` / `.streamlit/config.toml` は Streamlit Community Cloud 用の
+> デプロイ設定であり、ローカル開発では使わない（`pyproject.toml` が正本）。
 
 ## 実行
 

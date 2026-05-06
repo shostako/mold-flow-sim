@@ -4,7 +4,10 @@ These tests do not validate visual output (Plotly figure JSON is verbose
 and brittle). They confirm:
   - the 3D renderers run end-to-end on a small Hele-Shaw result,
   - they return :class:`plotly.graph_objects.Figure` instances, and
-  - the surface mesh dimensions match the underlying mask shape.
+  - the figure has the expected three-trace anatomy:
+      [PL floor (Z=0), side walls (Mesh3d), cavity ceiling (Z=h)]
+  - outside-cavity cells are masked correctly,
+  - the axes are gate-centered.
 
 Phase 1-2 (animation frames) will get its own dedicated test file.
 """
@@ -37,48 +40,79 @@ def small_result():
     return solver.solve(num_frames=4)
 
 
+def _split_traces(fig: go.Figure) -> tuple[go.Surface, go.Surface, go.Mesh3d | None]:
+    """Identify the three expected traces in deterministic order:
+    PL floor (Z=0 surface), ceiling (top Surface), and walls (Mesh3d, optional)."""
+    surfaces = [t for t in fig.data if isinstance(t, go.Surface)]
+    meshes = [t for t in fig.data if isinstance(t, go.Mesh3d)]
+    assert len(surfaces) == 2, f"expected 2 Surface traces (PL+ceiling), got {len(surfaces)}"
+    # the floor has all-zero Z where mask=True; the ceiling has h where mask=True
+    floor = next(s for s in surfaces if np.nanmax(np.asarray(s.z)) <= 0.0)
+    ceiling = next(s for s in surfaces if s is not floor)
+    walls = meshes[0] if meshes else None
+    return floor, ceiling, walls
+
+
 @pytest.mark.parametrize(
     "renderer",
     [render_3d_thickness_map, render_3d_fill_time, render_3d_pressure],
 )
-def test_renderer_returns_figure(small_result, renderer):
+def test_figure_has_pl_extrusion_anatomy(small_result, renderer):
+    """The figure must contain a PL floor, a colored ceiling, and side walls."""
     fig = renderer(small_result)
     assert isinstance(fig, go.Figure)
-    # exactly one Surface trace
-    surfaces = [t for t in fig.data if isinstance(t, go.Surface)]
-    assert len(surfaces) == 1
-    surf = surfaces[0]
-    # Z (height) shape == mask shape
-    z_shape = np.asarray(surf.z).shape
-    assert z_shape == small_result.geometry.mask.shape
-    # surface color array shape matches as well
-    assert np.asarray(surf.surfacecolor).shape == z_shape
+    floor, ceiling, walls = _split_traces(fig)
+    # floor and ceiling share the mask shape
+    g = small_result.geometry
+    assert np.asarray(floor.z).shape == g.mask.shape
+    assert np.asarray(ceiling.z).shape == g.mask.shape
+    # ceiling carries the physics field as surfacecolor
+    assert np.asarray(ceiling.surfacecolor).shape == g.mask.shape
+    # walls trace exists and has valid (i,j,k) triangle indices
+    assert walls is not None
+    assert len(walls.i) == len(walls.j) == len(walls.k)
+    assert len(walls.i) > 0
 
 
-def test_outside_cavity_cells_are_nan(small_result):
-    """Cells with mask=False should be NaN in Z so plotly skips them."""
+def test_outside_cavity_cells_are_masked(small_result):
+    """Both floor and ceiling Z values must be NaN outside the cavity."""
     fig = render_3d_thickness_map(small_result)
-    surf = fig.data[0]
-    z = np.asarray(surf.z)
-    outside_mask = ~small_result.geometry.mask
-    # All outside-cavity Z values must be NaN
-    assert np.all(np.isnan(z[outside_mask]))
-    # All in-cavity Z values must be finite and positive
-    z_in = z[small_result.geometry.mask]
-    assert np.all(np.isfinite(z_in))
-    assert np.all(z_in > 0)
+    floor, ceiling, _walls = _split_traces(fig)
+    outside = ~small_result.geometry.mask
+    inside = small_result.geometry.mask
+    # ceiling: NaN outside, finite-positive inside
+    z_ceiling = np.asarray(ceiling.z)
+    assert np.all(np.isnan(z_ceiling[outside]))
+    assert np.all(np.isfinite(z_ceiling[inside]))
+    assert np.all(z_ceiling[inside] > 0)
+    # floor: NaN outside, exactly 0 inside
+    z_floor = np.asarray(floor.z)
+    assert np.all(np.isnan(z_floor[outside]))
+    assert np.all(z_floor[inside] == 0.0)
 
 
 def test_axes_are_gate_centered(small_result):
     """The x/y coordinate arrays should be centered on the gate origin."""
     fig = render_3d_thickness_map(small_result)
-    surf = fig.data[0]
-    x = np.asarray(surf.x)
-    y = np.asarray(surf.y)
+    _floor, ceiling, _walls = _split_traces(fig)
+    x = np.asarray(ceiling.x)
+    y = np.asarray(ceiling.y)
     g = small_result.geometry
     x0, y0 = g.gate_origin_mm()
-    # First cell center in gate-centered frame
     expected_x0 = (0 + 0.5) * g.cell_size_mm - x0
     expected_y0 = (0 + 0.5) * g.cell_size_mm - y0
     assert np.isclose(x[0], expected_x0)
     assert np.isclose(y[0], expected_y0)
+
+
+def test_walls_span_pl_to_ceiling(small_result):
+    """Side-wall vertices should range from Z=0 (PL) up to the local
+    cavity height. No wall vertex may sit above the global h_max."""
+    fig = render_3d_thickness_map(small_result)
+    _floor, _ceiling, walls = _split_traces(fig)
+    z_walls = np.asarray(walls.z)
+    g = small_result.geometry
+    h_max = float(np.nanmax(g.thickness_mm[g.mask]))
+    assert z_walls.min() == 0.0  # walls start at PL
+    assert z_walls.max() <= h_max + 1e-9  # walls don't exceed global ceiling
+    assert z_walls.max() > 0.0  # there is at least one non-degenerate wall

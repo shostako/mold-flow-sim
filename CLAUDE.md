@@ -26,7 +26,7 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 46 tests
+.venv/bin/pytest tests/                        # 56 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
@@ -118,23 +118,35 @@ y_circle_bottom = pad                        ← 半円下端
 
 #### オプション機能：フローバランサー（▽ 肉盗み）
 
-LGP（導光板）系の実機技術。バルブゲート1点からの放射状（楕円状）流動先端を、製品長辺全幅から均一充填に近づけるための**中央肉盗み**。
+LGP（導光板）系の実機技術。バルブゲート1点からの放射状（楕円状）流動先端を、製品長辺全幅から均一充填に近づけるための**中央肉盗み**。**最大5段までネスト可能**で、中央が最薄・最大抵抗、外側に向かって厚みが段階的に増える階段状にできる。
 
-5パラメータ（`balancer_enabled=True` 時のみ有効）：
+共有パラメータ（`balancer_enabled=True` 時のみ有効）：
 
 | パラメータ | 意味 | 制約 |
 |----------|------|------|
 | `balancer_enabled` | bool トグル | — |
-| `balancer_base_width_mm` (W_bal) | ▽底辺幅（長辺側） | `≤ W_gate` |
 | `balancer_height_mm` (H_bal) | ▽の頂点〜底辺距離 | apex がバルブゲート円を侵さないこと |
 | `balancer_base_distance_from_gate_mm` | 底辺位置の半円中心からの y距離 | `≤ D` |
-| `balancer_target_thickness_mm` (h_bal) | ▽内のキャビティ厚（一定） | `> 0`、通常 `= plate_thk` |
 
-**実装**: ▽内のセルは `thickness_mm` を `h_bal` で**上書き**（既存 slope zone の補間値より小さい値で潰す）。`h_bal = plate_thk` のとき、▽内のキャビティ天井が**製品本体の天面と同じ高さ**になる。これが「製品平面と平行」（実機の肉盗み加工で底面を水平に削る形状）の数学表現。
+段ごとのパラメータ — **2通りの指定方式**：
 
-**物理**: コンダクタンス `S = h³/(12η)` の `h` を ▽ 内で下げると、流路抵抗が `h³` で激増する。樹脂は ▽ を避けて両端側に回り込むため、製品下辺の左右端への到達タイミングが中央と揃う方向に補正される。
+1. **スカラー形（後方互換、1段固定）**:
+   - `balancer_base_width_mm` (W_bal) — `≤ W_gate`
+   - `balancer_target_thickness_mm` (h_bal) — `> 0`
+   - 既存ケース／旧 cfg はこの形のまま動く。
 
-**設計の勘所**: `h_bal` を小さくする・`W_bal` を広げる・`H_bal/D` 比を上げると効果が強くなる。ただし極端にすると射出圧が跳ね上がる（実機）/ Pseudo-Conduction 解の数値条件が悪化する（このシミュレータ）。`run_demo.py` の `FilmGate_PP_balancer` がチューニング起点ケース。
+2. **タプル形（1〜5段ネスト、中央→外側の順）**:
+   - `balancer_base_widths_mm` — `tuple[float, ...]`（長さ N、`W_1 ≤ W_2 ≤ … ≤ W_N`）
+   - `balancer_thicknesses_mm` — `tuple[float, ...]`（長さ N、`h_1 ≤ h_2 ≤ … ≤ h_N`）
+   - 段 1 が中央（最薄）、段 N が外側。`W_N ≤ W_gate`、各値 `> 0`。
+
+`resolved_balancer_stages()` で `[(W_k, h_k), ...]` の正規化リストを返す。タプル形が空ならスカラー形を 1段として包む。
+
+**実装**: 外側→内側の順でセルに `h_k` を上書きしていく。結果として、中央軸（cx）からの距離 `|x - cx|` が `≤ 0.5·W_1·t_y` の領域は `h_1`、`0.5·W_1·t_y < … ≤ 0.5·W_2·t_y` は `h_2`、…、最も外側の輪は `h_N` になる（`t_y` は y 方向の補間係数、apex で 0、base で 1）。`h_k = plate_lower_thk` で揃えるとその段のキャビティ天井が**ゲート側プレートの天面と同じ高さ**になる。
+
+**物理**: コンダクタンス `S = h³/(12η)` の `h` を ▽ 内で下げると流路抵抗が `h³` で激増する。中央が最大抵抗、外側に向かって緩やかに減るので、樹脂は中央を避けて長辺の両端側に回り込み、N段ネストにより階段状に流動分配の精密制御が可能。
+
+**設計の勘所**: 段数を増やすほど精密に制御できるが、セルあたりの厚み変化が大きくなり数値条件が悪化する。`h_k` を小さくする・`W_k` を広げる・`H_bal/D` 比を上げると効果が強くなる。`run_demo.py` の `FilmGate_PP_balancer` は 1段（スカラー形）のチューニング起点ケース。
 
 ### 意図的にモデル化していないもの
 
@@ -149,11 +161,11 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ## テスト
 
-`tests/` 配下に4ファイル、合計 **46テスト**：
+`tests/` 配下に4ファイル、合計 **56テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
-- `test_geometry_film_gate.py` — 31件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー / プレート分割（ゲート側/反ゲート側2層） / solver 統合
+- `test_geometry_film_gate.py` — 41件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 
 新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`。
@@ -177,7 +189,7 @@ git checkout main && git pull
 **push 前に必ず**:
 - `ruff check .` （CI と同じ lint）
 - `ruff format --check .` （format check は CI で別ステップ。`ruff check` だけでは検出されない）
-- `pytest tests/` （46件全部 pass を確認）
+- `pytest tests/` （56件全部 pass を確認）
 
 CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上記3つを走らせる。Node.js 20 actions の deprecation warning が出るが2026-06-02までは無害。
 

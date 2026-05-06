@@ -521,6 +521,182 @@ def test_plate_split_validation_rejects_negative_upper_thickness() -> None:
         _split_cfg(plate_upper_thk_mm=-0.1).validate()
 
 
+# ---------- multi-stage balancer (1..5 nested ▽) ----------
+
+
+def _multi_stage_cfg(stages: list[tuple[float, float]], **overrides) -> FilmGateConfig:
+    """Helper: balancer with N nested stages (center→outer), runner-side
+    parameters identical to ``_balancer_cfg`` defaults."""
+    base = dict(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=2.0,
+        runner_long_mm=80.0,
+        runner_short_diameter_mm=12.0,
+        runner_depth_mm=20.0,
+        runner_thk_mm=4.0,
+        runner_flat_depth_mm=8.0,
+        runner_slope_depth_mm=12.0,
+        valve_gate_diameter_mm=4.0,
+        gate_width_mm=60.0,
+        cell_size_mm=0.5,
+        pad_mm=5.0,
+        balancer_enabled=True,
+        balancer_height_mm=14.0,
+        balancer_base_distance_from_gate_mm=20.0,
+        balancer_base_widths_mm=tuple(W for W, _ in stages),
+        balancer_thicknesses_mm=tuple(h for _, h in stages),
+    )
+    base.update(overrides)
+    return FilmGateConfig(**base)
+
+
+def test_multi_stage_balancer_resolves_stage_list() -> None:
+    cfg = _multi_stage_cfg([(20.0, 0.5), (40.0, 1.0)])
+    cfg.validate()
+    stages = cfg.resolved_balancer_stages()
+    assert stages == [(20.0, 0.5), (40.0, 1.0)]
+
+
+def test_multi_stage_balancer_two_stages_create_concentric_bands() -> None:
+    """Two-stage balancer at the base row: center carries h_1, surrounding
+    band carries h_2, both inside the runner trapezoid."""
+    cfg = _multi_stage_cfg([(20.0, 0.5), (40.0, 1.0)])
+    g = build_film_gate_geometry(cfg)
+
+    pad = cfg.pad_mm
+    iy_idx, ix_idx = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    xx = (ix_idx + 0.5) * cfg.cell_size_mm
+    cx = pad + cfg.plate_w_mm / 2
+    y_short = pad + cfg.runner_short_diameter_mm / 2
+    y_base = y_short + cfg.balancer_base_distance_from_gate_mm
+
+    # Use the row immediately below the balancer base (t_y ~ 1).
+    near_base = (yy < y_base) & (yy > y_base - cfg.cell_size_mm * 1.2) & g.mask
+    inner = near_base & (np.abs(xx - cx) < 8.5)  # well inside W_1/2 = 10
+    outer = (
+        near_base & (np.abs(xx - cx) > 11.5) & (np.abs(xx - cx) < 18.5)
+    )  # between W_1/2 and W_2/2
+    sample_inner = g.thickness_mm[inner]
+    sample_outer = g.thickness_mm[outer]
+    assert sample_inner.size > 0
+    assert sample_outer.size > 0
+    np.testing.assert_allclose(sample_inner, 0.5, atol=1e-9)
+    np.testing.assert_allclose(sample_outer, 1.0, atol=1e-9)
+
+
+def test_multi_stage_balancer_n5_paints_five_thickness_levels() -> None:
+    """Five-stage balancer produces five distinct thickness values inside the ▽."""
+    stages = [(8.0, 0.4), (16.0, 0.7), (24.0, 1.0), (32.0, 1.3), (40.0, 1.6)]
+    cfg = _multi_stage_cfg(stages)
+    g = build_film_gate_geometry(cfg)
+
+    pad = cfg.pad_mm
+    iy_idx, _ix_idx = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    y_short = pad + cfg.runner_short_diameter_mm / 2
+    y_apex = y_short + (cfg.balancer_base_distance_from_gate_mm - cfg.balancer_height_mm)
+    y_base = y_short + cfg.balancer_base_distance_from_gate_mm
+    in_band = (yy >= y_apex) & (yy <= y_base)
+    near_base = in_band & (yy > y_base - cfg.cell_size_mm * 1.2) & g.mask
+
+    sample = g.thickness_mm[near_base]
+    distinct = sorted(set(np.round(sample, 4).tolist()))
+    # All 5 stage values must appear, plus optionally the runner-slope value
+    # at the very edge of the centerline row. Require at least the 5 stage h.
+    for h_k in (0.4, 0.7, 1.0, 1.3, 1.6):
+        assert any(abs(v - h_k) < 1e-3 for v in distinct), (
+            f"stage thickness {h_k} not found in row distinct values {distinct}"
+        )
+
+
+def test_multi_stage_balancer_inner_stages_overwrite_outer() -> None:
+    """The center column inside the balancer must carry h_1 (not h_outer)."""
+    cfg = _multi_stage_cfg([(8.0, 0.3), (40.0, 1.5)])
+    g = build_film_gate_geometry(cfg)
+
+    pad = cfg.pad_mm
+    iy_idx, ix_idx = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    xx = (ix_idx + 0.5) * cfg.cell_size_mm
+    cx = pad + cfg.plate_w_mm / 2
+    y_short = pad + cfg.runner_short_diameter_mm / 2
+    y_base = y_short + cfg.balancer_base_distance_from_gate_mm
+
+    near_base = (yy < y_base) & (yy > y_base - cfg.cell_size_mm * 1.2) & g.mask
+    on_axis = near_base & (np.abs(xx - cx) < cfg.cell_size_mm * 0.8)
+    sample = g.thickness_mm[on_axis]
+    assert sample.size > 0
+    np.testing.assert_allclose(sample, 0.3, atol=1e-9)
+
+
+def test_multi_stage_balancer_validation_rejects_too_many_stages() -> None:
+    with pytest.raises(ValueError, match="1..5 stages"):
+        _multi_stage_cfg(
+            [(5.0, 0.2), (10.0, 0.4), (15.0, 0.6), (20.0, 0.8), (25.0, 1.0), (30.0, 1.2)]
+        ).validate()
+
+
+def test_multi_stage_balancer_validation_rejects_decreasing_widths() -> None:
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _multi_stage_cfg([(40.0, 0.5), (20.0, 1.0)]).validate()
+
+
+def test_multi_stage_balancer_validation_rejects_decreasing_thicknesses() -> None:
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _multi_stage_cfg([(20.0, 1.0), (40.0, 0.5)]).validate()
+
+
+def test_multi_stage_balancer_validation_rejects_unequal_lengths() -> None:
+    cfg = FilmGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=2.0,
+        runner_long_mm=80.0,
+        runner_short_diameter_mm=12.0,
+        runner_depth_mm=20.0,
+        runner_thk_mm=4.0,
+        runner_flat_depth_mm=8.0,
+        runner_slope_depth_mm=12.0,
+        valve_gate_diameter_mm=4.0,
+        gate_width_mm=60.0,
+        cell_size_mm=1.0,
+        pad_mm=5.0,
+        balancer_enabled=True,
+        balancer_height_mm=14.0,
+        balancer_base_distance_from_gate_mm=20.0,
+        balancer_base_widths_mm=(20.0, 40.0),
+        balancer_thicknesses_mm=(0.5,),
+    )
+    with pytest.raises(ValueError, match="equal length"):
+        cfg.validate()
+
+
+def test_multi_stage_balancer_outer_width_must_fit_gate() -> None:
+    with pytest.raises(ValueError, match="outermost"):
+        _multi_stage_cfg([(20.0, 0.5), (70.0, 1.0)], gate_width_mm=60.0).validate()
+
+
+def test_multi_stage_balancer_n1_matches_single_stage_scalar_form() -> None:
+    """A single-stage tuple form must produce the same thickness map as the
+    equivalent scalar form."""
+    scalar_cfg = _balancer_cfg(
+        balancer_base_width_mm=36.0,
+        balancer_target_thickness_mm=2.0,
+    )
+    tuple_cfg = _balancer_cfg(
+        balancer_base_width_mm=0.0,
+        balancer_target_thickness_mm=0.0,
+        balancer_base_widths_mm=(36.0,),
+        balancer_thicknesses_mm=(2.0,),
+    )
+    g_scalar = build_film_gate_geometry(scalar_cfg)
+    g_tuple = build_film_gate_geometry(tuple_cfg)
+    assert np.array_equal(g_scalar.mask, g_tuple.mask)
+    assert np.allclose(g_scalar.thickness_mm, g_tuple.thickness_mm)
+
+
 def test_plate_split_lower_defaults_to_plate_thk() -> None:
     """When ``plate_lower_thk_mm`` is None, the gate-side band falls back
     to ``plate_thk_mm`` while the far-side band uses its own value."""

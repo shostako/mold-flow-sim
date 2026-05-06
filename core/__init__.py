@@ -17,6 +17,11 @@ from .visualizer import (
     render_skin_layer_map,
     render_weldlines,
 )
+from .visualizer_3d import (
+    render_3d_fill_time,
+    render_3d_pressure,
+    render_3d_thickness_map,
+)
 
 __all__ = [
     "MaterialDB",
@@ -34,4 +39,7 @@ __all__ = [
     "render_skin_layer_map",
     "render_core_layer_map",
     "export_frames",
+    "render_3d_thickness_map",
+    "render_3d_fill_time",
+    "render_3d_pressure",
 ]

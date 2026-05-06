@@ -47,7 +47,8 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 - **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表せん断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
 - **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`geometry_from_image`（画像閾値処理）。
 - **`solver.py`** — `HeleShawSolver` と結果 `FlowResult`。中核アルゴリズムは下記。
-- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。
+- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
+- **`visualizer_3d.py`** — `render_3d_thickness_map` / `render_3d_fill_time` / `render_3d_pressure`。**インタラクティブな3D表示**用。Plotly の `go.Figure` を返し、Streamlit の `st.plotly_chart` で埋め込む想定。物理は 2D Hele-Shaw のまま、表現上の3D化（Z 軸 = キャビティ厚み）。
 
 ### 中核アルゴリズム（`solver.py`）
 
@@ -161,14 +162,15 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ## テスト
 
-`tests/` 配下に4ファイル、合計 **56テスト**：
+`tests/` 配下に5ファイル、合計 **61テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
 - `test_geometry_film_gate.py` — 41件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
+- `test_visualizer_3d.py` — 5件: 3D plotly レンダラの smoke（Figure 返却、Surface trace 1個、Z形状 == mask 形状、外殻NaN処理、ゲート中心軸）
 
-新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`。
+新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`、3D系なら `test_visualizer_3d.py`。
 
 ## 開発ワークフロー
 
@@ -203,6 +205,7 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
   - `requirements.txt` は **Streamlit Community Cloud デプロイ用**のミラー。pyproject.toml の deps を変更したら必ずこちら側も同期する。
   - `runtime.txt` は Streamlit Cloud に Python バージョンを伝える1行（`python-3.12`）。
   - `.streamlit/config.toml` は Streamlit ランタイム設定（アップロード上限等）。ローカル/Cloud 両方で読まれる。
+- 主な依存：numpy / scipy（ソルバ）、matplotlib（画像書き出し）、Pillow（画像入力）、streamlit（UI）、**plotly**（3D表示、`visualizer_3d.py` 専用）。plotly は app.py の3D expanderを開いた時点でしか描画コストが走らないので、低スペック環境でも UI レスポンスは犠牲にならない。
 
 ## UI と CLI の対応関係
 

@@ -33,8 +33,8 @@ from core.geometry import Geometry
 st.set_page_config(page_title="Mold Flow Sim (simplified)", layout="wide")
 st.title("射出成形 簡易流動解析")
 st.caption(
-    "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time。"
-    "教育・概念検証用。実機検討は本気のCAEを使ってくれ。"
+    "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time モデルによる、"
+    "射出成形流動の初期スクリーニング・概念検証ツール。"
 )
 
 
@@ -381,7 +381,7 @@ def build_geometry() -> Geometry:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
     if upload is None:
-        st.warning("画像をアップロードしてくれ。")
+        st.warning("画像をアップロードしてください。")
         st.stop()
     img_bytes = upload.read()
     tmp_path = Path(tempfile.mkdtemp()) / upload.name
@@ -397,7 +397,7 @@ def build_geometry() -> Geometry:
         # default gate: leftmost cavity column, vertical center
         ys, xs = np.where(g.mask)
         if ys.size == 0:
-            st.error("キャビティ領域が検出できなかった。しきい値か反転を見直せ。")
+            st.error("キャビティ領域が検出できませんでした。しきい値か反転設定を見直してください。")
             st.stop()
         ix = int(xs.min())
         col_ys = ys[xs == xs.min()]
@@ -583,7 +583,7 @@ if do_run:
             st.json(result.metadata)
 else:
     with col_right:
-        st.info("左側でパラメータを設定して「解析実行」を押せ。")
+        st.info("左側でパラメータを設定し、「解析実行」を押してください。")
         st.markdown(
             """
             **物理モデル**
@@ -595,12 +595,13 @@ else:
               で壁面固化を取り込み、コア層 h_core = h - 2s のみが流路として効く。
               τ ↔ h_core を fixed-point 反復で釣り合わせる。
 
-            **モデル化していないもの（重要）**
+            **モデル化の対象外（簡略化のため割り切っている範囲）**
             - コアのバルク温度低下（粘度の動的更新は無し、Neumann近似で熱結合を切離）
             - 真の3D流れ（コーナー効果、ジェッティング）
             - 結晶化・収縮・反り
             - パッキング段階の保圧
 
-            真面目な型設計ならMoldflowなりMoldex3Dなり買え。
+            このツールは流動の傾向把握・パラメータ感度の検討を目的にした
+            初期スクリーニング向けです。最終的な型設計の検証には商用CAEの併用を推奨します。
             """
         )

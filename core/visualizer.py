@@ -110,13 +110,16 @@ def render_fill_animation(
 
     # progress bar
     if show_progress_bar:
-        bar_ax = fig.add_axes([0.15, 0.02, 0.7, 0.025])
+        bar_ax = fig.add_axes([0.15, 0.06, 0.7, 0.022])
         bar_ax.set_xlim(0, 1)
         bar_ax.set_ylim(0, 1)
         bar_ax.set_xticks([])
         bar_ax.set_yticks([])
         bar_rect = bar_ax.barh([0.5], [0.0], height=1.0, color="#2ecc71")[0]
-        bar_ax.set_xlabel("fill progress")
+        # title above the bar (instead of xlabel below) to keep the figure
+        # bottom edge clear and avoid the label getting clipped on small
+        # output sizes.
+        bar_ax.set_title("fill progress", fontsize=8, pad=2)
     else:
         bar_rect = None
 

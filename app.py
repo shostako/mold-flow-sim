@@ -22,6 +22,9 @@ from core import (
     build_demo_geometry,
     build_film_gate_geometry,
     geometry_from_image,
+    render_3d_fill_time,
+    render_3d_pressure,
+    render_3d_thickness_map,
     render_core_layer_map,
     render_fill_animation,
     render_pressure_map,
@@ -578,6 +581,32 @@ if do_run:
                     "コア層 h_core = h - 2s。赤マーク = スキン同士が会合した short shot 候補。"
                 )
                 _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
+
+        with st.expander("3D表示（plotly・実験的）"):
+            st.caption(
+                "キャビティ厚み h(x,y) を Z 軸方向に立体化したサーフェス。"
+                "ドラッグで回転、スクロールでズーム。中身の物理は 2D Hele-Shaw のまま"
+                "（表現上の3D化のみ）。"
+            )
+            t3d_h, t3d_fill, t3d_press = st.tabs(["厚み h(x,y)", "充填時間", "圧力"])
+            with t3d_h:
+                st.plotly_chart(
+                    render_3d_thickness_map(result),
+                    use_container_width=True,
+                    config={"displaylogo": False},
+                )
+            with t3d_fill:
+                st.plotly_chart(
+                    render_3d_fill_time(result),
+                    use_container_width=True,
+                    config={"displaylogo": False},
+                )
+            with t3d_press:
+                st.plotly_chart(
+                    render_3d_pressure(result),
+                    use_container_width=True,
+                    config={"displaylogo": False},
+                )
 
         with st.expander("生データ"):
             st.json(result.metadata)

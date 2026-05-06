@@ -28,6 +28,7 @@ dependencies = [
     "matplotlib>=3.7",
     "Pillow>=10.0",
     "streamlit>=1.28",
+    "plotly>=5.18",
 ]
 
 [project.optional-dependencies]

@@ -1,24 +1,31 @@
-"""Interactive 3D visualization for FlowResult (Phase 1: static surfaces).
+"""Interactive 3D visualization for FlowResult (Phase 1: solid extrusion).
 
 This module is a *separate* surface from :mod:`core.visualizer` (which writes
 PNG/GIF via matplotlib). 3D output here is a Plotly :class:`~plotly.graph_objects.Figure`
 intended to be embedded in the Streamlit UI via ``st.plotly_chart``.
 
-Phase 1 scope:
-    - ``render_3d_thickness_map``  — cavity thickness ``h(x,y)`` extruded as
-      a Z-axis surface, optionally colored by a scalar field (e.g. ``tau``).
-    - ``render_3d_fill_time``      — same surface, colored by fill-time.
-    - ``render_3d_pressure``       — same surface, colored by normalized pressure.
+Phase 1 scope (current):
+    Each cavity cell is rendered as a solid block extruded **upward** from
+    the parting line (PL) at ``Z = 0`` to the cavity ceiling at
+    ``Z = h(x, y)``. The figure has three traces:
+
+    1. **Top surface** (Z = h)  — colored by the requested physics field
+       (thickness / fill-time / pressure). This is the "active" surface.
+    2. **PL floor**    (Z = 0)  — uniform light gray, slightly transparent.
+       Represents the parting-line / mold-half boundary.
+    3. **Side walls**           — vertical Mesh3d quads on every cavity
+       boundary edge. Closes the silhouette so the geometry reads as a
+       solid block, not as a floating sheet.
 
 Animation of the flow front (frames-based) is deferred to Phase 1-2.
 
-Coordinate convention matches :mod:`core.visualizer`: x/y are in mm with the
-valve-gate centroid at the origin; the surface height (Z) is the local
-cavity thickness in mm.
+Coordinate convention matches :mod:`core.visualizer`: x/y are in mm with
+the valve-gate centroid at the origin; Z = 0 is the parting line; Z > 0
+is the cavity height direction.
 
-Plotly is loaded only when these functions are called (the import lives at
-module level but the rest of the codebase does not import this module unless
-the UI is showing 3D content).
+Plotly is imported at module level. The rest of the codebase does not
+import this module unless the UI is showing 3D content (the Streamlit
+expander is closed by default).
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ import plotly.graph_objects as go
 from .solver import FlowResult
 
 # ----------------------------------------------------------------------
-# Internal helpers
+# Coordinate / mask helpers
 # ----------------------------------------------------------------------
 
 
@@ -61,6 +68,197 @@ def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 
+# ----------------------------------------------------------------------
+# Side-wall mesh builder
+# ----------------------------------------------------------------------
+
+
+def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a vertical-wall Mesh3d for every cavity boundary edge.
+
+    For each in-cavity cell, check its 4 neighbors. Whenever a neighbor
+    is out-of-bounds or out-of-cavity, emit a vertical quad on the shared
+    edge from Z = 0 (PL) to Z = h_local (cavity ceiling).
+
+    Returns four 1-D arrays (xs, ys, zs, tri_ijk_flat) where the last
+    array is the flat (3M,) index list — three indices per triangle.
+    Caller reshapes into (i, j, k) for Plotly.
+    """
+    g = result.geometry
+    nx, ny = g.nx, g.ny
+    cs = g.cell_size_mm
+    x0, y0 = g.gate_origin_mm()
+    mask = g.mask
+    thk = g.thickness_mm
+
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    tri: list[int] = []
+
+    def add_quad(
+        ax_m: float,
+        ay_m: float,
+        bx_m: float,
+        by_m: float,
+        h_top: float,
+    ) -> None:
+        """Append a vertical quad with bottom edge (a→b) at Z=0 and top
+        edge (a→b) at Z=h_top, as two triangles."""
+        i0 = len(xs)
+        # bottom-A, bottom-B, top-B, top-A
+        for x_m, y_m, z_m in (
+            (ax_m, ay_m, 0.0),
+            (bx_m, by_m, 0.0),
+            (bx_m, by_m, h_top),
+            (ax_m, ay_m, h_top),
+        ):
+            xs.append(x_m)
+            ys.append(y_m)
+            zs.append(z_m)
+        # two triangles: (i0, i0+1, i0+2) and (i0, i0+2, i0+3)
+        tri.extend([i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3])
+
+    # iterate cavity cells; numpy-where is overkill for the small N of
+    # boundary cells, a plain loop is fine and easier to read
+    iy_idx, ix_idx = np.where(mask)
+    for iy, ix in zip(iy_idx.tolist(), ix_idx.tolist(), strict=True):
+        h_top = float(thk[iy, ix])
+        if not np.isfinite(h_top) or h_top <= 0.0:
+            continue
+        # cell corners in gate-centered mm
+        x_left = ix * cs - x0
+        x_right = (ix + 1) * cs - x0
+        y_bot = iy * cs - y0
+        y_top = (iy + 1) * cs - y0
+
+        # north neighbor (iy+1, ix)
+        if iy + 1 >= ny or not mask[iy + 1, ix]:
+            add_quad(x_left, y_top, x_right, y_top, h_top)
+        # south neighbor (iy-1, ix)
+        if iy - 1 < 0 or not mask[iy - 1, ix]:
+            add_quad(x_left, y_bot, x_right, y_bot, h_top)
+        # east neighbor (iy, ix+1)
+        if ix + 1 >= nx or not mask[iy, ix + 1]:
+            add_quad(x_right, y_bot, x_right, y_top, h_top)
+        # west neighbor (iy, ix-1)
+        if ix - 1 < 0 or not mask[iy, ix - 1]:
+            add_quad(x_left, y_bot, x_left, y_top, h_top)
+
+    return (
+        np.asarray(xs, dtype=float),
+        np.asarray(ys, dtype=float),
+        np.asarray(zs, dtype=float),
+        np.asarray(tri, dtype=np.int32),
+    )
+
+
+# ----------------------------------------------------------------------
+# Trace assembly
+# ----------------------------------------------------------------------
+
+
+def _floor_trace(result: FlowResult) -> go.Surface:
+    """PL (parting-line) floor: a Z = 0 surface masked to the cavity.
+
+    Plotly Surface treats NaN cells as 'no draw', so this surface
+    appears only inside the cavity outline — exactly the projected
+    silhouette of the product on the parting line.
+    """
+    g = result.geometry
+    x, y = _gate_centered_axes(result)
+    z = np.where(g.mask, 0.0, np.nan)
+    return go.Surface(
+        x=x,
+        y=y,
+        z=z,
+        showscale=False,
+        opacity=0.55,
+        colorscale=[[0, "rgb(180,180,180)"], [1, "rgb(180,180,180)"]],
+        cmin=0.0,
+        cmax=1.0,
+        surfacecolor=np.where(g.mask, 0.5, np.nan),
+        connectgaps=False,
+        name="PL (parting line, Z=0)",
+        hovertemplate="PL  x=%{x:.1f}, y=%{y:.1f}<extra></extra>",
+        contours=dict(
+            x=dict(highlight=False),
+            y=dict(highlight=False),
+            z=dict(highlight=False),
+        ),
+    )
+
+
+def _walls_trace(result: FlowResult) -> go.Mesh3d | None:
+    """Vertical side walls along every cavity boundary edge.
+
+    Returns ``None`` if the cavity is empty (degenerate case, mostly
+    relevant for tests with all-False masks).
+    """
+    xs, ys, zs, tri = _build_side_walls(result)
+    if xs.size == 0:
+        return None
+    n_tri = tri.size // 3
+    ijk = tri.reshape(n_tri, 3)
+    return go.Mesh3d(
+        x=xs,
+        y=ys,
+        z=zs,
+        i=ijk[:, 0],
+        j=ijk[:, 1],
+        k=ijk[:, 2],
+        color="rgb(150,150,150)",
+        opacity=0.85,
+        flatshading=True,
+        name="cavity walls",
+        hoverinfo="skip",
+        showlegend=False,
+    )
+
+
+def _ceiling_trace(
+    result: FlowResult,
+    color_field: np.ndarray,
+    *,
+    colorscale: str,
+) -> go.Surface:
+    """Top surface (Z = h) colored by the requested physics field."""
+    x, y = _gate_centered_axes(result)
+    z = _surface_height(result)
+    return go.Surface(
+        x=x,
+        y=y,
+        z=z,
+        surfacecolor=color_field,
+        colorscale=colorscale,
+        coloraxis="coloraxis",
+        showscale=True,
+        connectgaps=False,
+        name="cavity ceiling",
+        hovertemplate=(
+            "x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>"
+            "h=%{z:.2f} mm<br>color=%{surfacecolor:.3g}<extra></extra>"
+        ),
+    )
+
+
+def _figure_with_pl_extrusion(
+    result: FlowResult,
+    color_field: np.ndarray,
+    *,
+    colorscale: str,
+) -> go.Figure:
+    """Compose ceiling + PL floor + side walls into one Plotly Figure."""
+    traces: list = [_floor_trace(result)]
+    walls = _walls_trace(result)
+    if walls is not None:
+        traces.append(walls)
+    traces.append(_ceiling_trace(result, color_field, colorscale=colorscale))
+    fig = go.Figure(data=traces)
+    fig.update_layout(coloraxis=dict(colorscale=colorscale))
+    return fig
+
+
 def _apply_camera_and_layout(
     fig: go.Figure,
     result: FlowResult,
@@ -82,46 +280,16 @@ def _apply_camera_and_layout(
         scene=dict(
             xaxis_title="x [mm]",
             yaxis_title="y [mm]",
-            zaxis_title="thickness h [mm]",
+            zaxis_title="cavity height (PL=0) [mm]",
             aspectmode="manual",
             aspectratio=dict(x=1.0, y=h_mm / w_mm, z=z_aspect),
             camera=dict(eye=dict(x=1.4, y=-1.4, z=1.1)),
+            zaxis=dict(rangemode="tozero"),
         ),
         margin=dict(l=0, r=0, t=40, b=0),
         coloraxis_colorbar=dict(title=cbar_title),
     )
-    # Hide Plotly's modebar logo to keep the embed clean.
     fig.update_layout(modebar=dict(remove=["lasso", "select"]))
-    return fig
-
-
-def _surface(
-    result: FlowResult,
-    color_field: np.ndarray,
-    *,
-    colorscale: str,
-    cbar_title: str,
-) -> go.Figure:
-    """Build a Plotly Surface trace using the cavity thickness as Z and
-    ``color_field`` as the surface color."""
-    x, y = _gate_centered_axes(result)
-    z = _surface_height(result)
-    surface = go.Surface(
-        x=x,
-        y=y,
-        z=z,
-        surfacecolor=color_field,
-        colorscale=colorscale,
-        coloraxis="coloraxis",
-        showscale=True,
-        connectgaps=False,
-        hovertemplate=(
-            "x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>"
-            "h=%{z:.2f} mm<br>color=%{surfacecolor:.3g}<extra></extra>"
-        ),
-    )
-    fig = go.Figure(data=[surface])
-    fig.update_layout(coloraxis=dict(colorscale=colorscale))
     return fig
 
 
@@ -131,39 +299,39 @@ def _surface(
 
 
 def render_3d_thickness_map(result: FlowResult) -> go.Figure:
-    """3D surface colored by cavity thickness itself (geometry-only view)."""
+    """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness."""
     g = result.geometry
     color = _scalar_with_mask(g.thickness_mm, g.mask)
-    fig = _surface(result, color, colorscale="Viridis", cbar_title="h [mm]")
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
     return _apply_camera_and_layout(
         fig,
         result,
-        title="Cavity thickness h(x, y) [mm] — 3D view",
+        title="Cavity thickness h(x, y) [mm] — solid view from PL",
         cbar_title="h [mm]",
     )
 
 
 def render_3d_fill_time(result: FlowResult) -> go.Figure:
-    """3D surface colored by fill-time (s). Outside cavity → blank."""
+    """3D solid extrusion with the ceiling colored by fill-time."""
     g = result.geometry
     color = _scalar_with_mask(result.fill_time_s, g.mask)
-    fig = _surface(result, color, colorscale="Plasma", cbar_title="fill time [s]")
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Plasma")
     return _apply_camera_and_layout(
         fig,
         result,
-        title=f"Fill time on cavity surface — T_fill = {result.total_fill_time_s:.3f} s",
+        title=f"Fill time on cavity ceiling — T_fill = {result.total_fill_time_s:.3f} s",
         cbar_title="fill time [s]",
     )
 
 
 def render_3d_pressure(result: FlowResult) -> go.Figure:
-    """3D surface colored by normalized pressure (1 at gate, 0 at last fill)."""
+    """3D solid extrusion with the ceiling colored by normalized pressure."""
     g = result.geometry
     color = _scalar_with_mask(result.pressure_norm, g.mask)
-    fig = _surface(result, color, colorscale="Turbo", cbar_title="P_norm")
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Turbo")
     return _apply_camera_and_layout(
         fig,
         result,
-        title="Normalized pressure (1 at gate, 0 at last fill)",
+        title="Normalized pressure on cavity ceiling (1 at gate, 0 at last fill)",
         cbar_title="P_norm",
     )

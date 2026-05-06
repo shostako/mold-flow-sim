@@ -439,8 +439,7 @@ with col_left:
     plt.close(fig)
     st.image(fig_buf.getvalue())
     st.caption(
-        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。半円部は y < 0 側。"
-        "赤丸はバルブゲート位置。"
+        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。半円部は y < 0 側。赤丸はバルブゲート位置。"
     )
 
 

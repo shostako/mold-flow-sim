@@ -7,7 +7,9 @@ Run:
 from __future__ import annotations
 
 import io
+import json
 import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +49,11 @@ material_keys = list(db.keys())
 
 # ----------------------- sidebar: inputs -----------------------
 with st.sidebar:
-    st.header("成形品設計")
+    _hdr_col, _run_col = st.columns([1.4, 1], vertical_alignment="bottom")
+    with _hdr_col:
+        st.header("成形品設計")
+    with _run_col:
+        do_run = st.button("解析実行", type="primary", use_container_width=True)
     geom_source = st.radio(
         "入力",
         [
@@ -297,7 +303,7 @@ with st.sidebar:
             "スキン層成長定数 c_skin",
             0.0,
             2.0,
-            0.5,
+            1.0,
             step=0.05,
             help="0で OFF と同等。1.0 付近が物理的代表値。薄肉ほど効果大。",
         )
@@ -332,8 +338,6 @@ with st.sidebar:
 
     st.header("出力")
     num_frames = st.slider("アニメーションフレーム数", 12, 60, 30)
-
-    do_run = st.button("解析実行", type="primary")
 
 
 # ----------------------- main panel -----------------------
@@ -514,28 +518,66 @@ if do_run:
         gif_path = render_fill_animation(result, tmp_dir / "fill.gif", num_frames=num_frames, fps=8)
         press_path = render_pressure_map(result, tmp_dir / "pressure.png")
         weld_path = render_weldlines(result, tmp_dir / "weld.png")
+        skin_path: Path | None = None
+        core_path: Path | None = None
+        if skin_on and result.skin_thickness_mm is not None:
+            skin_path = render_skin_layer_map(result, tmp_dir / "skin.png")
+            core_path = render_core_layer_map(result, tmp_dir / "core.png")
+
+        def _download(label: str, path: Path, mime: str, key: str) -> None:
+            with open(path, "rb") as _f:
+                st.download_button(
+                    label,
+                    data=_f.read(),
+                    file_name=path.name,
+                    mime=mime,
+                    key=key,
+                )
+
+        # Build a ZIP of every artifact so the user can grab the whole
+        # animation set (GIF + maps + metadata) in a single click.
+        _zip_buf = io.BytesIO()
+        with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+            for _p in (gif_path, press_path, weld_path, skin_path, core_path):
+                if _p is not None and _p.exists():
+                    _zf.write(_p, _p.name)
+            _zf.writestr(
+                "metadata.json",
+                json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
+            )
+        _zip_bytes = _zip_buf.getvalue()
 
         st.markdown("**充填先端アニメーション**")
         st.image(str(gif_path))
+        st.download_button(
+            "⬇ GIFをダウンロード",
+            data=_zip_bytes,
+            file_name="mold_flow_results.zip",
+            mime="application/zip",
+            key="dl_zip_all",
+            help="GIF・各マップ PNG・metadata.json を1つの ZIP にまとめてダウンロード",
+        )
 
         with st.expander("圧力マップ"):
             st.image(str(press_path))
             st.caption("0=ゲート遠端、1=ゲート。実圧力スケールではなく相対分布。")
+            _download("⬇ PNGをダウンロード", press_path, "image/png", "dl_press_png")
 
         with st.expander("等値線・ウェルドライン候補・エアトラップ"):
             st.image(str(weld_path))
             st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
+            _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
 
-        if skin_on and result.skin_thickness_mm is not None:
-            skin_path = render_skin_layer_map(result, tmp_dir / "skin.png")
-            core_path = render_core_layer_map(result, tmp_dir / "core.png")
+        if skin_path is not None and core_path is not None:
             with st.expander("スキン層 / コア層 / short shot"):
                 st.image(str(skin_path))
                 st.caption("スキン層厚さ s(x,y) [mm]。流動が遅いほど・薄肉ほど s が大きい。")
+                _download("⬇ スキン層 PNGをダウンロード", skin_path, "image/png", "dl_skin_png")
                 st.image(str(core_path))
                 st.caption(
                     "コア層 h_core = h - 2s。赤マーク = スキン同士が会合した short shot 候補。"
                 )
+                _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
 
         with st.expander("生データ"):
             st.json(result.metadata)

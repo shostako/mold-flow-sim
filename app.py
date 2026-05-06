@@ -272,7 +272,14 @@ with st.sidebar:
         max(_mold_min, min(50, _mold_max)),
     )
     inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
-    inj_Q = st.slider("射出体積流量 [cm³/s]", 1.0, 80.0, 20.0, step=1.0)
+    inj_Q = st.slider(
+        "射出率 [cm³/s]",
+        1.0,
+        800.0,
+        400.0,
+        step=5.0,
+        help="ソディック等の成形機取説の射出率に対応。",
+    )
 
     st.header("スキン層モデル")
     skin_on = st.checkbox(
@@ -317,8 +324,8 @@ with st.sidebar:
     st.header("射出圧縮成形 (ICM)")
     icm = st.checkbox("圧縮成形ON", value=True)
     if icm:
-        comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 2.5, 2.5, step=0.05)
-        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 0.9, 0.60, step=0.05)
+        comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 3.0, 2.2, step=0.05)
+        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 1.0, 0.95, step=0.05)
     else:
         comp_factor = 1.0
         comp_frac = 0.0

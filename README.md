@@ -14,7 +14,7 @@
 
 Streamlit Community Cloud にホスト（無料枠）。ブラウザだけで触れる：
 
-🔗 **<https://mold-flow-sim.streamlit.app>** *(デプロイ後に確定URLに差し替え)*
+🔗 **<https://mold-flow-sim.streamlit.app>**
 
 > 無料枠のため、初回アクセス時はコールドスタートで30秒〜1分待ち発生。
 > 計算はブラウザ側ではなく Streamlit Cloud の共有CPU（1 vCPU / 1 GB RAM）で走るので、

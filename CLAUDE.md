@@ -198,7 +198,11 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - `data/materials.json` — Cross-WLF パラメータ5樹脂（PP, ABS, PC, PA66, PMMA）。**generic 値**であり、実プロジェクト用にはベンダー実測データを差し替える前提。
 - `assets/` — 画像入力用の置き場（現状空）。
 - `.codex` — 0バイトの外部ツールマーカー（gitignore 済み）。
-- 依存は `pyproject.toml` の `[project] dependencies` に集約。`requirements.txt` は廃止済み。
+- **依存の二重管理**:
+  - `pyproject.toml` の `[project] dependencies` がローカル開発の正本（`uv pip install -e ".[dev]"` で読まれる）。
+  - `requirements.txt` は **Streamlit Community Cloud デプロイ用**のミラー。pyproject.toml の deps を変更したら必ずこちら側も同期する。
+  - `runtime.txt` は Streamlit Cloud に Python バージョンを伝える1行（`python-3.12`）。
+  - `.streamlit/config.toml` は Streamlit ランタイム設定（アップロード上限等）。ローカル/Cloud 両方で読まれる。
 
 ## UI と CLI の対応関係
 

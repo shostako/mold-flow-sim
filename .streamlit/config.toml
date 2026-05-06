@@ -1,0 +1,12 @@
+# Streamlit runtime config (loaded by both local and Streamlit Cloud).
+#
+# - server.maxUploadSize:
+#     画像から生成 (PNG/JPG) モード用に上限を 50MB に。
+#     デフォルト 200MB は無料枠でメモリ的にきつい。
+# - browser.gatherUsageStats:
+#     開発者向けテレメトリを無効化（Streamlit Cloud のメトリクスとは別）。
+[server]
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

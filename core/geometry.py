@@ -649,24 +649,21 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
 class DirectGateConfig:
     """Parameters for :func:`build_direct_gate_geometry`.
 
-    A rectangular plate (the product) is fed by a thin sprue/connector strip
-    centered on the plate's gate-side edge. The connector terminates in a
-    circular Dirichlet patch that represents the direct gate.
+    The cavity is a single rectangular plate with the gate sitting **inside**
+    the plate. The Dirichlet τ=0 patch is a circular disk of diameter
+    ``gate_diameter_mm`` placed on the plate's longitudinal centerline,
+    ``gate_offset_mm`` away from the gate-side edge (measured inward toward
+    the plate interior). No runner, no sprue strip — molten resin enters
+    the cavity vertically through this patch.
 
     Coordinate convention (mm, with y pointing up, x pointing right)::
 
-        y_plate_top      = pad + gate_offset + plate_h
-        y_plate_bottom   = pad + gate_offset                       (= long edge)
-        y_gate_center    = pad + gate_offset - max(0, gate_offset)
-                         = pad                                     (when sprue spans the full offset)
-        y = 0
+        y = pad_mm + plate_h_mm             ← far edge (反ゲート側)
+        y = pad_mm + gate_offset_mm         ← gate disk center
+        y = pad_mm                          ← gate-side edge
 
-    The plate body sits in the strip ``y_plate_bottom ≤ y ≤ y_plate_top``.
-    The connector strip (Φ ``gate_diameter_mm`` wide, centered on the plate
-    centerline) runs from ``y_plate_bottom`` down to the gate-side end.
-    The Dirichlet circle (Φ ``gate_diameter_mm``) sits at the lower end of
-    the connector strip; its center is therefore ``gate_offset_mm`` below
-    the plate's bottom edge.
+    The cavity occupies the rectangle ``[pad_mm, pad_mm + plate_w_mm] ×
+    [pad_mm, pad_mm + plate_h_mm]`` with constant thickness ``plate_thk_mm``.
 
     Parameters:
 
@@ -674,22 +671,21 @@ class DirectGateConfig:
     - ``plate_h_mm`` (Hp): plate height [mm], measured from the gate-side
       edge to the far edge
     - ``plate_thk_mm``: plate body thickness [mm]
-    - ``gate_diameter_mm``: diameter of both the connector strip and the
-      Dirichlet gate circle [mm] (default 3.0)
-    - ``gate_offset_mm``: distance from the plate's gate-side edge to the
-      gate-circle center [mm] (default 20.0). Set to 0 to put the gate
-      directly on the plate edge (degenerate; not recommended).
-    - ``sprue_thk_mm``: thickness of the connector strip and the
-      Dirichlet disk [mm]. Defaults to ``plate_thk_mm`` (true direct
-      gating, no thickness step).
+    - ``gate_diameter_mm``: diameter of the Dirichlet gate disk [mm]
+      (default 3.0)
+    - ``gate_offset_mm``: distance from the gate-side edge to the gate disk
+      center, measured inward [mm] (default 20.0)
     - ``cell_size_mm``: square mesh size [mm]
     - ``pad_mm``: padding around the cavity silhouette [mm]
 
     Constraints (validated at construction time):
 
-    - All numeric parameters strictly positive (``gate_offset_mm`` may be 0).
-    - ``gate_diameter_mm ≤ plate_w_mm``.
-    - ``sprue_thk_mm`` and ``plate_thk_mm`` strictly positive.
+    - All numeric parameters strictly positive.
+    - ``gate_diameter_mm ≤ plate_w_mm`` (gate fits across the plate width).
+    - ``gate_diameter_mm/2 ≤ gate_offset_mm`` (gate disk does not poke
+      past the gate-side edge).
+    - ``gate_offset_mm + gate_diameter_mm/2 ≤ plate_h_mm`` (gate disk does
+      not poke past the far edge).
     """
 
     plate_w_mm: float
@@ -697,14 +693,8 @@ class DirectGateConfig:
     plate_thk_mm: float
     gate_diameter_mm: float = 3.0
     gate_offset_mm: float = 20.0
-    sprue_thk_mm: float | None = None  # defaults to plate_thk_mm when None
     cell_size_mm: float = 1.0
     pad_mm: float = 5.0
-
-    def resolved_sprue_thk_mm(self) -> float:
-        return (
-            float(self.sprue_thk_mm) if self.sprue_thk_mm is not None else float(self.plate_thk_mm)
-        )
 
     def validate(self) -> None:
         eps = 1e-6
@@ -713,31 +703,45 @@ class DirectGateConfig:
             ("plate_h_mm", self.plate_h_mm),
             ("plate_thk_mm", self.plate_thk_mm),
             ("gate_diameter_mm", self.gate_diameter_mm),
+            ("gate_offset_mm", self.gate_offset_mm),
             ("cell_size_mm", self.cell_size_mm),
         ):
             if val <= 0:
                 raise ValueError(f"{name} must be positive (got {val})")
-        if self.gate_offset_mm < 0:
-            raise ValueError(f"gate_offset_mm must be ≥ 0 (got {self.gate_offset_mm})")
         if self.gate_diameter_mm > self.plate_w_mm + eps:
             raise ValueError(
                 f"gate_diameter_mm ({self.gate_diameter_mm}) must be ≤ "
                 f"plate_w_mm ({self.plate_w_mm})"
             )
-        if self.sprue_thk_mm is not None and self.sprue_thk_mm <= 0:
-            raise ValueError(f"sprue_thk_mm ({self.sprue_thk_mm}) must be > 0 when set")
+        r = self.gate_diameter_mm / 2.0
+        if self.gate_offset_mm + r > self.plate_h_mm + eps:
+            raise ValueError(
+                f"gate disk would poke past the far edge: "
+                f"gate_offset_mm ({self.gate_offset_mm}) + "
+                f"gate_diameter_mm/2 ({r}) > plate_h_mm ({self.plate_h_mm})"
+            )
+        if self.gate_offset_mm < r - eps:
+            raise ValueError(
+                f"gate disk would poke past the gate-side edge: "
+                f"gate_offset_mm ({self.gate_offset_mm}) < "
+                f"gate_diameter_mm/2 ({r})"
+            )
 
 
 def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
-    """Build a rectangular plate fed by a direct (Φ-pin) gate.
+    """Build a rectangular plate with a direct gate placed inside the plate.
 
-    The product is the plate; the connector strip is a thin column of width
-    ``gate_diameter_mm`` running from the plate's gate-side edge down to
-    the gate-circle center. The Dirichlet boundary is the disk of diameter
-    ``gate_diameter_mm`` at the lower end of the connector. Compression
-    molding (when enabled at solver level) inflates only the rectangular
-    plate body, not the connector or the gate disk — same convention as
-    :func:`build_film_gate_geometry`.
+    The product silhouette is a single rectangle of size
+    ``plate_w_mm × plate_h_mm``. A circular Dirichlet τ=0 disk of diameter
+    ``gate_diameter_mm`` is placed on the plate centerline,
+    ``gate_offset_mm`` inward from the gate-side edge — same coordinate
+    convention as :class:`FilmGateConfig` (gate-side edge at the small-y
+    side, far edge at the large-y side). The plate has uniform thickness
+    ``plate_thk_mm``; the gate cells share the same thickness because the
+    valve gate sits on the cavity surface itself, not on a separate sprue.
+
+    Compression molding (when enabled at solver level) inflates the entire
+    plate body — including the gate cells, since they belong to the product.
     """
     cfg.validate()
 
@@ -745,18 +749,17 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
     Wp = cfg.plate_w_mm
     Hp = cfg.plate_h_mm
     h_plate = cfg.plate_thk_mm
-    h_sprue = cfg.resolved_sprue_thk_mm()
     d_gate = cfg.gate_diameter_mm
     g_off = cfg.gate_offset_mm
     dx = cfg.cell_size_mm
 
     cx = pad + Wp / 2.0
-    y_gate_center = pad + d_gate / 2.0
-    y_plate_bottom = y_gate_center + g_off
-    y_plate_top = y_plate_bottom + Hp
+    y_plate_bottom = pad  # gate-side edge
+    y_plate_top = pad + Hp  # far edge
+    y_gate_center = pad + g_off
 
     total_w = 2 * pad + Wp
-    total_h = pad + d_gate / 2.0 + g_off + Hp + pad
+    total_h = 2 * pad + Hp
     nx = int(round(total_w / dx))
     ny = int(round(total_h / dx))
 
@@ -764,27 +767,22 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
     yy = (iy_idx + 0.5) * dx
     xx = (ix_idx + 0.5) * dx
 
-    # --- silhouette ---
+    # --- silhouette: just the plate, nothing else ---
     in_plate = (yy >= y_plate_bottom) & (yy <= y_plate_top) & (xx >= pad) & (xx <= pad + Wp)
-    # connector strip: width d_gate, centered on cx, from gate center y up
-    # to plate bottom edge. Skipped when gate_offset_mm == 0.
-    in_connector = (
-        (yy >= y_gate_center) & (yy <= y_plate_bottom) & (np.abs(xx - cx) <= d_gate / 2.0)
-    )
-    # gate disk: Dirichlet circular patch
+
+    # Dirichlet gate disk lives inside the plate
     in_gate_disk = ((xx - cx) ** 2 + (yy - y_gate_center) ** 2) <= (d_gate / 2.0) ** 2
 
-    mask = in_plate | in_connector | in_gate_disk
+    mask = in_plate
 
-    # --- thickness ---
+    # --- thickness: uniform plate ---
     thk = np.zeros_like(xx, dtype=float)
-    thk[in_gate_disk] = h_sprue
-    thk[in_connector] = h_sprue
     thk[in_plate] = h_plate
     thk[~mask] = 0.0
 
-    # --- compression mask: only the rectangular plate body inflates ---
-    compression_mask = in_plate & mask
+    # --- compression mask: the entire plate body inflates (the gate cells
+    # are part of the product and therefore part of the compression zone) ---
+    compression_mask = in_plate.copy()
 
     geom = Geometry(
         mask=mask,
@@ -794,11 +792,10 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
         compression_mask=compression_mask,
     )
 
-    # --- gate(s): every cell inside the Dirichlet disk that lives in the
-    #     cavity becomes a τ=0 boundary node. Defensive snap-to-nearest for
-    #     extreme cases where d_gate is below the cell size.
+    # --- Dirichlet τ=0 cells: the gate disk inside the plate ---
     gate_iys, gate_ixs = np.where(in_gate_disk & mask)
     if gate_iys.size == 0:
+        # Defensive: snap to the cell nearest the requested gate center
         ic_y = int(np.argmin(np.abs(yy[:, 0] - y_gate_center)))
         ic_x = int(np.argmin(np.abs(xx[0, :] - cx)))
         if mask[ic_y, ic_x]:

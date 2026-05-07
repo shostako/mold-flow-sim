@@ -78,22 +78,25 @@ with st.sidebar:
             10.0,
             3.0,
             step=0.5,
+            help="製品内部に配置されるバルブゲート円の直径。",
         )
+        # ゲートはプレート内部にあるので、offset の上限はプレート高さに
+        # 制約される（ゲート円が反対端を突き抜けない）。下限はゲート半径
+        # （ゲート円がゲート側辺を突き抜けない）。
+        _g_off_min = float(gate_diameter / 2.0)
+        _g_off_max = float(plate_h - gate_diameter / 2.0)
+        _g_off_default = max(_g_off_min, min(20.0, _g_off_max))
         gate_offset = st.slider(
-            "ゲート〜製品下端距離 [mm]",
-            5.0,
-            60.0,
-            20.0,
+            "ゲート位置（ゲート側辺から内側へ）[mm]",
+            _g_off_min,
+            _g_off_max,
+            _g_off_default,
             step=1.0,
-            help="製品（長方形）の下端中央から、ゲート円中心までの距離。",
-        )
-        sprue_thk_dg = st.slider(
-            "スプルー肉厚 [mm]",
-            0.2,
-            6.0,
-            float(plate_thk),
-            step=0.1,
-            help="ゲート円および接続帯（スプルー）の肉厚。製品肉厚と同じならフラットなダイレクトゲート。",
+            help=(
+                "プレートのゲート側辺（下辺）から内側へ何 mm の位置に"
+                "ゲート中心を置くか。ゲートはプレート内部に直接ある"
+                "（ランナーもスプルーもない、垂直に注入する）。"
+            ),
         )
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
         upload = None
@@ -374,7 +377,6 @@ def build_geometry() -> Geometry:
                 plate_thk_mm=plate_thk,
                 gate_diameter_mm=gate_diameter,
                 gate_offset_mm=gate_offset,
-                sprue_thk_mm=sprue_thk_dg,
                 cell_size_mm=cell_size,
             )
             return build_direct_gate_geometry(cfg_dg)

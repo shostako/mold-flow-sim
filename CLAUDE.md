@@ -26,7 +26,7 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 82 tests
+.venv/bin/pytest tests/                        # 84 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
@@ -152,15 +152,14 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ### `build_direct_gate_geometry` の形状仕様
 
-Φピン（直接ゲート）+ 細スプルー帯 + 長方形プレートのシンプルな構成。「ランナー無し、ゲートが直接製品本体に注入する」最小構成。
+長方形プレート単体 + プレート**内部**にバルブゲート円。ホットランナー系の直接ゲート（バルブゲートピンが製品表面に直接降りてくる）を想定。**ランナーもスプルー帯もない**、樹脂は当該位置から垂直に注入されるという 2D 簡略モデル。
 
-座標系（`y` 上向き、`x` 右向き）:
+座標系（`y` 上向き、`x` 右向き、Film gate と同じ：ゲート側辺が小 y 側、反ゲート側辺が大 y 側）:
 
 ```
-y_plate_top      = pad + d/2 + g_off + Hp
-y_plate_bottom   = pad + d/2 + g_off          ← 製品下端 = ゲート側端
-y_gate_center    = pad + d/2                  ← ゲート円中心 = 製品下端から g_off mm 下
-y = 0
+y = pad + Hp                ← 反ゲート側辺（far edge）
+y = pad + g_off             ← ゲート円中心
+y = pad                     ← ゲート側辺（gate-side edge）
 ```
 
 **パラメータ（`DirectGateConfig`）**:
@@ -168,21 +167,22 @@ y = 0
 | 記号 | 意味 | デフォルト | 制約 |
 |------|------|------|------|
 | `plate_w_mm` (Wp) | 製品幅 | — | > 0 |
-| `plate_h_mm` (Hp) | 製品高（ゲート側〜反ゲート側） | — | > 0 |
-| `plate_thk_mm` | 製品肉厚 | — | > 0 |
-| `gate_diameter_mm` (d) | ゲート円径 = スプルー帯幅 | 3.0 | `≤ plate_w_mm` |
-| `gate_offset_mm` (g_off) | 製品下端〜ゲート中心距離 | 20.0 | `≥ 0` |
-| `sprue_thk_mm` | スプルー＋ゲート円の肉厚 | None（=`plate_thk_mm`） | `> 0` |
+| `plate_h_mm` (Hp) | 製品高（ゲート側辺〜反ゲート側辺） | — | > 0 |
+| `plate_thk_mm` | 製品肉厚（均一） | — | > 0 |
+| `gate_diameter_mm` (d) | ゲート円径 | 3.0 | `≤ plate_w_mm` |
+| `gate_offset_mm` (g_off) | ゲート側辺からゲート中心までの**内側方向の距離** | 20.0 | `d/2 ≤ g_off ≤ Hp - d/2` |
 | `cell_size_mm` | メッシュサイズ | 1.0 | > 0 |
 
-**シルエット**:
-- ゲート円: 中心 `(cx, y_gate_center)`、半径 `d/2` の円形ディリクレ（τ=0）
-- スプルー帯: ゲート中心からプレート下端まで、幅 `d` の縦帯（中央軸 `cx` 上）
-- プレート: 幅 Wp × 高さ Hp の長方形
+**シルエット**: 幅 Wp × 高さ Hp の長方形プレート1枚のみ。ゲート円（半径 d/2）はプレート内部、左右中央線上、ゲート側辺から内側へ g_off mm の位置に存在する。ゲート円のセルもプレートの一部であり、肉厚は `plate_thk_mm` で他のセルと同じ（バルブピンは製品表面に出入りするだけで、cavity 形状を変えない）。
 
-**肉厚**: ゲート円とスプルー帯は `sprue_thk_mm`、プレートは `plate_thk_mm`。デフォルト（`sprue_thk_mm=None`）では両方とも `plate_thk_mm` で**段差なしのフラットなダイレクトゲート**になる。`sprue_thk_mm` を別値にするとスプルーだけ厚く（or 薄く）できる。
+**肉厚**: プレート全セル一律 `plate_thk_mm`。
 
-**圧縮マスク**: `compression_mask = in_plate & mask`。プレート長方形領域だけが圧縮で膨らみ、スプルー帯とゲート円は射出時の肉厚のまま。Film gate と同じ方針。
+**圧縮マスク**: `compression_mask = in_plate.copy()`。**プレート全体（ゲート円含む）が圧縮対象**。Film gate と異なり、ランナー・スプルーがないので「どの領域が膨張対象か」を区別する必要がない。`compression_volume_fraction()` は 1.0 を返し、圧縮短縮効果は legacy 全セル膨張と同じ式 `T_fill *= compression_fraction/cf + (1 - compression_fraction)` がそのまま使える。
+
+**バリデーション**:
+- `gate_offset_mm < d/2` → ゲート円がゲート側辺を突き抜ける、reject
+- `gate_offset_mm + d/2 > Hp` → ゲート円が反対端を突き抜ける、reject
+- `d > plate_w_mm` → ゲート円がプレート幅を超える、reject
 
 ### 意図的にモデル化していないもの
 
@@ -197,12 +197,12 @@ y = 0
 
 ## テスト
 
-`tests/` 配下に6ファイル、合計 **82テスト**：
+`tests/` 配下に6ファイル、合計 **84テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
 - `test_geometry_film_gate.py` — 43件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / **compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）**
-- `test_geometry_direct_gate.py` — 16件: シルエット / ゲート径と位置の数値検証 / スプルー帯の幅 / 肉厚 / 圧縮マスク / バリデーション / solver 統合 / 圧縮成形が製品本体だけを膨らませる検証
+- `test_geometry_direct_gate.py` — 18件: シルエット（プレート単体・ランナー無し） / 肉厚均一 / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
 
@@ -255,5 +255,5 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - **プレート分割**: UI は「段差位置 [mm]」スライダーで `plate_split_height_mm` を出し、値が `0` のときはゲート側／反ゲート側の肉厚スライダーを隠して `plate_thk` 1本に統合、cfg には `plate_lower_thk_mm = plate_upper_thk_mm = None` を渡して uniform モードに落とす。CLI で uniform にしたいときも同じく `plate_split_height_mm=0` ＋ `plate_lower_thk_mm = plate_upper_thk_mm = None` で足りる。
 - **スキン層**: UI のトグルが `skin_layer_enabled`、スライダーが `skin_growth_constant`（`c_skin`）。CLI 側はソルバー kwargs に直接渡す（`run_demo.py` の `PP_skin_layer` 参照）。
 - **射出条件の単位系**: `injection_velocity_mms` / `injection_volume_flow_cm3s` の既定値は **実機ユニット域**（`eae5394` で再スケール済）。新ケースを足すときも実機相当の値を入れる前提で考える。CLI 既定値（`run_demo.py`）と UI 既定値（`app.py`）はこの方針で揃えてある。
-- **Direct gate**: UI では「ゲート径 Φ」「ゲート〜製品下端距離」「スプルー肉厚」のスライダーで `DirectGateConfig` を組み立てる。`sprue_thk_mm` のデフォルトは `None`（=`plate_thk_mm` と同じ＝段差なしのフラットゲート）。UI のスプルー肉厚スライダーは初期値が `plate_thk` と同じなので、ユーザーが触るまではフラット形状になる。CLI では `DirectGateConfig(sprue_thk_mm=None)` で同じ挙動。
-- **圧縮成形のスコープ**: 圧縮で膨らむのは `Geometry.compression_mask` が True のセルだけ。Film gate と Direct gate のビルダーが「製品本体だけ True」のマスクを埋め込むので、ランナー・スプルー・ゲートは不変。`build_demo_geometry` と `geometry_from_image` は `compression_mask=None`（旧挙動＝全セル膨張）。新しい形状ビルダーを足すときは「製品本体だけ True」の compression_mask を必ずセットすること。
+- **Direct gate**: UI では「ゲート径 Φ」「ゲート位置（ゲート側辺から内側へ）」のスライダーで `DirectGateConfig` を組み立てる。ゲート位置スライダーの上下限はゲート径とプレート高さに連動して動的に計算（突き抜けバリデーションを UI 側でも防御）。CLI でも `DirectGateConfig` の引数に同じ制約がある。
+- **圧縮成形のスコープ**: 圧縮で膨らむのは `Geometry.compression_mask` が True のセルだけ。Film gate のビルダーは「プレート本体だけ True」（ランナー・スプルー・ゲートは膨張しない）、Direct gate のビルダーは「プレート全体 True」（cavity = プレート単体なので全部膨張）。`build_demo_geometry` と `geometry_from_image` は `compression_mask=None`（旧挙動＝全セル膨張）。新しい形状ビルダーを足すときは「製品本体だけ True」の compression_mask をセットすること。

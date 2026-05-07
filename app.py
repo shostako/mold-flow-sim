@@ -69,9 +69,43 @@ with st.sidebar:
     )
 
     if geom_source.startswith("Direct gate"):
-        plate_w = st.slider("製品幅 [mm]", 40.0, 300.0, 120.0, step=5.0)
-        plate_h = st.slider("製品高 [mm]", 30.0, 200.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 2.0, step=0.1)
+        # Match Film gate defaults: plate 300×50, with the optional 2-zone
+        # split (gate-side 0.35 / far-side 0.50, switching at 20 mm from
+        # the gate-side edge).
+        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+        plate_h = st.slider("製品高 Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+
+        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
+        plate_split_dg = st.slider(
+            "段差位置 [mm]",
+            0.0,
+            float(plate_h),
+            min(20.0, float(plate_h)),
+            step=1.0,
+            help="ゲート側辺（下辺）からの距離。0 で均一肉厚。",
+        )
+        if plate_split_dg > 0:
+            plate_lower_thk_dg = st.slider(
+                "ゲート側肉厚 [mm]",
+                0.2,
+                2.0,
+                0.35,
+                step=0.05,
+            )
+            plate_upper_thk_dg = st.slider(
+                "反ゲート側肉厚 [mm]",
+                0.2,
+                2.0,
+                0.50,
+                step=0.05,
+            )
+            plate_thk = float(plate_lower_thk_dg)
+        else:
+            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 0.4, step=0.1)
+            plate_lower_thk_dg = float(plate_thk)
+            plate_upper_thk_dg = float(plate_thk)
+
+        st.markdown("**ダイレクトゲート**")
         gate_diameter = st.slider(
             "ゲート径 Φ [mm]",
             1.0,
@@ -98,7 +132,7 @@ with st.sidebar:
                 "（ランナーもスプルーもない、垂直に注入する）。"
             ),
         )
-        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
+        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     elif geom_source.startswith("Film gate"):
         plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -378,6 +412,9 @@ def build_geometry() -> Geometry:
                 gate_diameter_mm=gate_diameter,
                 gate_offset_mm=gate_offset,
                 cell_size_mm=cell_size,
+                plate_split_height_mm=plate_split_dg if plate_split_dg > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_thk_dg if plate_split_dg > 0 else None,
+                plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
             )
             return build_direct_gate_geometry(cfg_dg)
         except ValueError as exc:

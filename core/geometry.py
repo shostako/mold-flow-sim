@@ -663,14 +663,20 @@ class DirectGateConfig:
         y = pad_mm                          ← gate-side edge
 
     The cavity occupies the rectangle ``[pad_mm, pad_mm + plate_w_mm] ×
-    [pad_mm, pad_mm + plate_h_mm]`` with constant thickness ``plate_thk_mm``.
+    [pad_mm, pad_mm + plate_h_mm]``. By default the plate has uniform
+    thickness ``plate_thk_mm``; an optional 2-zone split (gate-side band
+    of thickness ``plate_lower_thk_mm`` and far-side band of thickness
+    ``plate_upper_thk_mm``) is available, mirroring the convention used
+    by :class:`FilmGateConfig`.
 
     Parameters:
 
     - ``plate_w_mm`` (Wp): plate width [mm]
     - ``plate_h_mm`` (Hp): plate height [mm], measured from the gate-side
       edge to the far edge
-    - ``plate_thk_mm``: plate body thickness [mm]
+    - ``plate_thk_mm``: plate body thickness [mm] (used when the split is
+      disabled, or as a fallback for ``plate_lower_thk_mm`` /
+      ``plate_upper_thk_mm`` when those are ``None``)
     - ``gate_diameter_mm``: diameter of the Dirichlet gate disk [mm]
       (default 3.0)
     - ``gate_offset_mm``: distance from the gate-side edge to the gate disk
@@ -678,14 +684,28 @@ class DirectGateConfig:
     - ``cell_size_mm``: square mesh size [mm]
     - ``pad_mm``: padding around the cavity silhouette [mm]
 
+    Optional plate split (gate-side / far-side two-zone thickness):
+
+    - ``plate_split_height_mm``: distance from the gate-side edge at which
+      the thickness changes; ``0`` disables the split (uniform plate at
+      ``plate_thk_mm``).
+    - ``plate_lower_thk_mm``: thickness of the gate-side band
+      ``[gate-side edge, gate-side edge + split_h]``. ``None`` falls back
+      to ``plate_thk_mm``.
+    - ``plate_upper_thk_mm``: thickness of the far-side band beyond the
+      split line. ``None`` falls back to ``plate_thk_mm``.
+
     Constraints (validated at construction time):
 
-    - All numeric parameters strictly positive.
+    - All numeric parameters strictly positive (split height may be 0).
     - ``gate_diameter_mm ≤ plate_w_mm`` (gate fits across the plate width).
     - ``gate_diameter_mm/2 ≤ gate_offset_mm`` (gate disk does not poke
       past the gate-side edge).
     - ``gate_offset_mm + gate_diameter_mm/2 ≤ plate_h_mm`` (gate disk does
       not poke past the far edge).
+    - ``0 ≤ plate_split_height_mm ≤ plate_h_mm``.
+    - ``plate_lower_thk_mm`` / ``plate_upper_thk_mm`` strictly positive
+      when set.
     """
 
     plate_w_mm: float
@@ -695,6 +715,33 @@ class DirectGateConfig:
     gate_offset_mm: float = 20.0
     cell_size_mm: float = 1.0
     pad_mm: float = 5.0
+
+    # ----- optional gate-side / far-side plate split -----
+    plate_split_height_mm: float = 0.0  # 0 disables the split (uniform plate)
+    plate_lower_thk_mm: float | None = None  # gate-side band
+    plate_upper_thk_mm: float | None = None  # far-side band
+
+    def resolved_plate_zones(self) -> tuple[float, float, float]:
+        """Return ``(split_height_mm, lower_thk_mm, upper_thk_mm)``.
+
+        Mirrors :meth:`FilmGateConfig.resolved_plate_zones`. For uniform
+        mode (``plate_split_height_mm == 0``) the result is
+        ``(0.0, plate_thk_mm, plate_thk_mm)``. Otherwise ``None`` fields
+        fall back to ``plate_thk_mm``.
+        """
+        if self.plate_split_height_mm > 0:
+            lower = (
+                self.plate_lower_thk_mm
+                if self.plate_lower_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            upper = (
+                self.plate_upper_thk_mm
+                if self.plate_upper_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            return float(self.plate_split_height_mm), float(lower), float(upper)
+        return 0.0, float(self.plate_thk_mm), float(self.plate_thk_mm)
 
     def validate(self) -> None:
         eps = 1e-6
@@ -726,6 +773,18 @@ class DirectGateConfig:
                 f"gate_offset_mm ({self.gate_offset_mm}) < "
                 f"gate_diameter_mm/2 ({r})"
             )
+        # plate split validation
+        if self.plate_split_height_mm < 0:
+            raise ValueError(f"plate_split_height_mm ({self.plate_split_height_mm}) must be ≥ 0")
+        if self.plate_split_height_mm > self.plate_h_mm + eps:
+            raise ValueError(
+                f"plate_split_height_mm ({self.plate_split_height_mm}) must be ≤ "
+                f"plate_h_mm ({self.plate_h_mm})"
+            )
+        if self.plate_lower_thk_mm is not None and self.plate_lower_thk_mm <= 0:
+            raise ValueError(f"plate_lower_thk_mm ({self.plate_lower_thk_mm}) must be > 0 when set")
+        if self.plate_upper_thk_mm is not None and self.plate_upper_thk_mm <= 0:
+            raise ValueError(f"plate_upper_thk_mm ({self.plate_upper_thk_mm}) must be > 0 when set")
 
 
 def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
@@ -736,9 +795,19 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
     ``gate_diameter_mm`` is placed on the plate centerline,
     ``gate_offset_mm`` inward from the gate-side edge — same coordinate
     convention as :class:`FilmGateConfig` (gate-side edge at the small-y
-    side, far edge at the large-y side). The plate has uniform thickness
-    ``plate_thk_mm``; the gate cells share the same thickness because the
-    valve gate sits on the cavity surface itself, not on a separate sprue.
+    side, far edge at the large-y side).
+
+    Thickness profile (when ``plate_split_height_mm > 0``):
+
+    - gate-side band ``[gate-side edge, gate-side edge + split_h]`` at
+      ``plate_lower_thk_mm`` (or ``plate_thk_mm`` when ``None``)
+    - far-side band beyond the split line at ``plate_upper_thk_mm`` (or
+      ``plate_thk_mm`` when ``None``)
+
+    Uniform mode (``plate_split_height_mm == 0``) reduces to a single
+    thickness ``plate_thk_mm`` everywhere. Gate cells inherit whichever
+    band they fall into (Dirichlet τ=0 means their thickness does not
+    affect the solve, but the visualization is consistent).
 
     Compression molding (when enabled at solver level) inflates the entire
     plate body — including the gate cells, since they belong to the product.
@@ -748,7 +817,7 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
     pad = cfg.pad_mm
     Wp = cfg.plate_w_mm
     Hp = cfg.plate_h_mm
-    h_plate = cfg.plate_thk_mm
+    split_h, h_plate_lower, h_plate_upper = cfg.resolved_plate_zones()
     d_gate = cfg.gate_diameter_mm
     g_off = cfg.gate_offset_mm
     dx = cfg.cell_size_mm
@@ -775,9 +844,14 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
 
     mask = in_plate
 
-    # --- thickness: uniform plate ---
+    # --- thickness: gate-side band + far-side band (or uniform when split=0) ---
     thk = np.zeros_like(xx, dtype=float)
-    thk[in_plate] = h_plate
+    # initialise the whole plate to the lower band; the upper band is
+    # overlaid below when split_h > 0.
+    thk[in_plate] = h_plate_lower
+    if split_h > 0:
+        upper_zone = in_plate & (yy >= y_plate_bottom + split_h)
+        thk[upper_zone] = h_plate_upper
     thk[~mask] = 0.0
 
     # --- compression mask: the entire plate body inflates (the gate cells

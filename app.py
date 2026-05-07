@@ -16,10 +16,11 @@ import numpy as np
 import streamlit as st
 
 from core import (
+    DirectGateConfig,
     FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
-    build_demo_geometry,
+    build_direct_gate_geometry,
     build_film_gate_geometry,
     geometry_from_image,
     render_3d_fill_time,
@@ -60,21 +61,44 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Demo plate (synthetic)",
             "Film gate (parametric)",
+            "Direct gate (parametric)",
             "画像から生成 (PNG/JPG)",
         ],
-        index=1,
+        index=0,
     )
 
-    if geom_source.startswith("Demo"):
+    if geom_source.startswith("Direct gate"):
         plate_w = st.slider("製品幅 [mm]", 40.0, 300.0, 120.0, step=5.0)
-        plate_h = st.slider("製品高 [mm]", 30.0, 160.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
-        runner_thk = st.slider("ランナー肉厚 [mm]", 1.0, 8.0, 4.0, step=0.1)
-        sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
+        plate_h = st.slider("製品高 [mm]", 30.0, 200.0, 80.0, step=5.0)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 2.0, step=0.1)
+        gate_diameter = st.slider(
+            "ゲート径 Φ [mm]",
+            1.0,
+            10.0,
+            3.0,
+            step=0.5,
+            help="製品内部に配置されるバルブゲート円の直径。",
+        )
+        # ゲートはプレート内部にあるので、offset の上限はプレート高さに
+        # 制約される（ゲート円が反対端を突き抜けない）。下限はゲート半径
+        # （ゲート円がゲート側辺を突き抜けない）。
+        _g_off_min = float(gate_diameter / 2.0)
+        _g_off_max = float(plate_h - gate_diameter / 2.0)
+        _g_off_default = max(_g_off_min, min(20.0, _g_off_max))
+        gate_offset = st.slider(
+            "ゲート位置（ゲート側辺から内側へ）[mm]",
+            _g_off_min,
+            _g_off_max,
+            _g_off_default,
+            step=1.0,
+            help=(
+                "プレートのゲート側辺（下辺）から内側へ何 mm の位置に"
+                "ゲート中心を置くか。ゲートはプレート内部に直接ある"
+                "（ランナーもスプルーもない、垂直に注入する）。"
+            ),
+        )
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
-        gate_count = st.slider("ゲート数", 1, 4, 1)
         upload = None
     elif geom_source.startswith("Film gate"):
         plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -345,16 +369,20 @@ with st.sidebar:
 
 # ----------------------- main panel -----------------------
 def build_geometry() -> Geometry:
-    if geom_source.startswith("Demo"):
-        return build_demo_geometry(
-            plate_w_mm=plate_w,
-            plate_h_mm=plate_h,
-            plate_thk_mm=plate_thk,
-            runner_thk_mm=runner_thk,
-            sprue_thk_mm=sprue_thk,
-            cell_size_mm=cell_size,
-            gate_count=gate_count,
-        )
+    if geom_source.startswith("Direct gate"):
+        try:
+            cfg_dg = DirectGateConfig(
+                plate_w_mm=plate_w,
+                plate_h_mm=plate_h,
+                plate_thk_mm=plate_thk,
+                gate_diameter_mm=gate_diameter,
+                gate_offset_mm=gate_offset,
+                cell_size_mm=cell_size,
+            )
+            return build_direct_gate_geometry(cfg_dg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
     if geom_source.startswith("Film gate"):
         try:
             cfg = FilmGateConfig(

@@ -35,6 +35,14 @@ class Geometry:
     cell_size_mm: float  # square cell, mm
     gates: list[tuple[int, int]] = field(default_factory=list)  # [(iy, ix), ...]
     label: str = "cavity"
+    # Cells that are inflated by ``compression_factor`` while the compression
+    # phase is open. ``None`` keeps the legacy behaviour where the whole
+    # cavity expands (used by ``build_demo_geometry`` and
+    # ``geometry_from_image``). Parametric builders that distinguish a
+    # product body from runners/sprues set this to a per-cell bool array
+    # (only the product body is True). Cells outside ``mask`` are ignored
+    # regardless of the value here.
+    compression_mask: np.ndarray | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -52,6 +60,21 @@ class Geometry:
         cell_area_mm2 = self.cell_size_mm**2
         vol_mm3 = float(np.sum(self.thickness_mm[self.mask]) * cell_area_mm2)
         return vol_mm3 / 1000.0
+
+    def compression_volume_fraction(self) -> float:
+        """Fraction of the cavity volume that participates in compression.
+
+        Returns ``1.0`` when ``compression_mask`` is ``None`` (legacy mode
+        where the whole cavity expands). Otherwise returns the volume of the
+        ``compression_mask & mask`` cells divided by the total cavity volume.
+        """
+        cm = self.compression_mask
+        if cm is None:
+            return 1.0
+        denom = float(np.sum(self.thickness_mm[self.mask]))
+        if denom <= 0:
+            return 0.0
+        return float(np.sum(self.thickness_mm[self.mask & cm]) / denom)
 
     def add_gate(self, iy: int, ix: int) -> None:
         if not self.mask[iy, ix]:
@@ -595,11 +618,18 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
     in_valve = ((xx - cx) ** 2 + (yy - y_short) ** 2) <= (d_valve / 2.0) ** 2
     valve_iys, valve_ixs = np.where(in_valve & mask)
 
+    # Compression mask: only the rectangular plate body inflates during the
+    # ICM open phase. Runner / half-circle / valve-gate cells stay at their
+    # original thickness. ``in_plate`` already excludes the gate-land row
+    # closures because ``mask`` is intersected below.
+    compression_mask = in_plate & mask
+
     geom = Geometry(
         mask=mask,
         thickness_mm=thk,
         cell_size_mm=dx,
         label="film_gate",
+        compression_mask=compression_mask,
     )
     if valve_iys.size == 0:
         # Defensive: if d_valve is too small to cover any cell, snap to the
@@ -610,6 +640,168 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
             geom.gates.append((ic_y, ic_x))
     else:
         for iy, ix in zip(valve_iys, valve_ixs, strict=True):
+            geom.gates.append((int(iy), int(ix)))
+
+    return geom
+
+
+@dataclass(frozen=True)
+class DirectGateConfig:
+    """Parameters for :func:`build_direct_gate_geometry`.
+
+    The cavity is a single rectangular plate with the gate sitting **inside**
+    the plate. The Dirichlet τ=0 patch is a circular disk of diameter
+    ``gate_diameter_mm`` placed on the plate's longitudinal centerline,
+    ``gate_offset_mm`` away from the gate-side edge (measured inward toward
+    the plate interior). No runner, no sprue strip — molten resin enters
+    the cavity vertically through this patch.
+
+    Coordinate convention (mm, with y pointing up, x pointing right)::
+
+        y = pad_mm + plate_h_mm             ← far edge (反ゲート側)
+        y = pad_mm + gate_offset_mm         ← gate disk center
+        y = pad_mm                          ← gate-side edge
+
+    The cavity occupies the rectangle ``[pad_mm, pad_mm + plate_w_mm] ×
+    [pad_mm, pad_mm + plate_h_mm]`` with constant thickness ``plate_thk_mm``.
+
+    Parameters:
+
+    - ``plate_w_mm`` (Wp): plate width [mm]
+    - ``plate_h_mm`` (Hp): plate height [mm], measured from the gate-side
+      edge to the far edge
+    - ``plate_thk_mm``: plate body thickness [mm]
+    - ``gate_diameter_mm``: diameter of the Dirichlet gate disk [mm]
+      (default 3.0)
+    - ``gate_offset_mm``: distance from the gate-side edge to the gate disk
+      center, measured inward [mm] (default 20.0)
+    - ``cell_size_mm``: square mesh size [mm]
+    - ``pad_mm``: padding around the cavity silhouette [mm]
+
+    Constraints (validated at construction time):
+
+    - All numeric parameters strictly positive.
+    - ``gate_diameter_mm ≤ plate_w_mm`` (gate fits across the plate width).
+    - ``gate_diameter_mm/2 ≤ gate_offset_mm`` (gate disk does not poke
+      past the gate-side edge).
+    - ``gate_offset_mm + gate_diameter_mm/2 ≤ plate_h_mm`` (gate disk does
+      not poke past the far edge).
+    """
+
+    plate_w_mm: float
+    plate_h_mm: float
+    plate_thk_mm: float
+    gate_diameter_mm: float = 3.0
+    gate_offset_mm: float = 20.0
+    cell_size_mm: float = 1.0
+    pad_mm: float = 5.0
+
+    def validate(self) -> None:
+        eps = 1e-6
+        for name, val in (
+            ("plate_w_mm", self.plate_w_mm),
+            ("plate_h_mm", self.plate_h_mm),
+            ("plate_thk_mm", self.plate_thk_mm),
+            ("gate_diameter_mm", self.gate_diameter_mm),
+            ("gate_offset_mm", self.gate_offset_mm),
+            ("cell_size_mm", self.cell_size_mm),
+        ):
+            if val <= 0:
+                raise ValueError(f"{name} must be positive (got {val})")
+        if self.gate_diameter_mm > self.plate_w_mm + eps:
+            raise ValueError(
+                f"gate_diameter_mm ({self.gate_diameter_mm}) must be ≤ "
+                f"plate_w_mm ({self.plate_w_mm})"
+            )
+        r = self.gate_diameter_mm / 2.0
+        if self.gate_offset_mm + r > self.plate_h_mm + eps:
+            raise ValueError(
+                f"gate disk would poke past the far edge: "
+                f"gate_offset_mm ({self.gate_offset_mm}) + "
+                f"gate_diameter_mm/2 ({r}) > plate_h_mm ({self.plate_h_mm})"
+            )
+        if self.gate_offset_mm < r - eps:
+            raise ValueError(
+                f"gate disk would poke past the gate-side edge: "
+                f"gate_offset_mm ({self.gate_offset_mm}) < "
+                f"gate_diameter_mm/2 ({r})"
+            )
+
+
+def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
+    """Build a rectangular plate with a direct gate placed inside the plate.
+
+    The product silhouette is a single rectangle of size
+    ``plate_w_mm × plate_h_mm``. A circular Dirichlet τ=0 disk of diameter
+    ``gate_diameter_mm`` is placed on the plate centerline,
+    ``gate_offset_mm`` inward from the gate-side edge — same coordinate
+    convention as :class:`FilmGateConfig` (gate-side edge at the small-y
+    side, far edge at the large-y side). The plate has uniform thickness
+    ``plate_thk_mm``; the gate cells share the same thickness because the
+    valve gate sits on the cavity surface itself, not on a separate sprue.
+
+    Compression molding (when enabled at solver level) inflates the entire
+    plate body — including the gate cells, since they belong to the product.
+    """
+    cfg.validate()
+
+    pad = cfg.pad_mm
+    Wp = cfg.plate_w_mm
+    Hp = cfg.plate_h_mm
+    h_plate = cfg.plate_thk_mm
+    d_gate = cfg.gate_diameter_mm
+    g_off = cfg.gate_offset_mm
+    dx = cfg.cell_size_mm
+
+    cx = pad + Wp / 2.0
+    y_plate_bottom = pad  # gate-side edge
+    y_plate_top = pad + Hp  # far edge
+    y_gate_center = pad + g_off
+
+    total_w = 2 * pad + Wp
+    total_h = 2 * pad + Hp
+    nx = int(round(total_w / dx))
+    ny = int(round(total_h / dx))
+
+    iy_idx, ix_idx = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    yy = (iy_idx + 0.5) * dx
+    xx = (ix_idx + 0.5) * dx
+
+    # --- silhouette: just the plate, nothing else ---
+    in_plate = (yy >= y_plate_bottom) & (yy <= y_plate_top) & (xx >= pad) & (xx <= pad + Wp)
+
+    # Dirichlet gate disk lives inside the plate
+    in_gate_disk = ((xx - cx) ** 2 + (yy - y_gate_center) ** 2) <= (d_gate / 2.0) ** 2
+
+    mask = in_plate
+
+    # --- thickness: uniform plate ---
+    thk = np.zeros_like(xx, dtype=float)
+    thk[in_plate] = h_plate
+    thk[~mask] = 0.0
+
+    # --- compression mask: the entire plate body inflates (the gate cells
+    # are part of the product and therefore part of the compression zone) ---
+    compression_mask = in_plate.copy()
+
+    geom = Geometry(
+        mask=mask,
+        thickness_mm=thk,
+        cell_size_mm=dx,
+        label="direct_gate",
+        compression_mask=compression_mask,
+    )
+
+    # --- Dirichlet τ=0 cells: the gate disk inside the plate ---
+    gate_iys, gate_ixs = np.where(in_gate_disk & mask)
+    if gate_iys.size == 0:
+        # Defensive: snap to the cell nearest the requested gate center
+        ic_y = int(np.argmin(np.abs(yy[:, 0] - y_gate_center)))
+        ic_x = int(np.argmin(np.abs(xx[0, :] - cx)))
+        if mask[ic_y, ic_x]:
+            geom.gates.append((ic_y, ic_x))
+    else:
+        for iy, ix in zip(gate_iys, gate_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
 
     return geom

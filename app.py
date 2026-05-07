@@ -37,11 +37,13 @@ from core.geometry import Geometry
 st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
 st.title("極薄プレート 簡易流動解析")
 st.caption(
-    "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time モデルによる、"
-    "射出成形流動の初期スクリーニング・概念検証ツール。"
+    "薄板部品の射出成形で、ゲートから注入された樹脂がどう流れて充填されるかを"
+    "ざっくり見るツール。ゲート位置・肉厚・ランナー形状の方向性を素早く試して、"
+    "実機検討の前段で当たりを付けるのが用途。商用 CAE（Moldflow 等）の置き換え"
+    "ではない。"
 )
 
-with st.expander("📐 使用している方程式と適用範囲（上司向け説明）"):
+with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown("### 1. 全体モデル：Hele-Shaw 近似（薄板潤滑流れ）")
     st.markdown(
         "金型キャビティが**薄板（厚み h ≪ 平面サイズ）**であることを前提に、"
@@ -720,40 +722,6 @@ if "mfs_result" in st.session_state:
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
 
-        if skin_on:
-            inflation = result.metadata.get("T_fill_inflation", 1.0)
-            short_count = (
-                int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
-            )
-            cells_total = int(geom.mask.sum())
-            short_pct = 100.0 * short_count / max(cells_total, 1)
-            iters = result.metadata.get("skin_iterations", 0)
-            converged = result.metadata.get("skin_converged", False)
-            s1, s2, s3 = st.columns(3)
-            s1.metric(
-                "T_fill 増分（スキン層）",
-                f"×{inflation:.2f}",
-                help="スキン層なしの T_fill_baseline に対する倍率（圧力一定近似）",
-            )
-            s2.metric(
-                "short shot セル",
-                f"{short_count} / {cells_total}",
-                f"{short_pct:.1f} %",
-                delta_color="inverse",
-            )
-            s3.metric(
-                "fixed-point 反復",
-                f"{iters} 回",
-                "収束" if converged else "上限到達",
-                delta_color="off" if converged else "inverse",
-            )
-            if result.skin_thickness_mm is not None:
-                s_max_mm = float(np.nanmax(result.skin_thickness_mm[geom.mask]))
-                h_core_min = float(np.nanmin(result.core_thickness_mm[geom.mask]))
-                st.caption(
-                    f"スキン最大 {s_max_mm * 1e3:.1f} μm,  コア最小 h_core = {h_core_min:.3f} mm"
-                )
-
         def _download(label: str, path: Path, mime: str, key: str) -> None:
             with open(path, "rb") as _f:
                 st.download_button(
@@ -796,7 +764,7 @@ if "mfs_result" in st.session_state:
                 )
                 _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
 
-        with st.expander("3D表示（plotly・実験的）"):
+        with st.expander("3D表示（plotly）"):
             st.caption(
                 "PL（パーティングライン）= Z=0 を底面とし、各セルを厚み h(x,y) 分だけ"
                 "立ち上げたソリッド表示。x / y / z すべて同じ mm スケール（実物等倍）"

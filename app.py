@@ -764,7 +764,7 @@ if "mfs_result" in st.session_state:
                 )
                 _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
 
-        with st.expander("3D表示（plotly・実験的）"):
+        with st.expander("3D表示（plotly）"):
             st.caption(
                 "PL（パーティングライン）= Z=0 を底面とし、各セルを厚み h(x,y) 分だけ"
                 "立ち上げたソリッド表示。x / y / z すべて同じ mm スケール（実物等倍）"

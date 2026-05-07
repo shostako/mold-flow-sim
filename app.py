@@ -37,11 +37,13 @@ from core.geometry import Geometry
 st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
 st.title("極薄プレート 簡易流動解析")
 st.caption(
-    "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time モデルによる、"
-    "射出成形流動の初期スクリーニング・概念検証ツール。"
+    "薄板部品の射出成形で、ゲートから注入された樹脂がどう流れて充填されるかを"
+    "ざっくり見るツール。ゲート位置・肉厚・ランナー形状の方向性を素早く試して、"
+    "実機検討の前段で当たりを付けるのが用途。商用 CAE（Moldflow 等）の置き換え"
+    "ではない。"
 )
 
-with st.expander("📐 使用している方程式と適用範囲（上司向け説明）"):
+with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown("### 1. 全体モデル：Hele-Shaw 近似（薄板潤滑流れ）")
     st.markdown(
         "金型キャビティが**薄板（厚み h ≪ 平面サイズ）**であることを前提に、"

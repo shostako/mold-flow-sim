@@ -1,9 +1,11 @@
 """mold-flow-sim core package."""
 
 from .geometry import (
+    DirectGateConfig,
     FilmGateConfig,
     Geometry,
     build_demo_geometry,
+    build_direct_gate_geometry,
     build_film_gate_geometry,
     geometry_from_image,
 )
@@ -28,8 +30,10 @@ __all__ = [
     "cross_wlf_viscosity",
     "Geometry",
     "FilmGateConfig",
+    "DirectGateConfig",
     "build_demo_geometry",
     "build_film_gate_geometry",
+    "build_direct_gate_geometry",
     "geometry_from_image",
     "HeleShawSolver",
     "FlowResult",

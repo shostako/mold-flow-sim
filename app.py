@@ -34,12 +34,132 @@ from core import (
 )
 from core.geometry import Geometry
 
-st.set_page_config(page_title="Mold Flow Sim (simplified)", layout="wide")
-st.title("射出成形 簡易流動解析")
+st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
+st.title("極薄プレート 簡易流動解析")
 st.caption(
     "Hele-Shaw近似 + Cross-WLF粘度 + Pseudo-Conduction Fill Time モデルによる、"
     "射出成形流動の初期スクリーニング・概念検証ツール。"
 )
+
+with st.expander("📐 使用している方程式と適用範囲（上司向け説明）"):
+    st.markdown("### 1. 全体モデル：Hele-Shaw 近似（薄板潤滑流れ）")
+    st.markdown(
+        "金型キャビティが**薄板（厚み h ≪ 平面サイズ）**であることを前提に、"
+        "面内 2D + 厚み方向の解析積分という簡略モデル。"
+        "射出成形の薄肉製品では商用 CAE（Moldflow / Moldex3D）の中間面ソルバーも"
+        "本質的に同じ Hele-Shaw 系を使う。"
+    )
+    st.latex(
+        r"\nabla \cdot \left( S \, \nabla p \right) = 0,"
+        r"\quad S = \frac{h^3}{12\,\eta_{\text{eff}}}"
+    )
+    st.markdown(
+        "- $h(x,y)$: 局所キャビティ厚み [m]\n"
+        "- $\\eta_{\\text{eff}}$: 代表せん断速度・代表温度で評価した粘度 [Pa·s]\n"
+        "- $S$: コンダクタンス（流れやすさ）。$h^3$ で効くので**厚み変化が支配的**\n"
+        "- 圧力 $p$ はゲートで一定、流動先端で 0 を境界条件にして解く"
+    )
+
+    st.markdown("### 2. 粘度モデル：Cross-WLF")
+    st.markdown(
+        "せん断速度依存の擬塑性 + 温度依存（WLF型）を組み合わせた業界標準モデル。"
+        "`data/materials.json` に PP / ABS / PC / PA66 / PMMA の代表値を保持。"
+    )
+    st.latex(
+        r"\eta(\dot\gamma, T) = \frac{\eta_0(T)}"
+        r"{1 + \left( \dfrac{\eta_0(T)\,\dot\gamma}{\tau^{*}} \right)^{1-n}}"
+    )
+    st.latex(r"\eta_0(T) = D_1 \exp\!\left[\,-\,\frac{A_1 (T - T^{*})}{A_2 + (T - T^{*})}\,\right]")
+    st.markdown(
+        "- 代表せん断速度は Newtonian plate 近似 "
+        r"$\dot\gamma = 6V/h$ で 1 回だけ評価（ローカル反復なし）"
+        "\n- バルク温度は射出温度と金型温度の重み付き平均 "
+        r"$T_{\text{bulk}} = 0.7\,T_{\text{melt}} + 0.3\,T_{\text{mold}}$"
+    )
+
+    st.markdown("### 3. 充填時間場：Pseudo-Conduction 法")
+    st.markdown(
+        "Hele-Shaw の圧力場を時間ステップで進めず、**楕円型（熱伝導型）方程式に置き換えて 1 発で解く**"
+        "高速化テクニック。$\\tau$ は擬似的な「ゲートからの到達時間場」。"
+    )
+    st.latex(
+        r"-\,\nabla \cdot \left( S\, \nabla \tau \right) = 1 "
+        r"\quad \text{in cavity}"
+    )
+    st.markdown(
+        "- ゲートで $\\tau = 0$（ディリクレ境界）、キャビティ壁で no-flux（ノイマン境界）\n"
+        "- 解いた $\\tau$ を最大値で正規化し、絶対時間に換算: "
+        r"$t_{\text{fill}}(x,y) = \dfrac{\tau(x,y)}{\tau_{\max}} \cdot T_{\text{fill}}$"
+        "\n- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$（射出率一定）\n"
+        "- 流動先端の進行は $\\tau$ の等値線として可視化"
+    )
+
+    st.markdown("### 4. スキン層（オプション）：Stefan / Neumann 近似")
+    st.markdown(
+        "金型壁で樹脂が固化して育つ「スキン層」を熱拡散の Stefan 解で表現し、"
+        "流動はコア層 $h_{\\text{core}} = h - 2s$ のみを通る。"
+    )
+    st.latex(r"s(t) = c_{\text{skin}} \sqrt{\alpha\,t}")
+    st.markdown(
+        "- $\\alpha$: 樹脂の熱拡散率（材料 DB から取得）\n"
+        "- $c_{\\text{skin}}$: 成長定数（$\\sim 1.0$ が物理的代表値、UI で調整）\n"
+        "- $\\tau$ と $s$ が相互依存するので fixed-point 反復で釣り合わせる\n"
+        "- $h_{\\text{core}}$ が下限を切ったセル＝**ショートショット候補**として赤マーク"
+    )
+
+    st.markdown("### 5. 射出圧縮成形（ICM、オプション）：等価厚み膨張モデル")
+    st.markdown(
+        "圧縮位相を時間ステッピングで解かず、**製品本体の厚みを `compression_factor` 倍に膨張**"
+        "させた等価モデルとして扱う。流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
+        "膨張対象は「製品本体セルだけ」、ランナー・スプルー・ゲートは射出時の肉厚のまま不変。"
+    )
+    st.latex(
+        r"T_{\text{fill}}^{\text{ICM}} = T_{\text{fill}}^{\text{base}} \cdot "
+        r"\left[\,\frac{f_{\text{cmp}}}{1 + (CF-1)\,f_{V}}\,"
+        r"+\,(1 - f_{\text{cmp}})\,\right]"
+    )
+    st.markdown(
+        "- $CF$: `compression_factor`（型開き量倍率）\n"
+        "- $f_{\\text{cmp}}$: `compression_fraction`（圧縮位相の充填占有率）\n"
+        "- $f_V$: 圧縮対象セル体積 / 全キャビティ体積（プレート単独形状なら 1.0、"
+        "Film gate のようにランナー有りなら $\\approx 0.93$ 程度）"
+    )
+
+    st.markdown("---")
+    st.markdown("### ✅ モデル化している現象")
+    st.markdown(
+        "- 薄板キャビティ内の 2D 流動（局所せん断と局所抵抗の効果）\n"
+        "- 樹脂物性（密度・熱拡散率・Cross-WLF 粘度パラメータ）\n"
+        "- ゲート位置・ゲート径・ランナー形状・プレート分割（2 層肉厚）\n"
+        "- 流動先端の到達順、ウェルドライン、エアトラップ\n"
+        "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
+        "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
+        "- スキン層形成によるコア閉塞・ショートショット予測（オプション）\n"
+        "- 射出圧縮成形による等価流路拡大（オプション）"
+    )
+
+    st.markdown("### ❌ モデル化していない現象（重要）")
+    st.markdown(
+        "- **コアバルク温度の動的低下と粘度の局所更新**：粘度は単一代表値で固定。"
+        "実際は流動中に温度が落ちて粘度が上がるが、本ツールは捉えない\n"
+        "- **真の 3D 流れ・ジェッティング・噴流・コーナー効果**：あくまで 2D Hele-Shaw\n"
+        "- **保圧（パッキング段階）**：充填までしかモデル化しない\n"
+        "- **収縮・反り・残留応力**：熱固化収縮も結晶化も入っていない\n"
+        "- **局所せん断速度の反復**：粘度評価は代表点 1 回のみ\n"
+        "- **ベント・脱気挙動**：エアトラップ位置は予測するが圧抜けは考慮しない\n"
+        "- **STL/STEP 直接読み込み**：パラメトリック形状（Film gate / Direct gate）"
+        "または PNG/JPG 二値画像のみ\n"
+        "- **非構造格子・中立面メッシュ**：構造格子（正方形セル）固定"
+    )
+
+    st.markdown("### 用途と適用範囲")
+    st.markdown(
+        "本ツールは**初期スクリーニング・概念検証**用途。商用 CAE "
+        "（Moldflow / Moldex3D 等）の置き換えではない。\n\n"
+        "- ◯ 向く：ゲート位置候補の比較、ランナー形状の方向性決定、"
+        "プレート薄肉化時のショートショット予兆、フローバランサー（▽肉盗み）の効きの感覚的把握\n"
+        "- × 向かない：寸法精度予測、保圧設計、収縮反り、最終肉厚分布の精密計算"
+    )
 
 
 @st.cache_resource

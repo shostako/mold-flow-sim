@@ -722,40 +722,6 @@ if "mfs_result" in st.session_state:
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
 
-        if skin_on:
-            inflation = result.metadata.get("T_fill_inflation", 1.0)
-            short_count = (
-                int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
-            )
-            cells_total = int(geom.mask.sum())
-            short_pct = 100.0 * short_count / max(cells_total, 1)
-            iters = result.metadata.get("skin_iterations", 0)
-            converged = result.metadata.get("skin_converged", False)
-            s1, s2, s3 = st.columns(3)
-            s1.metric(
-                "T_fill 増分（スキン層）",
-                f"×{inflation:.2f}",
-                help="スキン層なしの T_fill_baseline に対する倍率（圧力一定近似）",
-            )
-            s2.metric(
-                "short shot セル",
-                f"{short_count} / {cells_total}",
-                f"{short_pct:.1f} %",
-                delta_color="inverse",
-            )
-            s3.metric(
-                "fixed-point 反復",
-                f"{iters} 回",
-                "収束" if converged else "上限到達",
-                delta_color="off" if converged else "inverse",
-            )
-            if result.skin_thickness_mm is not None:
-                s_max_mm = float(np.nanmax(result.skin_thickness_mm[geom.mask]))
-                h_core_min = float(np.nanmin(result.core_thickness_mm[geom.mask]))
-                st.caption(
-                    f"スキン最大 {s_max_mm * 1e3:.1f} μm,  コア最小 h_core = {h_core_min:.3f} mm"
-                )
-
         def _download(label: str, path: Path, mime: str, key: str) -> None:
             with open(path, "rb") as _f:
                 st.download_button(

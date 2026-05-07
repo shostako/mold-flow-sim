@@ -116,3 +116,28 @@ def test_walls_span_pl_to_ceiling(small_result):
     assert z_walls.min() == 0.0  # walls start at PL
     assert z_walls.max() <= h_max + 1e-9  # walls don't exceed global ceiling
     assert z_walls.max() > 0.0  # there is at least one non-degenerate wall
+
+
+def test_aspectmode_is_data(small_result):
+    """All 3 axes must share the same mm scale (aspectmode='data'),
+    so the user reads true geometric proportions off the plot."""
+    fig = render_3d_thickness_map(small_result)
+    assert fig.layout.scene.aspectmode == "data"
+
+
+def test_walls_share_ceiling_coloraxis(small_result):
+    """Walls must use the same coloraxis as the ceiling so that a single
+    colorbar covers ceiling+walls and the user reads them as one solid."""
+    fig = render_3d_pressure(small_result)
+    _floor, ceiling, walls = _split_traces(fig)
+    assert ceiling.coloraxis == "coloraxis"
+    assert walls.coloraxis == "coloraxis"
+    # Wall vertices must carry an intensity array equal in length to xyz
+    assert walls.intensity is not None
+    assert len(walls.intensity) == len(walls.x)
+    # Intensity values should be finite for at least 99% of vertices
+    # (there can be NaN cells if the field happens to be undefined for
+    # some boundary cell, but that should be rare on a healthy result)
+    intensity = np.asarray(walls.intensity)
+    finite = np.isfinite(intensity)
+    assert finite.mean() > 0.99

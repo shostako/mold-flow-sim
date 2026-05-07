@@ -118,6 +118,13 @@ def test_walls_span_pl_to_ceiling(small_result):
     assert z_walls.max() > 0.0  # there is at least one non-degenerate wall
 
 
+def test_aspectmode_is_data(small_result):
+    """All 3 axes must share the same mm scale (aspectmode='data'),
+    so the user reads true geometric proportions off the plot."""
+    fig = render_3d_thickness_map(small_result)
+    assert fig.layout.scene.aspectmode == "data"
+
+
 def test_walls_share_ceiling_coloraxis(small_result):
     """Walls must use the same coloraxis as the ceiling so that a single
     colorbar covers ceiling+walls and the user reads them as one solid."""

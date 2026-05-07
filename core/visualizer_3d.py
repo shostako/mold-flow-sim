@@ -21,7 +21,9 @@ Animation of the flow front (frames-based) is deferred to Phase 1-2.
 
 Coordinate convention matches :mod:`core.visualizer`: x/y are in mm with
 the valve-gate centroid at the origin; Z = 0 is the parting line; Z > 0
-is the cavity height direction.
+is the cavity height direction. **All three axes use the same mm scale
+(`aspectmode="data"`), no exaggeration** — the plate genuinely looks
+thin because that is the actual product proportion.
 
 Plotly is imported at module level. The rest of the codebase does not
 import this module unless the UI is showing 3D content (the Streamlit
@@ -279,31 +281,24 @@ def _figure_with_pl_extrusion(
 
 def _apply_camera_and_layout(
     fig: go.Figure,
-    result: FlowResult,
     *,
     title: str,
     cbar_title: str,
 ) -> go.Figure:
-    """Common scene/camera/layout settings shared by all 3D figures."""
-    g = result.geometry
-    w_mm = float(g.nx * g.cell_size_mm)
-    h_mm = float(g.ny * g.cell_size_mm)
-    # Exaggerate Z so the (typically <5 mm) thickness is visible against
-    # the (typically tens-to-hundreds of mm) plate dimensions. Without
-    # this the runner depth difference is invisible at default camera
-    # angles. Clamp range chosen to balance "obvious extrusion" vs
-    # "still recognizable as the actual product".
-    z_max = float(np.nanmax(g.thickness_mm)) if np.isfinite(g.thickness_mm).any() else 1.0
-    z_aspect = max(0.15, min(0.8, z_max / max(w_mm, h_mm) * 18.0))
+    """Common scene/camera/layout settings shared by all 3D figures.
 
+    Z-axis is rendered at the same scale as x/y (``aspectmode="data"``)
+    so distances read directly off the plot in mm. The plate looks like
+    a thin sheet — that is the actual product proportion, no
+    exaggeration. Rotate with the mouse to perceive runner depth.
+    """
     fig.update_layout(
         title=title,
         scene=dict(
             xaxis_title="x [mm]",
             yaxis_title="y [mm]",
             zaxis_title="cavity height (PL=0) [mm]",
-            aspectmode="manual",
-            aspectratio=dict(x=1.0, y=h_mm / w_mm, z=z_aspect),
+            aspectmode="data",
             camera=dict(eye=dict(x=1.4, y=-1.4, z=1.1)),
             zaxis=dict(rangemode="tozero"),
         ),
@@ -326,7 +321,6 @@ def render_3d_thickness_map(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
     return _apply_camera_and_layout(
         fig,
-        result,
         title="Cavity thickness h(x, y) [mm] — solid view from PL",
         cbar_title="h [mm]",
     )
@@ -339,7 +333,6 @@ def render_3d_fill_time(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Plasma")
     return _apply_camera_and_layout(
         fig,
-        result,
         title=f"Fill time on cavity ceiling — T_fill = {result.total_fill_time_s:.3f} s",
         cbar_title="fill time [s]",
     )
@@ -352,7 +345,6 @@ def render_3d_pressure(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Turbo")
     return _apply_camera_and_layout(
         fig,
-        result,
         title="Normalized pressure on cavity ceiling (1 at gate, 0 at last fill)",
         cbar_title="P_norm",
     )

@@ -710,3 +710,66 @@ def test_plate_split_lower_defaults_to_plate_thk() -> None:
     lower_band = in_plate & (yy < y_long + cfg.plate_split_height_mm)
     assert lower_band.any()
     np.testing.assert_allclose(g.thickness_mm[lower_band], cfg.plate_thk_mm, atol=1e-9)
+
+
+# -------------------------- compression mask --------------------------
+
+
+def test_compression_mask_excludes_runner_and_gate() -> None:
+    """The plate body should be the only zone flagged for compression
+    inflation; runner / half-circle / valve-gate cells stay at their
+    cast thickness."""
+    cfg = _default_cfg()
+    g = build_film_gate_geometry(cfg)
+    cm = g.compression_mask
+    assert cm is not None
+    iy_idx, _ = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    y_long = cfg.pad_mm + cfg.runner_short_diameter_mm / 2 + cfg.runner_depth_mm
+    # Every compression cell must sit at or above the long edge (= plate
+    # bottom row).
+    assert np.all(yy[cm & g.mask] >= y_long - 1e-9)
+    # The runner / half-circle area (below long edge) should never be in
+    # the mask.
+    runner_zone = g.mask & (yy < y_long)
+    assert runner_zone.any()
+    assert not np.any(cm & runner_zone)
+
+
+def test_compression_inflates_only_plate_body() -> None:
+    """When compression is enabled, the plate cells should grow by
+    ``compression_factor`` while runner cells stay put."""
+    from core import HeleShawSolver, MaterialDB
+
+    cfg = _default_cfg()
+    g = build_film_gate_geometry(cfg)
+    db = MaterialDB()
+
+    solver_off = HeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+    )
+    solver_on = HeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+        compression_molding=True,
+        compression_factor=1.8,
+        compression_fraction=0.7,
+    )
+    h_off = solver_off._open_thickness_field()
+    h_on = solver_on._open_thickness_field()
+    cm = g.compression_mask
+    assert cm is not None
+    # Plate body should be inflated by compression_factor
+    np.testing.assert_allclose(h_on[cm & g.mask], h_off[cm & g.mask] * 1.8, rtol=1e-9)
+    # Runner / half-circle / gate cells should be unchanged
+    other = g.mask & ~cm
+    np.testing.assert_allclose(h_on[other], h_off[other], rtol=1e-9)

@@ -26,17 +26,18 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 56 tests
+.venv/bin/pytest tests/                        # 82 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
 ```
 
-`run_demo.py` のケース定義は2系統：
-- `DEMO_CASES`（8件）— `build_demo_geometry` 系（プレート+ランナー+スプルー合成形状）。`PP_skin_layer` がスキン層モデル ON のサンプル
+`run_demo.py` のケース定義は3系統：
+- `DEMO_CASES`（8件）— `build_demo_geometry` 系（プレート+ランナー+スプルー合成形状）。`PP_skin_layer` がスキン層モデル ON のサンプル。CLI 専用（UI からは選択不可）
 - `FILM_GATE_CASES`（4件）— `build_film_gate_geometry` 系（パラメトリックフィルムゲート、バランサー含む）
+- `DIRECT_GATE_CASES`（2件）— `build_direct_gate_geometry` 系（パラメトリックダイレクトゲート、Φピン+細スプルー+プレート）
 
-`--cases` はどちらの系列のキーも受け付ける。出力先は `outputs/<label>/{fill.gif, pressure.png, weld_airtraps.png, frames/}`、スキン層 ON ならさらに `skin.png / core.png` が追加される。`outputs/` は gitignore 済み。
+`--cases` はどの系列のキーも受け付ける。出力先は `outputs/<label>/{fill.gif, pressure.png, weld_airtraps.png, frames/}`、スキン層 ON ならさらに `skin.png / core.png` が追加される。`outputs/` は gitignore 済み。
 
 ## アーキテクチャ
 
@@ -45,7 +46,7 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 ### `core/` の責務分割
 
 - **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表せん断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
-- **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`geometry_from_image`（画像閾値処理）。
+- **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート、CLI 専用）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`build_direct_gate_geometry` + `DirectGateConfig`（パラメトリックダイレクトゲート、後述）、`geometry_from_image`（画像閾値処理）。`Geometry.compression_mask` は **圧縮成形時にどのセルが膨らむか**を表す任意の bool 配列（`None` で全セル膨張＝旧挙動、配列指定で True セルだけ膨張）。パラメトリックビルダーは「製品本体だけ True」の compression_mask を埋め込む。
 - **`solver.py`** — `HeleShawSolver` と結果 `FlowResult`。中核アルゴリズムは下記。
 - **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
 - **`visualizer_3d.py`** — `render_3d_thickness_map` / `render_3d_fill_time` / `render_3d_pressure`。**インタラクティブな3D表示**用。Plotly の `go.Figure` を返し、Streamlit の `st.plotly_chart` で埋め込む想定。各図は **PL（Z=0）= 半透明の薄グレー床 + 側壁 Mesh3d（天面と同じ物理量カラーマップで着色、`coloraxis="coloraxis"` 共有）+ 天面 Surface** の3トレース構成。1本のカラーバーで天面・側壁を一気に読む設計。**`aspectmode="data"`** で x/y/z すべて mm 等倍（誇張なし）。プレートが薄板に見えるのは実物比率そのもの。物理は 2D Hele-Shaw のまま、表現上の3D化のみ。
@@ -66,7 +67,7 @@ S = h³ / (12·η_eff)   ← Hele-Shaw コンダクタンス
 - `_build_linear_system` で5点ステンシル CSR を組み、`scipy.sparse.linalg.spsolve` で `τ` を解く。面コンダクタンスは隣接セルの**調和平均**。**注意：行列組立がPython二重ループでN大に弱い**。中規模以上のメッシュでは性能ネックになる（vectorization 候補）。
 - `τ` は擬似到達時間場。絶対時間化は `fill_time = (τ/τ_max) · (V_cavity/Q)`。
 - `η_eff` はバルク温度 `0.7·T_melt + 0.3·T_mold` と代表せん断速度で Cross-WLF を1回評価する**定数値**（局所反復なし）。
-- 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を `compression_factor` 倍に膨らませて、`T_fill` を `compression_fraction/compression_factor + (1-compression_fraction)` で短縮する**等価モデル**。
+- 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を `compression_factor` 倍に膨らませて、`T_fill` を `compression_fraction/effective_factor + (1-compression_fraction)` で短縮する**等価モデル**。`effective_factor = 1 + (compression_factor - 1) · f_comp` で、`f_comp = Geometry.compression_volume_fraction()` は「圧縮対象セル体積 / 全キャビティ体積」。compression_mask が None なら `f_comp = 1.0` で旧挙動と一致、Film gate / Direct gate のように**プレート本体だけが膨らむ**形状なら `f_comp ≈ 0.9〜0.97` 程度になり、ランナー・スプルーが膨張に寄与しない分、`T_fill` 短縮効果が薄まる（実機の挙動と整合）。
 - ウェルドライン: 8近傍中6個以上が自分より小さい `τ` を持つセル（合流リッジヒューリスティック）。
 - エアトラップ: `τ` の局所最大点（最後に充填されるセル）。
 
@@ -149,6 +150,40 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 **設計の勘所**: 段数を増やすほど精密に制御できるが、セルあたりの厚み変化が大きくなり数値条件が悪化する。`h_k` を小さくする・`W_k` を広げる・`H_bal/D` 比を上げると効果が強くなる。`run_demo.py` の `FilmGate_PP_balancer` は 1段（スカラー形）のチューニング起点ケース。
 
+### `build_direct_gate_geometry` の形状仕様
+
+Φピン（直接ゲート）+ 細スプルー帯 + 長方形プレートのシンプルな構成。「ランナー無し、ゲートが直接製品本体に注入する」最小構成。
+
+座標系（`y` 上向き、`x` 右向き）:
+
+```
+y_plate_top      = pad + d/2 + g_off + Hp
+y_plate_bottom   = pad + d/2 + g_off          ← 製品下端 = ゲート側端
+y_gate_center    = pad + d/2                  ← ゲート円中心 = 製品下端から g_off mm 下
+y = 0
+```
+
+**パラメータ（`DirectGateConfig`）**:
+
+| 記号 | 意味 | デフォルト | 制約 |
+|------|------|------|------|
+| `plate_w_mm` (Wp) | 製品幅 | — | > 0 |
+| `plate_h_mm` (Hp) | 製品高（ゲート側〜反ゲート側） | — | > 0 |
+| `plate_thk_mm` | 製品肉厚 | — | > 0 |
+| `gate_diameter_mm` (d) | ゲート円径 = スプルー帯幅 | 3.0 | `≤ plate_w_mm` |
+| `gate_offset_mm` (g_off) | 製品下端〜ゲート中心距離 | 20.0 | `≥ 0` |
+| `sprue_thk_mm` | スプルー＋ゲート円の肉厚 | None（=`plate_thk_mm`） | `> 0` |
+| `cell_size_mm` | メッシュサイズ | 1.0 | > 0 |
+
+**シルエット**:
+- ゲート円: 中心 `(cx, y_gate_center)`、半径 `d/2` の円形ディリクレ（τ=0）
+- スプルー帯: ゲート中心からプレート下端まで、幅 `d` の縦帯（中央軸 `cx` 上）
+- プレート: 幅 Wp × 高さ Hp の長方形
+
+**肉厚**: ゲート円とスプルー帯は `sprue_thk_mm`、プレートは `plate_thk_mm`。デフォルト（`sprue_thk_mm=None`）では両方とも `plate_thk_mm` で**段差なしのフラットなダイレクトゲート**になる。`sprue_thk_mm` を別値にするとスプルーだけ厚く（or 薄く）できる。
+
+**圧縮マスク**: `compression_mask = in_plate & mask`。プレート長方形領域だけが圧縮で膨らみ、スプルー帯とゲート円は射出時の肉厚のまま。Film gate と同じ方針。
+
 ### 意図的にモデル化していないもの
 
 - コアのバルク温度低下と粘度の動的更新（スキン層は Stefan/Neumann 近似で扱うが、コア温度は melt のまま固定）
@@ -162,11 +197,12 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 ## テスト
 
-`tests/` 配下に5ファイル、合計 **64テスト**：
+`tests/` 配下に6ファイル、合計 **82テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
-- `test_geometry_film_gate.py` — 41件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合
+- `test_geometry_film_gate.py` — 43件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / **compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）**
+- `test_geometry_direct_gate.py` — 16件: シルエット / ゲート径と位置の数値検証 / スプルー帯の幅 / 肉厚 / 圧縮マスク / バリデーション / solver 統合 / 圧縮成形が製品本体だけを膨らませる検証
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
 
@@ -209,7 +245,7 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 
 ## UI と CLI の対応関係
 
-`app.py` のサイドバー入力は3系統（`Demo plate` / `Film gate (parametric)` / `画像から生成`）。`run_demo.py` の `DEMO_CASES` / `FILM_GATE_CASES` も同じパラメータ群を扱う。**新パラメータを `HeleShawSolver` または `FilmGateConfig` に足すなら、UI と CLI の両方に反映する必要がある**。
+`app.py` のサイドバー入力は3系統（`Film gate (parametric)` / `Direct gate (parametric)` / `画像から生成`）。`run_demo.py` の `DEMO_CASES` / `FILM_GATE_CASES` / `DIRECT_GATE_CASES` も同じパラメータ群を扱う（`DEMO_CASES` は CLI 専用、UI からは消した）。**新パラメータを `HeleShawSolver` / `FilmGateConfig` / `DirectGateConfig` に足すなら、UI と CLI の両方に反映する必要がある**。
 
 特に `FilmGateConfig` の `D_flat + D_slope = D` 制約は、UI 側では「`D_flat / D` の比率スライダー」で表現してこの制約を自動満足させている（`app.py` の `flat_ratio` 変数）。CLI 側は直接 `D_flat` / `D_slope` を渡すので、case 定義時に和が `D` になることを手動で保証する必要がある。
 
@@ -219,3 +255,5 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - **プレート分割**: UI は「段差位置 [mm]」スライダーで `plate_split_height_mm` を出し、値が `0` のときはゲート側／反ゲート側の肉厚スライダーを隠して `plate_thk` 1本に統合、cfg には `plate_lower_thk_mm = plate_upper_thk_mm = None` を渡して uniform モードに落とす。CLI で uniform にしたいときも同じく `plate_split_height_mm=0` ＋ `plate_lower_thk_mm = plate_upper_thk_mm = None` で足りる。
 - **スキン層**: UI のトグルが `skin_layer_enabled`、スライダーが `skin_growth_constant`（`c_skin`）。CLI 側はソルバー kwargs に直接渡す（`run_demo.py` の `PP_skin_layer` 参照）。
 - **射出条件の単位系**: `injection_velocity_mms` / `injection_volume_flow_cm3s` の既定値は **実機ユニット域**（`eae5394` で再スケール済）。新ケースを足すときも実機相当の値を入れる前提で考える。CLI 既定値（`run_demo.py`）と UI 既定値（`app.py`）はこの方針で揃えてある。
+- **Direct gate**: UI では「ゲート径 Φ」「ゲート〜製品下端距離」「スプルー肉厚」のスライダーで `DirectGateConfig` を組み立てる。`sprue_thk_mm` のデフォルトは `None`（=`plate_thk_mm` と同じ＝段差なしのフラットゲート）。UI のスプルー肉厚スライダーは初期値が `plate_thk` と同じなので、ユーザーが触るまではフラット形状になる。CLI では `DirectGateConfig(sprue_thk_mm=None)` で同じ挙動。
+- **圧縮成形のスコープ**: 圧縮で膨らむのは `Geometry.compression_mask` が True のセルだけ。Film gate と Direct gate のビルダーが「製品本体だけ True」のマスクを埋め込むので、ランナー・スプルー・ゲートは不変。`build_demo_geometry` と `geometry_from_image` は `compression_mask=None`（旧挙動＝全セル膨張）。新しい形状ビルダーを足すときは「製品本体だけ True」の compression_mask を必ずセットすること。

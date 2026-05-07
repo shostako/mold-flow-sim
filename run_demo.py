@@ -6,11 +6,13 @@ Usage::
     python run_demo.py --cases PP_baseline       # run a single case
     python run_demo.py --cases FilmGate_PP_default
 
-Cases are split into two families:
+Cases are split into three families:
 
 - *demo cases* use :func:`build_demo_geometry` (plate + runner + sprue).
 - *film-gate cases* use :func:`build_film_gate_geometry` driven by a
   :class:`FilmGateConfig`.
+- *direct-gate cases* use :func:`build_direct_gate_geometry` driven by a
+  :class:`DirectGateConfig` (Φ-pin gate + thin sprue strip + plate).
 """
 
 from __future__ import annotations
@@ -19,11 +21,13 @@ import argparse
 from pathlib import Path
 
 from core import (
+    DirectGateConfig,
     FilmGateConfig,
     Geometry,
     HeleShawSolver,
     MaterialDB,
     build_demo_geometry,
+    build_direct_gate_geometry,
     build_film_gate_geometry,
     export_frames,
     render_core_layer_map,
@@ -118,6 +122,17 @@ def run_film_gate_case(
     **solver_kwargs,
 ) -> None:
     geom = build_film_gate_geometry(cfg)
+    _solve_and_export(label, out_root, geom, **solver_kwargs)
+
+
+def run_direct_gate_case(
+    label: str,
+    out_root: Path,
+    *,
+    cfg: DirectGateConfig,
+    **solver_kwargs,
+) -> None:
+    geom = build_direct_gate_geometry(cfg)
     _solve_and_export(label, out_root, geom, **solver_kwargs)
 
 
@@ -265,6 +280,51 @@ def _film_gate_cfg_with_balancer() -> FilmGateConfig:
     )
 
 
+def _direct_gate_cfg_default() -> DirectGateConfig:
+    return DirectGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=2.0,
+        gate_diameter_mm=3.0,
+        gate_offset_mm=20.0,
+        cell_size_mm=1.0,
+    )
+
+
+def _direct_gate_cfg_compression() -> DirectGateConfig:
+    return DirectGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=1.5,
+        gate_diameter_mm=3.0,
+        gate_offset_mm=20.0,
+        cell_size_mm=1.0,
+    )
+
+
+DIRECT_GATE_CASES: dict[str, dict] = {
+    "DirectGate_PP_default": dict(
+        cfg=_direct_gate_cfg_default(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+    ),
+    "DirectGate_PP_compression": dict(
+        cfg=_direct_gate_cfg_compression(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=80.0,
+        inj_Q_cm3s=15.0,
+        compression=True,
+        compression_factor=1.6,
+        compression_fraction=0.65,
+    ),
+}
+
+
 FILM_GATE_CASES: dict[str, dict] = {
     "FilmGate_PP_default": dict(
         cfg=_film_gate_cfg_default(),
@@ -318,13 +378,17 @@ def main() -> None:
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    all_keys = list(DEMO_CASES.keys()) + list(FILM_GATE_CASES.keys())
+    all_keys = (
+        list(DEMO_CASES.keys()) + list(FILM_GATE_CASES.keys()) + list(DIRECT_GATE_CASES.keys())
+    )
     keys = args.cases or all_keys
     for k in keys:
         if k in DEMO_CASES:
             run_demo_case(k, out_root, **DEMO_CASES[k])
         elif k in FILM_GATE_CASES:
             run_film_gate_case(k, out_root, **FILM_GATE_CASES[k])
+        elif k in DIRECT_GATE_CASES:
+            run_direct_gate_case(k, out_root, **DIRECT_GATE_CASES[k])
         else:
             print(f"unknown case: {k}")
             continue

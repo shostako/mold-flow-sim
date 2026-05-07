@@ -18,7 +18,11 @@ Caveats:
 - Single representative shear rate (no local rate iteration).
 - Compression molding modeled as an effective thickness inflation
   during the first compress_fraction of the fill, lowering local
-  flow resistance.
+  flow resistance. Only cells flagged in
+  ``geometry.compression_mask`` are inflated (parametric builders
+  set this to the product-body cells, leaving runners/sprues at
+  their cast thickness). When ``compression_mask`` is ``None`` the
+  whole cavity inflates (legacy / image input).
 
 Skin-layer model (optional, ``skin_layer_enabled=True``):
 
@@ -107,12 +111,21 @@ class HeleShawSolver:
         """Cavity thickness used as the skin-free reference (mm).
 
         Equivalent to ``geometry.thickness_mm``, expanded by
-        ``compression_factor`` when compression molding is active. The
-        skin-layer model carves into this reference field.
+        ``compression_factor`` when compression molding is active. Only
+        cells flagged in ``geometry.compression_mask`` participate in the
+        inflation; runners / sprues / gates keep their original thickness.
+        ``compression_mask = None`` falls back to legacy whole-cavity
+        inflation. The skin-layer model carves into this reference field.
         """
         h_mm = self.geometry.thickness_mm.copy()
         if self.compression_molding:
-            h_mm = h_mm * float(self.compression_factor)
+            cm = self.geometry.compression_mask
+            factor = float(self.compression_factor)
+            if cm is None:
+                h_mm = h_mm * factor
+            else:
+                target = cm & self.geometry.mask
+                h_mm[target] = h_mm[target] * factor
         return h_mm
 
     def _conductance_field(
@@ -223,9 +236,16 @@ class HeleShawSolver:
             Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
             T_fill_baseline = V_cm3 / Q
         if self.compression_molding:
+            # Effective inflation acting on the whole cavity (Q = const proxy).
+            # When only the product body inflates (compression_mask set), the
+            # net resistance drop is proportional to that body's volume share,
+            # so the compression-phase speed-up is diluted accordingly.
+            f_comp = float(self.geometry.compression_volume_fraction())
+            f_comp = max(min(f_comp, 1.0), 0.0)
+            effective_factor = 1.0 + (float(self.compression_factor) - 1.0) * f_comp
+            effective_factor = max(effective_factor, 1e-3)
             T_fill_baseline = T_fill_baseline * (
-                self.compression_fraction / max(self.compression_factor, 1e-3)
-                + (1.0 - self.compression_fraction)
+                self.compression_fraction / effective_factor + (1.0 - self.compression_fraction)
             )
 
         # baseline solve (no skin) — also serves as the tau_max reference

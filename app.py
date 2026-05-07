@@ -16,10 +16,11 @@ import numpy as np
 import streamlit as st
 
 from core import (
+    DirectGateConfig,
     FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
-    build_demo_geometry,
+    build_direct_gate_geometry,
     build_film_gate_geometry,
     geometry_from_image,
     render_3d_fill_time,
@@ -60,21 +61,41 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Demo plate (synthetic)",
             "Film gate (parametric)",
+            "Direct gate (parametric)",
             "画像から生成 (PNG/JPG)",
         ],
-        index=1,
+        index=0,
     )
 
-    if geom_source.startswith("Demo"):
+    if geom_source.startswith("Direct gate"):
         plate_w = st.slider("製品幅 [mm]", 40.0, 300.0, 120.0, step=5.0)
-        plate_h = st.slider("製品高 [mm]", 30.0, 160.0, 80.0, step=5.0)
-        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
-        runner_thk = st.slider("ランナー肉厚 [mm]", 1.0, 8.0, 4.0, step=0.1)
-        sprue_thk = st.slider("スプルー肉厚 [mm]", 2.0, 10.0, 6.0, step=0.1)
+        plate_h = st.slider("製品高 [mm]", 30.0, 200.0, 80.0, step=5.0)
+        plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 2.0, step=0.1)
+        gate_diameter = st.slider(
+            "ゲート径 Φ [mm]",
+            1.0,
+            10.0,
+            3.0,
+            step=0.5,
+        )
+        gate_offset = st.slider(
+            "ゲート〜製品下端距離 [mm]",
+            5.0,
+            60.0,
+            20.0,
+            step=1.0,
+            help="製品（長方形）の下端中央から、ゲート円中心までの距離。",
+        )
+        sprue_thk_dg = st.slider(
+            "スプルー肉厚 [mm]",
+            0.2,
+            6.0,
+            float(plate_thk),
+            step=0.1,
+            help="ゲート円および接続帯（スプルー）の肉厚。製品肉厚と同じならフラットなダイレクトゲート。",
+        )
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 1.0, step=0.1)
-        gate_count = st.slider("ゲート数", 1, 4, 1)
         upload = None
     elif geom_source.startswith("Film gate"):
         plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -345,16 +366,21 @@ with st.sidebar:
 
 # ----------------------- main panel -----------------------
 def build_geometry() -> Geometry:
-    if geom_source.startswith("Demo"):
-        return build_demo_geometry(
-            plate_w_mm=plate_w,
-            plate_h_mm=plate_h,
-            plate_thk_mm=plate_thk,
-            runner_thk_mm=runner_thk,
-            sprue_thk_mm=sprue_thk,
-            cell_size_mm=cell_size,
-            gate_count=gate_count,
-        )
+    if geom_source.startswith("Direct gate"):
+        try:
+            cfg_dg = DirectGateConfig(
+                plate_w_mm=plate_w,
+                plate_h_mm=plate_h,
+                plate_thk_mm=plate_thk,
+                gate_diameter_mm=gate_diameter,
+                gate_offset_mm=gate_offset,
+                sprue_thk_mm=sprue_thk_dg,
+                cell_size_mm=cell_size,
+            )
+            return build_direct_gate_geometry(cfg_dg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
     if geom_source.startswith("Film gate"):
         try:
             cfg = FilmGateConfig(

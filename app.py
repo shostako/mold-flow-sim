@@ -476,6 +476,58 @@ if do_run:
         )
         result = solver.solve(num_frames=num_frames)
 
+        # 重い PNG/GIF レンダリングはここで一回だけやる。後段の widget 操作で
+        # rerun が走っても再生成しないよう、すべて session_state に置く。
+        _tmp_dir = Path(tempfile.mkdtemp())
+        _gif_path = render_fill_animation(
+            result, _tmp_dir / "fill.gif", num_frames=num_frames, fps=8
+        )
+        _press_path = render_pressure_map(result, _tmp_dir / "pressure.png")
+        _weld_path = render_weldlines(result, _tmp_dir / "weld.png")
+        _skin_path: Path | None = None
+        _core_path: Path | None = None
+        if skin_on and result.skin_thickness_mm is not None:
+            _skin_path = render_skin_layer_map(result, _tmp_dir / "skin.png")
+            _core_path = render_core_layer_map(result, _tmp_dir / "core.png")
+
+        _zip_buf_run = io.BytesIO()
+        with zipfile.ZipFile(_zip_buf_run, "w", zipfile.ZIP_DEFLATED) as _zf_run:
+            for _p in (_gif_path, _press_path, _weld_path, _skin_path, _core_path):
+                if _p is not None and _p.exists():
+                    _zf_run.write(_p, _p.name)
+            _zf_run.writestr(
+                "metadata.json",
+                json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
+            )
+
+        # 解析結果の一式を session_state に格納。次回 rerun（3D スライダー操作等）
+        # でも下のブロックがこれを拾って表示する。
+        st.session_state["mfs_result"] = result
+        st.session_state["mfs_geom"] = geom
+        st.session_state["mfs_skin_on"] = skin_on
+        st.session_state["mfs_num_frames"] = num_frames
+        st.session_state["mfs_tmp_dir"] = _tmp_dir
+        st.session_state["mfs_gif_path"] = _gif_path
+        st.session_state["mfs_press_path"] = _press_path
+        st.session_state["mfs_weld_path"] = _weld_path
+        st.session_state["mfs_skin_path"] = _skin_path
+        st.session_state["mfs_core_path"] = _core_path
+        st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
+
+# 結果が session_state にある間は、do_run=False のときも（3D 倍率スライダー
+# などのウィジェット操作で rerun が走った場合も）表示を維持する。
+if "mfs_result" in st.session_state:
+    result = st.session_state["mfs_result"]
+    geom = st.session_state["mfs_geom"]
+    skin_on = st.session_state["mfs_skin_on"]
+    num_frames = st.session_state["mfs_num_frames"]
+    gif_path = st.session_state["mfs_gif_path"]
+    press_path = st.session_state["mfs_press_path"]
+    weld_path = st.session_state["mfs_weld_path"]
+    skin_path = st.session_state["mfs_skin_path"]
+    core_path = st.session_state["mfs_core_path"]
+    _zip_bytes = st.session_state["mfs_zip_bytes"]
+
     with col_right:
         st.subheader("結果")
         c1, c2, c3 = st.columns(3)
@@ -517,16 +569,6 @@ if do_run:
                     f"スキン最大 {s_max_mm * 1e3:.1f} μm,  コア最小 h_core = {h_core_min:.3f} mm"
                 )
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        gif_path = render_fill_animation(result, tmp_dir / "fill.gif", num_frames=num_frames, fps=8)
-        press_path = render_pressure_map(result, tmp_dir / "pressure.png")
-        weld_path = render_weldlines(result, tmp_dir / "weld.png")
-        skin_path: Path | None = None
-        core_path: Path | None = None
-        if skin_on and result.skin_thickness_mm is not None:
-            skin_path = render_skin_layer_map(result, tmp_dir / "skin.png")
-            core_path = render_core_layer_map(result, tmp_dir / "core.png")
-
         def _download(label: str, path: Path, mime: str, key: str) -> None:
             with open(path, "rb") as _f:
                 st.download_button(
@@ -536,19 +578,6 @@ if do_run:
                     mime=mime,
                     key=key,
                 )
-
-        # Build a ZIP of every artifact so the user can grab the whole
-        # animation set (GIF + maps + metadata) in a single click.
-        _zip_buf = io.BytesIO()
-        with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
-            for _p in (gif_path, press_path, weld_path, skin_path, core_path):
-                if _p is not None and _p.exists():
-                    _zf.write(_p, _p.name)
-            _zf.writestr(
-                "metadata.json",
-                json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
-            )
-        _zip_bytes = _zip_buf.getvalue()
 
         st.markdown("**充填先端アニメーション**")
         st.image(str(gif_path))
@@ -585,10 +614,10 @@ if do_run:
         with st.expander("3D表示（plotly・実験的）"):
             st.caption(
                 "PL（パーティングライン）= Z=0 を底面とし、各セルを厚み h(x,y) 分だけ"
-                "立ち上げたソリッド表示。天面に物理量（厚み・充填時間・圧力）を着色、"
-                "半透明の灰色面が PL、灰色のリブが側壁。ドラッグで回転、スクロールで"
-                "ズーム。物理は 2D Hele-Shaw のまま（表現上の3D化のみ）、Z軸スケール"
-                "は視認性のため誇張あり。"
+                "立ち上げたソリッド表示。x / y / z すべて同じ mm スケール（実物等倍）"
+                "で描画。**天面と側壁の両方が物理量で着色**され、1つのカラーバーで"
+                "読める（PLの薄グレー床は形状参照用）。ドラッグで回転、スクロール"
+                "でズーム。物理は 2D Hele-Shaw のまま（表現上の3D化のみ）。"
             )
             t3d_h, t3d_fill, t3d_press = st.tabs(["厚み h(x,y)", "充填時間", "圧力"])
             with t3d_h:

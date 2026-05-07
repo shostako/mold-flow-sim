@@ -21,7 +21,9 @@ Animation of the flow front (frames-based) is deferred to Phase 1-2.
 
 Coordinate convention matches :mod:`core.visualizer`: x/y are in mm with
 the valve-gate centroid at the origin; Z = 0 is the parting line; Z > 0
-is the cavity height direction.
+is the cavity height direction. **All three axes use the same mm scale
+(`aspectmode="data"`), no exaggeration** — the plate genuinely looks
+thin because that is the actual product proportion.
 
 Plotly is imported at module level. The rest of the codebase does not
 import this module unless the UI is showing 3D content (the Streamlit
@@ -73,16 +75,22 @@ def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
 # ----------------------------------------------------------------------
 
 
-def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _build_side_walls(
+    result: FlowResult,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build a vertical-wall Mesh3d for every cavity boundary edge.
 
     For each in-cavity cell, check its 4 neighbors. Whenever a neighbor
     is out-of-bounds or out-of-cavity, emit a vertical quad on the shared
     edge from Z = 0 (PL) to Z = h_local (cavity ceiling).
 
-    Returns four 1-D arrays (xs, ys, zs, tri_ijk_flat) where the last
-    array is the flat (3M,) index list — three indices per triangle.
-    Caller reshapes into (i, j, k) for Plotly.
+    Returns five 1-D arrays:
+      - xs, ys, zs:    vertex coordinates (mm)
+      - tri:           flat triangle index list (3M,) → reshape to (M, 3)
+      - cell_idx:      for each vertex, the flat index ``iy*nx + ix`` of
+                       the cell that owns the wall. Lets the caller pull
+                       per-cell physics field values into the wall mesh
+                       (so walls share the ceiling's colormap).
     """
     g = result.geometry
     nx, ny = g.nx, g.ny
@@ -95,6 +103,7 @@ def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.nd
     ys: list[float] = []
     zs: list[float] = []
     tri: list[int] = []
+    cell_idx: list[int] = []
 
     def add_quad(
         ax_m: float,
@@ -102,11 +111,11 @@ def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.nd
         bx_m: float,
         by_m: float,
         h_top: float,
+        owner: int,
     ) -> None:
-        """Append a vertical quad with bottom edge (a→b) at Z=0 and top
-        edge (a→b) at Z=h_top, as two triangles."""
+        """Append a vertical quad (4 vertices, 2 triangles) tagged with the
+        owner cell's flat index so plotly can color it like the ceiling."""
         i0 = len(xs)
-        # bottom-A, bottom-B, top-B, top-A
         for x_m, y_m, z_m in (
             (ax_m, ay_m, 0.0),
             (bx_m, by_m, 0.0),
@@ -116,40 +125,35 @@ def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.nd
             xs.append(x_m)
             ys.append(y_m)
             zs.append(z_m)
-        # two triangles: (i0, i0+1, i0+2) and (i0, i0+2, i0+3)
+            cell_idx.append(owner)
         tri.extend([i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3])
 
-    # iterate cavity cells; numpy-where is overkill for the small N of
-    # boundary cells, a plain loop is fine and easier to read
     iy_idx, ix_idx = np.where(mask)
     for iy, ix in zip(iy_idx.tolist(), ix_idx.tolist(), strict=True):
         h_top = float(thk[iy, ix])
         if not np.isfinite(h_top) or h_top <= 0.0:
             continue
-        # cell corners in gate-centered mm
+        owner = iy * nx + ix
         x_left = ix * cs - x0
         x_right = (ix + 1) * cs - x0
         y_bot = iy * cs - y0
         y_top = (iy + 1) * cs - y0
 
-        # north neighbor (iy+1, ix)
         if iy + 1 >= ny or not mask[iy + 1, ix]:
-            add_quad(x_left, y_top, x_right, y_top, h_top)
-        # south neighbor (iy-1, ix)
+            add_quad(x_left, y_top, x_right, y_top, h_top, owner)
         if iy - 1 < 0 or not mask[iy - 1, ix]:
-            add_quad(x_left, y_bot, x_right, y_bot, h_top)
-        # east neighbor (iy, ix+1)
+            add_quad(x_left, y_bot, x_right, y_bot, h_top, owner)
         if ix + 1 >= nx or not mask[iy, ix + 1]:
-            add_quad(x_right, y_bot, x_right, y_top, h_top)
-        # west neighbor (iy, ix-1)
+            add_quad(x_right, y_bot, x_right, y_top, h_top, owner)
         if ix - 1 < 0 or not mask[iy, ix - 1]:
-            add_quad(x_left, y_bot, x_left, y_top, h_top)
+            add_quad(x_left, y_bot, x_left, y_top, h_top, owner)
 
     return (
         np.asarray(xs, dtype=float),
         np.asarray(ys, dtype=float),
         np.asarray(zs, dtype=float),
         np.asarray(tri, dtype=np.int32),
+        np.asarray(cell_idx, dtype=np.int64),
     )
 
 
@@ -161,9 +165,9 @@ def _build_side_walls(result: FlowResult) -> tuple[np.ndarray, np.ndarray, np.nd
 def _floor_trace(result: FlowResult) -> go.Surface:
     """PL (parting-line) floor: a Z = 0 surface masked to the cavity.
 
-    Plotly Surface treats NaN cells as 'no draw', so this surface
-    appears only inside the cavity outline — exactly the projected
-    silhouette of the product on the parting line.
+    Kept faint and translucent so it does not steal attention from the
+    colored ceiling and walls — its job is to anchor the silhouette
+    on the parting plane, not to convey data.
     """
     g = result.geometry
     x, y = _gate_centered_axes(result)
@@ -173,8 +177,8 @@ def _floor_trace(result: FlowResult) -> go.Surface:
         y=y,
         z=z,
         showscale=False,
-        opacity=0.55,
-        colorscale=[[0, "rgb(180,180,180)"], [1, "rgb(180,180,180)"]],
+        opacity=0.30,
+        colorscale=[[0, "rgb(220,220,220)"], [1, "rgb(220,220,220)"]],
         cmin=0.0,
         cmax=1.0,
         surfacecolor=np.where(g.mask, 0.5, np.nan),
@@ -189,17 +193,26 @@ def _floor_trace(result: FlowResult) -> go.Surface:
     )
 
 
-def _walls_trace(result: FlowResult) -> go.Mesh3d | None:
-    """Vertical side walls along every cavity boundary edge.
+def _walls_trace(
+    result: FlowResult,
+    color_field: np.ndarray,
+) -> go.Mesh3d | None:
+    """Vertical side walls colored by the same physics field as the ceiling.
 
-    Returns ``None`` if the cavity is empty (degenerate case, mostly
-    relevant for tests with all-False masks).
+    ``color_field`` is the per-cell scalar array (shape == mask.shape).
+    Each wall vertex inherits its owner cell's value via ``intensity``,
+    sharing the figure's ``coloraxis`` so the colorbar applies to the
+    walls too.
+
+    Returns ``None`` if the cavity is empty (degenerate, test only).
     """
-    xs, ys, zs, tri = _build_side_walls(result)
+    xs, ys, zs, tri, cell_idx = _build_side_walls(result)
     if xs.size == 0:
         return None
     n_tri = tri.size // 3
     ijk = tri.reshape(n_tri, 3)
+    field_flat = np.asarray(color_field, dtype=float).ravel()
+    intensity = field_flat[cell_idx]
     return go.Mesh3d(
         x=xs,
         y=ys,
@@ -207,8 +220,10 @@ def _walls_trace(result: FlowResult) -> go.Mesh3d | None:
         i=ijk[:, 0],
         j=ijk[:, 1],
         k=ijk[:, 2],
-        color="rgb(150,150,150)",
-        opacity=0.85,
+        intensity=intensity,
+        intensitymode="vertex",
+        coloraxis="coloraxis",
+        opacity=1.0,
         flatshading=True,
         name="cavity walls",
         hoverinfo="skip",
@@ -248,9 +263,14 @@ def _figure_with_pl_extrusion(
     *,
     colorscale: str,
 ) -> go.Figure:
-    """Compose ceiling + PL floor + side walls into one Plotly Figure."""
+    """Compose ceiling + PL floor + side walls into one Plotly Figure.
+
+    All three traces share ``coloraxis="coloraxis"`` so the side walls
+    pick up the same colorbar as the ceiling — a single legend covers
+    the whole solid.
+    """
     traces: list = [_floor_trace(result)]
-    walls = _walls_trace(result)
+    walls = _walls_trace(result, color_field)
     if walls is not None:
         traces.append(walls)
     traces.append(_ceiling_trace(result, color_field, colorscale=colorscale))
@@ -261,28 +281,24 @@ def _figure_with_pl_extrusion(
 
 def _apply_camera_and_layout(
     fig: go.Figure,
-    result: FlowResult,
     *,
     title: str,
     cbar_title: str,
 ) -> go.Figure:
-    """Common scene/camera/layout settings shared by all 3D figures."""
-    g = result.geometry
-    w_mm = float(g.nx * g.cell_size_mm)
-    h_mm = float(g.ny * g.cell_size_mm)
-    # exaggerate Z so the (typically <5 mm) thickness is visible against
-    # the (typically tens-to-hundreds of mm) plate dimensions
-    z_max = float(np.nanmax(g.thickness_mm)) if np.isfinite(g.thickness_mm).any() else 1.0
-    z_aspect = max(0.05, min(0.5, z_max / max(w_mm, h_mm) * 8.0))
+    """Common scene/camera/layout settings shared by all 3D figures.
 
+    Z-axis is rendered at the same scale as x/y (``aspectmode="data"``)
+    so distances read directly off the plot in mm. The plate looks like
+    a thin sheet — that is the actual product proportion, no
+    exaggeration. Rotate with the mouse to perceive runner depth.
+    """
     fig.update_layout(
         title=title,
         scene=dict(
             xaxis_title="x [mm]",
             yaxis_title="y [mm]",
             zaxis_title="cavity height (PL=0) [mm]",
-            aspectmode="manual",
-            aspectratio=dict(x=1.0, y=h_mm / w_mm, z=z_aspect),
+            aspectmode="data",
             camera=dict(eye=dict(x=1.4, y=-1.4, z=1.1)),
             zaxis=dict(rangemode="tozero"),
         ),
@@ -305,7 +321,6 @@ def render_3d_thickness_map(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
     return _apply_camera_and_layout(
         fig,
-        result,
         title="Cavity thickness h(x, y) [mm] — solid view from PL",
         cbar_title="h [mm]",
     )
@@ -318,7 +333,6 @@ def render_3d_fill_time(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Plasma")
     return _apply_camera_and_layout(
         fig,
-        result,
         title=f"Fill time on cavity ceiling — T_fill = {result.total_fill_time_s:.3f} s",
         cbar_title="fill time [s]",
     )
@@ -331,7 +345,6 @@ def render_3d_pressure(result: FlowResult) -> go.Figure:
     fig = _figure_with_pl_extrusion(result, color, colorscale="Turbo")
     return _apply_camera_and_layout(
         fig,
-        result,
         title="Normalized pressure on cavity ceiling (1 at gate, 0 at last fill)",
         cbar_title="P_norm",
     )

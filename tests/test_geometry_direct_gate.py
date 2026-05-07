@@ -233,6 +233,113 @@ def test_solver_runs_on_direct_gate_geometry() -> None:
     assert float(np.nanmax(res.fill_time_s[msk])) > 0.0
 
 
+# -------------------------- plate split (2-zone thickness) --------------------------
+
+
+def test_plate_split_off_uses_uniform_thickness() -> None:
+    """``plate_split_height_mm == 0`` should give a uniform plate at
+    ``plate_thk_mm``."""
+    cfg = _default_cfg(plate_split_height_mm=0.0)
+    g = build_direct_gate_geometry(cfg)
+    np.testing.assert_allclose(g.thickness_mm[g.mask], cfg.plate_thk_mm, atol=1e-9)
+
+
+def test_plate_split_creates_two_thickness_bands() -> None:
+    """``plate_split_height_mm > 0`` should produce a gate-side band at
+    ``plate_lower_thk_mm`` and a far-side band at ``plate_upper_thk_mm``."""
+    cfg = _default_cfg(
+        plate_h_mm=50.0,
+        plate_thk_mm=0.4,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+        cell_size_mm=0.5,
+    )
+    g = build_direct_gate_geometry(cfg)
+    iy_idx, _ = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    pad = cfg.pad_mm
+    in_lower = g.mask & (yy < pad + cfg.plate_split_height_mm)
+    in_upper = g.mask & (yy >= pad + cfg.plate_split_height_mm)
+    assert in_lower.any()
+    assert in_upper.any()
+    np.testing.assert_allclose(g.thickness_mm[in_lower], 0.35, atol=1e-9)
+    np.testing.assert_allclose(g.thickness_mm[in_upper], 0.50, atol=1e-9)
+
+
+def test_plate_split_lower_defaults_to_plate_thk() -> None:
+    """When ``plate_lower_thk_mm`` is None and split > 0, the gate-side
+    band falls back to ``plate_thk_mm``."""
+    cfg = _default_cfg(
+        plate_thk_mm=0.4,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=None,
+        plate_upper_thk_mm=0.6,
+        cell_size_mm=0.5,
+    )
+    g = build_direct_gate_geometry(cfg)
+    iy_idx, _ = np.indices(g.mask.shape)
+    yy = (iy_idx + 0.5) * cfg.cell_size_mm
+    pad = cfg.pad_mm
+    in_lower = g.mask & (yy < pad + cfg.plate_split_height_mm)
+    np.testing.assert_allclose(g.thickness_mm[in_lower], cfg.plate_thk_mm, atol=1e-9)
+
+
+def test_plate_split_validation_rejects_height_above_plate() -> None:
+    with pytest.raises(ValueError, match="plate_split_height_mm"):
+        DirectGateConfig(
+            plate_w_mm=120.0,
+            plate_h_mm=80.0,
+            plate_thk_mm=2.0,
+            plate_split_height_mm=120.0,  # > plate_h_mm
+        ).validate()
+
+
+def test_plate_split_validation_rejects_negative_lower_thickness() -> None:
+    with pytest.raises(ValueError, match="plate_lower_thk_mm"):
+        DirectGateConfig(
+            plate_w_mm=120.0,
+            plate_h_mm=80.0,
+            plate_thk_mm=2.0,
+            plate_split_height_mm=20.0,
+            plate_lower_thk_mm=-0.1,
+        ).validate()
+
+
+def test_plate_split_validation_rejects_negative_upper_thickness() -> None:
+    with pytest.raises(ValueError, match="plate_upper_thk_mm"):
+        DirectGateConfig(
+            plate_w_mm=120.0,
+            plate_h_mm=80.0,
+            plate_thk_mm=2.0,
+            plate_split_height_mm=20.0,
+            plate_upper_thk_mm=0.0,
+        ).validate()
+
+
+def test_resolved_plate_zones_uniform_mode() -> None:
+    cfg = DirectGateConfig(plate_w_mm=120.0, plate_h_mm=80.0, plate_thk_mm=1.5)
+    split, lower, upper = cfg.resolved_plate_zones()
+    assert split == 0.0
+    assert lower == 1.5
+    assert upper == 1.5
+
+
+def test_resolved_plate_zones_split_mode() -> None:
+    cfg = DirectGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=0.4,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+    split, lower, upper = cfg.resolved_plate_zones()
+    assert split == 20.0
+    assert lower == 0.35
+    assert upper == 0.50
+
+
 def test_compression_shortens_fill_time() -> None:
     """With the entire plate in the compression mask, ICM ON should match
     the legacy whole-cavity inflation behaviour: T_fill shrinks by

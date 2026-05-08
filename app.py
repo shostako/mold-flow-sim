@@ -395,10 +395,7 @@ with st.sidebar:
                 _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
                 _label_suffix = f"（{_label}）" if _label else ""
                 _w_default = _w_defaults[bal_stage_count][_k - 1]
-                _h_default = max(
-                    0.05,
-                    min(_h_defaults_abs[bal_stage_count][_k - 1], plate_lower_thk),
-                )
+                _h_default = max(0.05, _h_defaults_abs[bal_stage_count][_k - 1])
                 _w_ratio = st.slider(
                     f"底辺幅{_k} / L_long{_label_suffix}",
                     0.05,
@@ -410,10 +407,15 @@ with st.sidebar:
                 _h_val = st.slider(
                     f"残り肉厚{_k} [mm]{_label_suffix}",
                     0.05,
-                    float(plate_lower_thk),
+                    1.0,
                     float(_h_default),
                     step=0.05,
                     key=f"bal_h_{_k}",
+                    help=(
+                        "肉盗み(▽)内の残り肉厚。プレート側肉厚 "
+                        "(plate_lower_thk) より大きく取ると、その段は"
+                        "「肉盛り凸部」になる（流路を逆に広げる用途）。"
+                    ),
                 )
                 bal_widths_mm.append(_w_ratio * runner_long)
                 bal_thks.append(float(_h_val))

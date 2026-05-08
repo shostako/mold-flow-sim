@@ -395,7 +395,11 @@ with st.sidebar:
                 _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
                 _label_suffix = f"（{_label}）" if _label else ""
                 _w_default = _w_defaults[bal_stage_count][_k - 1]
-                _h_default = max(0.05, _h_defaults_abs[bal_stage_count][_k - 1])
+                # 残り肉厚スライダーの上限はランナー厚肉部 h_runner の直下まで
+                # （h_runner 以上だと流路を狭める効果が無くなるため）。step=0.05
+                # に揃えるため runner_thk_film - 0.05 を取る。
+                _h_max = max(0.10, float(runner_thk_film) - 0.05)
+                _h_default = max(0.05, min(_h_defaults_abs[bal_stage_count][_k - 1], _h_max))
                 _w_ratio = st.slider(
                     f"底辺幅{_k} / L_long{_label_suffix}",
                     0.05,
@@ -407,14 +411,15 @@ with st.sidebar:
                 _h_val = st.slider(
                     f"残り肉厚{_k} [mm]{_label_suffix}",
                     0.05,
-                    1.0,
+                    _h_max,
                     float(_h_default),
                     step=0.05,
                     key=f"bal_h_{_k}",
                     help=(
                         "肉盗み(▽)内の残り肉厚。プレート側肉厚 "
-                        "(plate_lower_thk) より大きく取ると、その段は"
-                        "「肉盛り凸部」になる（流路を逆に広げる用途）。"
+                        "(plate_lower_thk) を超える値を指定すると、肉盗みは"
+                        "ランナー斜辺の途中までしか延びない（h_k がそのy 位置の"
+                        "ランナー肉厚 h(y) と等しくなる位置で止まる）。"
                     ),
                 )
                 bal_widths_mm.append(_w_ratio * runner_long)

@@ -593,48 +593,21 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
         base_offset = cfg.balancer_base_distance_from_gate_mm
 
         y_apex = y_short + (base_offset - H_bal)
-        y_base_user = y_short + base_offset  # user-specified upper bound
-        y_flat_top = y_short + D_flat  # slope zone start
+        y_base = y_short + base_offset
+
+        # All stages share the same y-band; only the half-width vs y differs
+        # (linear from 0 at apex to W_k/2 at base).
+        in_balancer_y = (yy >= y_apex) & (yy <= y_base)
+        with np.errstate(invalid="ignore"):
+            t_y = np.clip((yy - y_apex) / max(H_bal, 1e-12), 0.0, 1.0)
 
         stages = cfg.resolved_balancer_stages()  # center → outer
         # Paint outer → inner so inner stages overwrite outer ones; the result
         # is a step-down toward the centerline (h_outer in the outer ring,
         # h_inner inside it, ..., h_1 in the centermost triangle).
-        # Each stage's base position y_base_k is determined by its residual
-        # thickness h_k:
-        #   h_k ≤ h_plate_lower → y_base_k = y_long (extends to plate edge)
-        #   h_plate_lower < h_k < h_runner → y_base_k inside slope zone where
-        #     the bare runner thickness h(y) equals h_k
-        #   h_k ≥ h_runner → stage skipped (UI clamps this case, but defend
-        #     here too)
-        # The final base is clipped by the user-specified y_base_user (B-case
-        # treats the slider as an upper bound).
         for W_k, h_k in sorted(stages, key=lambda s: -s[0]):
-            if h_k >= h_runner - 1e-9:
-                # would not narrow the channel — skip (UI prevents this)
-                continue
-            if h_k <= h_plate_lower + 1e-9:
-                # legacy behaviour: extend all the way to the plate long edge
-                y_base_auto = y_long
-            else:
-                # slope-zone matching: solve h(y) = h_k for y
-                # h(y) = h_runner + (h_plate_lower - h_runner) * (y - y_flat_top) / D_slope
-                if D_slope > 1e-12:
-                    y_base_auto = (
-                        y_flat_top + (h_k - h_runner) / (h_plate_lower - h_runner) * D_slope
-                    )
-                else:
-                    y_base_auto = y_long
-            y_base_k = min(y_base_auto, y_base_user)
-            if y_base_k <= y_apex + 1e-9:
-                # degenerate (apex above base) — skip
-                continue
-            H_k = y_base_k - y_apex
-            in_band_k = (yy >= y_apex) & (yy <= y_base_k)
-            with np.errstate(invalid="ignore"):
-                t_y_k = np.clip((yy - y_apex) / max(H_k, 1e-12), 0.0, 1.0)
-            half_w_k = 0.5 * W_k * t_y_k
-            in_stage = in_band_k & (np.abs(xx - cx) <= half_w_k) & in_trapezoid
+            half_w_k = 0.5 * W_k * t_y
+            in_stage = in_balancer_y & (np.abs(xx - cx) <= half_w_k) & in_trapezoid
             thk[in_stage] = h_k
 
     # cells masked out by gate-land closure stay thk=0; that's fine because

@@ -26,7 +26,7 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 100 tests
+.venv/bin/pytest tests/                        # 92 tests
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
@@ -144,19 +144,9 @@ LGP（導光板）系の実機技術。バルブゲート1点からの放射状�
 
 `resolved_balancer_stages()` で `[(W_k, h_k), ...]` の正規化リストを返す。タプル形が空ならスカラー形を 1段として包む。
 
-**実装**: 外側→内側の順でセルに `h_k` を上書きしていく。結果として、中央軸（cx）からの距離 `|x - cx|` が `≤ 0.5·W_1·t_y` の領域は `h_1`、`0.5·W_1·t_y < … ≤ 0.5·W_2·t_y` は `h_2`、…、最も外側の輪は `h_N` になる（`t_y_k` は y 方向の補間係数、apex で 0、各段の `y_base_k` で 1）。
+**実装**: 外側→内側の順でセルに `h_k` を上書きしていく。結果として、中央軸（cx）からの距離 `|x - cx|` が `≤ 0.5·W_1·t_y` の領域は `h_1`、`0.5·W_1·t_y < … ≤ 0.5·W_2·t_y` は `h_2`、…、最も外側の輪は `h_N` になる（`t_y` は y 方向の補間係数、apex で 0、base で 1）。`h_k = plate_lower_thk` で揃えるとその段のキャビティ天井が**ゲート側プレートの天面と同じ高さ**になる。
 
-**段ごとの底辺位置（動的決定）**: 各段の底辺位置 `y_base_k` は残り肉厚 `h_k` から自動計算される（apex は全段共通）：
-
-| `h_k` の範囲 | `y_base_k` | 段の挙動 |
-|---|---|---|
-| `h_k ≥ h_runner` | — | スキップ（描画されない、UI 側で `max=h_runner-0.05` に制約） |
-| `h_plate_lower < h_k < h_runner` | `y_flat_top + (h_k - h_runner)/(h_plate_lower - h_runner) × D_slope` | スロープゾーンの途中で停止（凸形状になる） |
-| `h_k ≤ h_plate_lower` | `y_long`（プレート長辺） | プレート手前まで延びる（旧挙動互換） |
-
-ユーザー指定の `balancer_base_distance_from_gate_mm` は**上限**として作用し、自動計算 `y_base_auto` と `min` を取る。多段ネストの場合は段ごとに `y_base_k` が異なるので、結果として「中央段（薄）はプレート長辺まで届き、外側段（厚）は斜辺の途中で止まる」入れ子の逆 V 字構造になる。
-
-**物理**: コンダクタンス `S = h³/(12η)` の `h` を ▽ 内で下げると流路抵抗が `h³` で激増する。中央が最大抵抗、外側に向かって緩やかに減るので、樹脂は中央を避けて長辺の両端側に回り込み、N段ネストにより階段状に流動分配の精密制御が可能。`h_k > h_plate_lower` の段は「もとのランナー肉厚 `h(y)` より細い領域」だけに肉盗みを描画するため、物理的に矛盾しない（流路を狭める方向の効果のみ）。
+**物理**: コンダクタンス `S = h³/(12η)` の `h` を ▽ 内で下げると流路抵抗が `h³` で激増する。中央が最大抵抗、外側に向かって緩やかに減るので、樹脂は中央を避けて長辺の両端側に回り込み、N段ネストにより階段状に流動分配の精密制御が可能。
 
 **設計の勘所**: 段数を増やすほど精密に制御できるが、セルあたりの厚み変化が大きくなり数値条件が悪化する。`h_k` を小さくする・`W_k` を広げる・`H_bal/D` 比を上げると効果が強くなる。`run_demo.py` の `FilmGate_PP_balancer` は 1段（スカラー形）のチューニング起点ケース。
 
@@ -214,11 +204,11 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に6ファイル、合計 **100テスト**：
+`tests/` 配下に6ファイル、合計 **92テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
-- `test_geometry_film_gate.py` — 47件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）/ **バランサー段別動的底辺位置（h_k ≤ h_plate_lower で y_long まで、h_plate_lower < h_k < h_runner でスロープゾーン途中で停止、h_k ≥ h_runner でスキップ、多段ネストで内側ほど長く延びる）**
+- `test_geometry_film_gate.py` — 43件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / **compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）**
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承

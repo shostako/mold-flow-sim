@@ -65,7 +65,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown("### 2. 粘度モデル：Cross-WLF")
     st.markdown(
         "剪断速度依存の擬塑性 + 温度依存（WLF型）を組み合わせた業界標準モデル。"
-        "`data/materials.json` に PP / ABS / PC / PA66 / PMMA の代表値を保持。"
+        "`data/materials.json` に PP / PP_T10 / PP_T20 / PP_T30 / ABS / PC / PA66 / PMMA の代表値を保持。"
     )
     st.latex(
         r"\eta(\dot\gamma, T) = \frac{\eta_0(T)}"
@@ -435,7 +435,7 @@ with st.sidebar:
         threshold = st.slider("二値化しきい値", 16, 240, 128)
 
     st.header("材料")
-    material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP"))
+    material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
     mat = db[material_key]
     st.caption(f"{mat.name}")
     st.caption(

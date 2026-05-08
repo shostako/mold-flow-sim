@@ -1,7 +1,7 @@
 {
   "_meta": {
     "model": "Cross-WLF",
-    "note": "教育・概念検証用の代表値。実機検討にはベンダー実測データを使うこと。",
+    "note": "教育・概念検証用の代表値。実機検討にはベンダー実測データを使うこと。PP_T10 / PP_T20 / PP_T30 はタルク 10/20/30 wt% 配合の PP-T 系ジェネリック値で、PP 純品からの経験則ベース補正（D1 ×1.15/1.40/1.80、α ×1.17/1.44/1.72、融体密度は重量分率調合）。",
     "equation": "eta(gamma_dot, T) = eta0(T) / (1 + (eta0*gamma_dot / tau_star)^(1-n)); eta0(T) = D1 * exp(-A1*(T-T*)/(A2 + (T-T*))); T* = D2 + D3*P",
     "skin_layer": "Skin layer growth approximated by Neumann/Stefan form s(t) = c_skin * sqrt(alpha * t); thermal_diffusivity_m2_s = alpha [m^2/s]. Default c_skin is set in the solver and may be overridden per-material in future revisions.",
     "units": {
@@ -30,6 +30,48 @@
       "T_mold_recommended": [293.15, 333.15],
       "density_melt_kgm3": 738,
       "thermal_diffusivity_m2_s": 9.0e-8
+    },
+    "PP_T10": {
+      "name": "PP + Talc 10wt% (generic)",
+      "n": 0.260,
+      "tau_star": 2.508e4,
+      "D1": 1.62e11,
+      "D2": 263.15,
+      "D3": 0.0,
+      "A1": 27.39,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [453.15, 533.15],
+      "T_mold_recommended": [293.15, 333.15],
+      "density_melt_kgm3": 795,
+      "thermal_diffusivity_m2_s": 1.05e-7
+    },
+    "PP_T20": {
+      "name": "PP + Talc 20wt% (generic)",
+      "n": 0.265,
+      "tau_star": 2.508e4,
+      "D1": 1.97e11,
+      "D2": 263.15,
+      "D3": 0.0,
+      "A1": 27.39,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [453.15, 533.15],
+      "T_mold_recommended": [293.15, 333.15],
+      "density_melt_kgm3": 864,
+      "thermal_diffusivity_m2_s": 1.30e-7
+    },
+    "PP_T30": {
+      "name": "PP + Talc 30wt% (generic)",
+      "n": 0.275,
+      "tau_star": 2.508e4,
+      "D1": 2.54e11,
+      "D2": 263.15,
+      "D3": 0.0,
+      "A1": 27.39,
+      "A2_tilde": 51.6,
+      "T_melt_recommended": [453.15, 533.15],
+      "T_mold_recommended": [293.15, 333.15],
+      "density_melt_kgm3": 943,
+      "thermal_diffusivity_m2_s": 1.55e-7
     },
     "ABS": {
       "name": "ABS (generic)",

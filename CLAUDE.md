@@ -81,7 +81,7 @@ h_core(x,y) = max(h - 2·s, h_min)     ← コア層（流動経路）
 S = h_core³ / (12·η)                  ← Hele-Shaw コンダクタンス
 ```
 
-- `α` (= `material.thermal_diffusivity_m2_s`) は樹脂の熱拡散率。`data/materials.json` に5樹脂分。代表値（PP=9e-8, ABS=1e-7, PC=1.3e-7, PA66=1e-7, PMMA=1.1e-7 m²/s）。
+- `α` (= `material.thermal_diffusivity_m2_s`) は樹脂の熱拡散率。`data/materials.json` に8樹脂分。代表値（PP=9e-8, PP_T10=1.05e-7, PP_T20=1.30e-7, PP_T30=1.55e-7, ABS=1e-7, PC=1.3e-7, PA66=1e-7, PMMA=1.1e-7 m²/s）。タルク強化系は熱伝導率がベース PP より高いので α は単調増加。
 - `c_skin` (= `skin_growth_constant`) は無次元の成長定数。`0.0` で OFF と数値同一、`1.0` 付近が物理的代表値。
 - `s` は τ に依存し、τ は `S(h_core)` に依存するので **fixed-point 反復**で釣り合わせる：1) baseline (`h_core=h`) で τ_baseline を解く → 2) `t_arrival = (τ/τ_max)·T_fill` から `s_new`、`h_core_new` を計算 → 3) 新しい `S` で τ を再解 → 4) `‖Δτ‖` が `skin_convergence_tol` を下回るか `skin_max_iterations` に達するまで反復。
 - **絶対時間スケーリング**: 反復後の `τ_max` が baseline の `τ_max_0` に対して何倍に膨らんだかで `T_fill` を比例倍する（圧力一定近似 = 流量が抵抗増分だけ細る）。
@@ -240,7 +240,7 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 
 ## データ・依存
 
-- `data/materials.json` — Cross-WLF パラメータ5樹脂（PP, ABS, PC, PA66, PMMA）。**generic 値**であり、実プロジェクト用にはベンダー実測データを差し替える前提。
+- `data/materials.json` — Cross-WLF パラメータ8樹脂（PP, PP_T10, PP_T20, PP_T30, ABS, PC, PA66, PMMA）。**generic 値**であり、実プロジェクト用にはベンダー実測データを差し替える前提。PP_T10 / PP_T20 / PP_T30 は PP 純品からの経験則ベース補正（D1 ×1.15/1.40/1.80、α と密度はタルク重量分率の調合計算）。UI の樹脂セレクタの初期選択は PP_T20。
 - `assets/` — 画像入力用の置き場（現状空）。
 - `.codex` — 0バイトの外部ツールマーカー（gitignore 済み）。
 - **依存の二重管理**:

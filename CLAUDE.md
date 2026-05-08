@@ -45,7 +45,7 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 ### `core/` の責務分割
 
-- **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表せん断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
+- **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表剪断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
 - **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート、CLI 専用）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`build_direct_gate_geometry` + `DirectGateConfig`（パラメトリックダイレクトゲート、後述）、`geometry_from_image`（画像閾値処理）。`Geometry.compression_mask` は **圧縮成形時にどのセルが膨らむか**を表す任意の bool 配列（`None` で全セル膨張＝旧挙動、配列指定で True セルだけ膨張）。パラメトリックビルダーは「製品本体だけ True」の compression_mask を埋め込む。
 - **`solver.py`** — `HeleShawSolver` と結果 `FlowResult`。中核アルゴリズムは下記。
 - **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
@@ -66,7 +66,7 @@ S = h³ / (12·η_eff)   ← Hele-Shaw コンダクタンス
 
 - `_build_linear_system` で5点ステンシル CSR を組み、`scipy.sparse.linalg.spsolve` で `τ` を解く。面コンダクタンスは隣接セルの**調和平均**。**注意：行列組立がPython二重ループでN大に弱い**。中規模以上のメッシュでは性能ネックになる（vectorization 候補）。
 - `τ` は擬似到達時間場。絶対時間化は `fill_time = (τ/τ_max) · (V_cavity/Q)`。
-- `η_eff` はバルク温度 `0.7·T_melt + 0.3·T_mold` と代表せん断速度で Cross-WLF を1回評価する**定数値**（局所反復なし）。
+- `η_eff` はバルク温度 `0.7·T_melt + 0.3·T_mold` と代表剪断速度で Cross-WLF を1回評価する**定数値**（局所反復なし）。
 - 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を `compression_factor` 倍に膨らませて、`T_fill` を `compression_fraction/effective_factor + (1-compression_fraction)` で短縮する**等価モデル**。`effective_factor = 1 + (compression_factor - 1) · f_comp` で、`f_comp = Geometry.compression_volume_fraction()` は「圧縮対象セル体積 / 全キャビティ体積」。compression_mask が None なら `f_comp = 1.0` で旧挙動と一致、Film gate / Direct gate のように**プレート本体だけが膨らむ**形状なら `f_comp ≈ 0.9〜0.97` 程度になり、ランナー・スプルーが膨張に寄与しない分、`T_fill` 短縮効果が薄まる（実機の挙動と整合）。
 - ウェルドライン: 8近傍中6個以上が自分より小さい `τ` を持つセル（合流リッジヒューリスティック）。
 - エアトラップ: `τ` の局所最大点（最後に充填されるセル）。
@@ -197,7 +197,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - 真の3D流れ、ジェッティング、コーナー効果
 - 結晶化・収縮反り
 - パッキング段階の保圧
-- 局所せん断速度反復（粘度は単一代表値）
+- 局所剪断速度反復（粘度は単一代表値）
 - 中立面メッシュ・非構造格子・STL/STEP 入力
 
 これらを「solver に足す」のは前提が崩れる。新機能として別解法を立てて並列に置く方向で考えろ。

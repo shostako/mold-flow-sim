@@ -81,16 +81,45 @@ def _uniform_layer_zeta(num_layers: int) -> np.ndarray:
     return np.linspace(0.0, 1.0, num_layers + 1)
 
 
+def _wall_refined_layer_zeta(num_layers: int) -> np.ndarray:
+    """Layer boundaries ζ_k ∈ [0, 1] clustered near the walls.
+
+    Uses Chebyshev-Lobatto points
+
+        ζ_k = 0.5 · (1 − cos(π k / N))   for k = 0..N
+
+    These are symmetric about ``ζ = 0.5`` (mirror invariance) and put
+    extra resolution near the walls — exactly where the Neumann
+    temperature gradient is steepest. For ``N = 6`` the boundaries are
+    ``[0, 0.067, 0.25, 0.5, 0.75, 0.933, 1]``.
+
+    Notes
+    -----
+    Requires ``num_layers >= 2`` because Chebyshev-Lobatto with a single
+    interval collapses to the endpoints (no refinement effect, and
+    moments would equal the uniform case). For ``num_layers == 1`` we
+    fall back to ``_uniform_layer_zeta`` so the N=1 ↔ classical
+    Hele-Shaw identity is preserved.
+    """
+    if num_layers < 1:
+        raise ValueError(f"num_layers must be >= 1 (got {num_layers})")
+    if num_layers == 1:
+        return _uniform_layer_zeta(1)
+    k = np.arange(num_layers + 1, dtype=float)
+    return 0.5 * (1.0 - np.cos(np.pi * k / num_layers))
+
+
 def _layer_zeta(num_layers: int, distribution: str) -> np.ndarray:
     """Dispatch to the layer-distribution generator.
 
-    PR-A supports only ``"uniform"``. ``"wall_refined"`` is reserved for
-    PR-C.
+    Supported values: ``"uniform"``, ``"wall_refined"``.
     """
     if distribution == "uniform":
         return _uniform_layer_zeta(num_layers)
+    if distribution == "wall_refined":
+        return _wall_refined_layer_zeta(num_layers)
     raise ValueError(
-        f"layer_distribution={distribution!r} not supported yet (PR-A: only 'uniform')"
+        f"layer_distribution={distribution!r} not supported (expected 'uniform' or 'wall_refined')"
     )
 
 
@@ -211,6 +240,19 @@ class MultilayerHeleShawSolver:
     convergence_tol: float = 1e-3
     shear_rate_floor_factor: float = 0.01
 
+    # ----- PR-C: adaptive damping + short-shot detection -----
+    # When the relative L² change in τ grows between two iterations the
+    # update is relaxed with ω = ``damping_factor``: τ ← (1-ω)·τ_old + ω·τ_new.
+    # The default keeps the loop fully aggressive (ω=1) on the first
+    # well-behaved pass and only kicks in on divergence.
+    damping_factor: float = 0.7
+    # Short-shot is flagged when the centre layer's temperature falls
+    # below ``T_mold + solidification_temperature_fraction · (T_melt − T_mold)``.
+    # 0.3 is a coarse PP-friendly default (Tg-adjacent for amorphous,
+    # safely above no-flow for semi-crystalline). Material-specific values
+    # are out of scope until ``data/materials.json`` grows a solidus field.
+    solidification_temperature_fraction: float = 0.3
+
     # Internal helper, populated in __post_init__.
     _base: HeleShawSolver = field(init=False, repr=False)
 
@@ -326,14 +368,22 @@ class MultilayerHeleShawSolver:
         layer_T_K: np.ndarray | None = None
         layer_eta_Pa_s: np.ndarray | None = None
         layer_gamma_dot: np.ndarray | None = None
+        short_shot_mask: np.ndarray | None = None
         iters_done = 0
         converged = False
+        damping_events = 0
         T_fill_inflation = 1.0
+        T_solid_K = self.mold_temperature_K + float(self.solidification_temperature_fraction) * (
+            self.melt_temperature_K - self.mold_temperature_K
+        )
 
         if self.thermal_coupling:
             alpha = max(float(self.material.thermal_diffusivity_m2_s), 0.0)
             tol = max(float(self.convergence_tol), 1e-12)
             max_iters = max(int(self.max_iterations), 1)
+            omega = float(self.damping_factor)
+            if not 0.0 < omega <= 1.0:
+                raise ValueError(f"damping_factor must be in (0, 1] (got {self.damping_factor})")
 
             # Pre-compute the layer-resolved shear-rate field — independent
             # of the iteration since V and h_open are fixed.
@@ -349,6 +399,7 @@ class MultilayerHeleShawSolver:
             # (their conductance is forced to zero anyway).
             T_bulk = 0.7 * self.melt_temperature_K + 0.3 * self.mold_temperature_K
 
+            prev_rel: float | None = None
             for it in range(1, max_iters + 1):
                 msk = ~np.isnan(tau)
                 t_arr = np.zeros_like(tau)
@@ -380,25 +431,54 @@ class MultilayerHeleShawSolver:
                     moments=moments,
                     cavity_mask=cavity_mask,
                 )
-                tau_new, tau_max_new = base._solve_tau_field(S_new, dirichlet)
+                tau_solved, tau_max_solved = base._solve_tau_field(S_new, dirichlet)
+
+                msk_tau = ~np.isnan(tau)
+                num = float(np.linalg.norm(tau_solved[msk_tau] - tau[msk_tau]))
+                den = float(np.linalg.norm(tau[msk_tau])) + 1e-12
+                rel = num / den
+
+                # Adaptive damping: if the residual grew vs the previous
+                # iteration, blend the new field with the old one. This
+                # preserves the linear-solve τ_max (the damped τ is a
+                # convex combination, so its maximum stays bounded by the
+                # two endpoints; we recompute the working τ_max from the
+                # damped field).
+                if prev_rel is not None and rel > prev_rel:
+                    tau_damped = np.where(
+                        msk_tau, (1.0 - omega) * tau + omega * tau_solved, tau_solved
+                    )
+                    tau_new = tau_damped
+                    tau_max_new = float(np.nanmax(tau_new)) if msk_tau.any() else tau_max_solved
+                    if tau_max_new <= 0:
+                        tau_max_new = tau_max_solved
+                    damping_events += 1
+                else:
+                    tau_new = tau_solved
+                    tau_max_new = tau_max_solved
 
                 # Constant-pressure proxy: T_fill scales with τ_max growth.
                 T_fill_new = T_fill_baseline * (tau_max_new / max(tau_max_baseline, 1e-12))
-
-                msk_tau = ~np.isnan(tau)
-                num = float(np.linalg.norm(tau_new[msk_tau] - tau[msk_tau]))
-                den = float(np.linalg.norm(tau[msk_tau])) + 1e-12
-                rel = num / den
 
                 tau = tau_new
                 tau_max = tau_max_new
                 T_fill = T_fill_new
                 iters_done = it
+                prev_rel = rel
                 if rel < tol:
                     converged = True
                     break
 
             T_fill_inflation = T_fill / T_fill_baseline if T_fill_baseline > 0 else 1.0
+
+            # Short-shot detection: centre-layer temperature has dropped
+            # below the solidification threshold. Uses the *final* layer
+            # temperature snapshot (post-fixed-point), since that reflects
+            # the converged T_fill scaling.
+            if layer_T_K is not None and self.num_layers >= 1:
+                k_mid = self.num_layers // 2
+                T_mid = layer_T_K[k_mid]
+                short_shot_mask = cavity_mask & (T_mid <= T_solid_K)
 
         # Standard post-processing (mirrors HeleShawSolver.solve).
         msk = ~np.isnan(tau)
@@ -439,7 +519,27 @@ class MultilayerHeleShawSolver:
             "multilayer_convergence_tol": float(self.convergence_tol),
             "T_fill_baseline_s": T_fill_baseline,
             "T_fill_inflation": T_fill_inflation,
+            "damping_factor": float(self.damping_factor),
+            "damping_events": int(damping_events),
+            "T_solid_K": float(T_solid_K),
+            "solidification_temperature_fraction": float(self.solidification_temperature_fraction),
         }
+        if short_shot_mask is not None:
+            cells_total = max(int(cavity_mask.sum()), 1)
+            short_count = int(short_shot_mask.sum())
+            metadata.update(
+                {
+                    "short_shot_cells": short_count,
+                    "short_shot_fraction": short_count / cells_total,
+                }
+            )
+        else:
+            metadata.update(
+                {
+                    "short_shot_cells": 0,
+                    "short_shot_fraction": 0.0,
+                }
+            )
 
         return MultilayerFlowResult(
             tau=tau,
@@ -451,6 +551,7 @@ class MultilayerHeleShawSolver:
             viscosity_Pa_s=eta_baseline,
             geometry=self.geometry,
             metadata=metadata,
+            short_shot_mask=short_shot_mask,
             layer_thickness_mm=h_layers,
             layer_temperature_K=layer_T_K,
             layer_viscosity_Pa_s_field=layer_eta_Pa_s,

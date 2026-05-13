@@ -26,6 +26,7 @@ from core import (
     Geometry,
     HeleShawSolver,
     MaterialDB,
+    MultilayerHeleShawSolver,
     build_demo_geometry,
     build_direct_gate_geometry,
     build_film_gate_geometry,
@@ -36,6 +37,7 @@ from core import (
     render_skin_layer_map,
     render_weldlines,
 )
+from core.visualizer import render_layer_grid, render_short_shot_map
 
 
 def _solve_and_export(
@@ -56,25 +58,55 @@ def _solve_and_export(
     skin_growth_constant: float = 0.5,
     skin_max_iterations: int = 5,
     skin_convergence_tol: float = 1e-3,
+    multilayer: bool = False,
+    num_layers: int = 5,
+    layer_distribution: str = "wall_refined",
+    multilayer_max_iterations: int = 8,
+    multilayer_convergence_tol: float = 1e-3,
+    solidification_temperature_fraction: float = 0.3,
     num_frames: int = 30,
 ) -> None:
+    if skin_layer and multilayer:
+        raise ValueError(
+            "skin_layer and multilayer are mutually exclusive — choose one wall-cooling model"
+        )
     db = MaterialDB()
-    solver = HeleShawSolver(
-        geometry=geom,
-        material=db[material_key],
-        melt_temperature_K=melt_K,
-        mold_temperature_K=mold_K,
-        injection_velocity_mms=inj_velocity_mms,
-        injection_volume_flow_cm3s=inj_Q_cm3s,
-        compression_molding=compression,
-        compression_factor=compression_factor,
-        compression_stroke_mm=compression_stroke_mm,
-        compression_fraction=compression_fraction,
-        skin_layer_enabled=skin_layer,
-        skin_growth_constant=skin_growth_constant,
-        skin_max_iterations=skin_max_iterations,
-        skin_convergence_tol=skin_convergence_tol,
-    )
+    if multilayer:
+        solver = MultilayerHeleShawSolver(
+            geometry=geom,
+            material=db[material_key],
+            melt_temperature_K=melt_K,
+            mold_temperature_K=mold_K,
+            injection_velocity_mms=inj_velocity_mms,
+            injection_volume_flow_cm3s=inj_Q_cm3s,
+            compression_molding=compression,
+            compression_factor=compression_factor,
+            compression_stroke_mm=compression_stroke_mm,
+            compression_fraction=compression_fraction,
+            num_layers=num_layers,
+            layer_distribution=layer_distribution,
+            thermal_coupling=True,
+            max_iterations=multilayer_max_iterations,
+            convergence_tol=multilayer_convergence_tol,
+            solidification_temperature_fraction=solidification_temperature_fraction,
+        )
+    else:
+        solver = HeleShawSolver(
+            geometry=geom,
+            material=db[material_key],
+            melt_temperature_K=melt_K,
+            mold_temperature_K=mold_K,
+            injection_velocity_mms=inj_velocity_mms,
+            injection_volume_flow_cm3s=inj_Q_cm3s,
+            compression_molding=compression,
+            compression_factor=compression_factor,
+            compression_stroke_mm=compression_stroke_mm,
+            compression_fraction=compression_fraction,
+            skin_layer_enabled=skin_layer,
+            skin_growth_constant=skin_growth_constant,
+            skin_max_iterations=skin_max_iterations,
+            skin_convergence_tol=skin_convergence_tol,
+        )
     print(f"[{label}] solving... cells={int(geom.mask.sum())} V={geom.volume_cm3():.2f} cm^3")
     result = solver.solve(num_frames=num_frames)
     extra = ""
@@ -82,6 +114,16 @@ def _solve_and_export(
         short = int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
         inflation = result.metadata.get("T_fill_inflation", 1.0)
         extra = f"  skin: x{inflation:.2f} T_fill, short_shot {short}/{int(geom.mask.sum())}"
+    elif multilayer:
+        short_frac = result.metadata.get("short_shot_fraction", 0.0)
+        iters = result.metadata.get("multilayer_iterations", 0)
+        conv = result.metadata.get("multilayer_converged", False)
+        inflation = result.metadata.get("T_fill_inflation", 1.0)
+        extra = (
+            f"  multilayer N={num_layers}/{layer_distribution}: "
+            f"iters={iters} conv={conv} x{inflation:.2f} T_fill, "
+            f"short_shot {short_frac * 100:.1f}%"
+        )
     print(
         f"[{label}] T_fill={result.total_fill_time_s:.3f} s  "
         f"eta_eff={result.viscosity_Pa_s:.1f} Pa.s{extra}"
@@ -96,6 +138,10 @@ def _solve_and_export(
     if skin_layer and result.skin_thickness_mm is not None:
         render_skin_layer_map(result, out_dir / "skin.png")
         render_core_layer_map(result, out_dir / "core.png")
+    if multilayer and getattr(result, "layer_temperature_K", None) is not None:
+        render_layer_grid(result, out_dir / "layer_temperature_grid.png", field="temperature")
+        render_layer_grid(result, out_dir / "layer_viscosity_grid.png", field="viscosity")
+        render_short_shot_map(result, out_dir / "multilayer_short_shot.png")
     export_frames(result, out_dir / "frames", num_frames=8)
 
 
@@ -397,6 +443,30 @@ FILM_GATE_CASES: dict[str, dict] = {
         compression=True,
         compression_stroke_mm=0.70,
         compression_fraction=0.95,
+    ),
+    # Same stepped-plate baseline as above, but driven by the multilayer
+    # solver with N=5 wall-refined layers. Per-layer Neumann temperature
+    # + Cross-WLF viscosity coupling exposes wall freezing and centre-
+    # core temperature drop, and the short-shot mask is populated when
+    # the centre layer cools past T_solid. Use this case to compare the
+    # baseline single-layer τ-only run against the layered prediction
+    # for the gokuusu STEP4 design conversations.
+    "FilmGate_PP_multilayer_5L": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+        compression=True,
+        compression_stroke_mm=0.70,
+        compression_fraction=0.95,
+        multilayer=True,
+        num_layers=5,
+        layer_distribution="wall_refined",
+        multilayer_max_iterations=8,
+        multilayer_convergence_tol=1e-3,
+        solidification_temperature_fraction=0.3,
     ),
 }
 

@@ -36,6 +36,37 @@ so the wall shear rate is ``γ̇(ζ) = 6 V_avg / h · |2ζ - 1|`` (zero at the
 centre, ``6V/h`` at each wall). Cross-WLF asks for a *finite* γ̇ even at
 the centre — a centreline floor prevents the zero-shear viscosity ``D1``
 from dominating the layer-integrated conductance.
+
+Shear-heating temperature rise (stage 1)
+----------------------------------------
+
+Viscous dissipation pumps mechanical work into thermal energy at a
+volumetric rate ``q̇ = η · γ̇²`` [W/m³]. In an isolated parcel that would
+raise the temperature at the rate
+
+    dT/dt = η · γ̇² / (ρ · cp)
+
+Heat conduction simultaneously drains energy to the walls with a
+characteristic thickness-direction time constant
+
+    τ_thermal = h² / (π² · α)        (1D slab, lowest eigenmode)
+
+For "stage 1" — a post-Neumann correction that costs nothing in the
+fixed-point loop — we cap the integration time at ``τ_thermal``:
+
+    ΔT_shear,k(x,y) = (η_k · γ̇_k²) / (ρ · cp) · min(t_arr, τ_thermal)
+
+This is an upper bound on the steady-state temperature rise from a
+constant heat source against linear conduction. It can over-estimate
+the rise when ``Br ≫ 1`` (the dissipation outruns conduction), but
+gives the correct order of magnitude for the Brinkman regime and
+preserves the Neumann baseline at low γ̇.
+
+The Brinkman number ``Br = η·γ̇²·h² / (k·ΔT)`` quantifies the regime:
+``Br < 1`` → conduction dominates (rise can be neglected),
+``Br ≈ 1`` → balance, ``Br > 1`` → dissipation dominates. Stage 2 will
+replace this closed-form with a 1D FDM that resolves the time history
+self-consistently.
 """
 
 from __future__ import annotations
@@ -135,3 +166,128 @@ def poiseuille_shear_rates(
     raw = profile[:, None, None] * wall_rate[None, :, :]
     floor = floor_factor * wall_rate[None, :, :]
     return np.maximum(raw, floor)
+
+
+# ---------------------------------------------------------------------------
+# Shear heating (viscous dissipation) — stage 1 closed-form correction
+# ---------------------------------------------------------------------------
+
+
+# Minimum thickness used to bound τ_thermal away from zero. 1 µm — well
+# below any physically meaningful injection-moulding cavity.
+_H_FLOOR_MM = 1e-3
+
+
+def shear_heating_temperature_rise(
+    eta_per_layer_Pa_s: np.ndarray,
+    gamma_dot_per_layer_s_inv: np.ndarray,
+    t_arr_s: np.ndarray,
+    h_total_mm: np.ndarray,
+    density_kg_m3: float,
+    specific_heat_J_kgK: float,
+    alpha_m2_s: float,
+) -> np.ndarray:
+    """Per-layer temperature rise from viscous dissipation (stage 1).
+
+    Implements the simple bounded form
+
+    ``ΔT_k(x,y) = (η_k · γ̇_k²) / (ρ · cp) · min(t_arr, τ_thermal)``
+
+    where ``τ_thermal = h² / (π² · α)`` is the lowest-mode thermal
+    relaxation time of a 1D slab. Capping the integration time at
+    ``τ_thermal`` approximates the steady-state balance between the
+    constant heat source and 1D wall conduction without solving a PDE.
+
+    Parameters
+    ----------
+    eta_per_layer_Pa_s
+        ``(N, ny, nx)`` array of per-layer viscosity in Pa·s.
+    gamma_dot_per_layer_s_inv
+        ``(N, ny, nx)`` array of per-layer shear rate in s⁻¹.
+    t_arr_s
+        ``(ny, nx)`` array of local arrival times in seconds.
+    h_total_mm
+        ``(ny, nx)`` array of local cavity thickness in mm.
+    density_kg_m3, specific_heat_J_kgK
+        Volumetric heat capacity factors. Density at the melt state and
+        constant-pressure specific heat.
+    alpha_m2_s
+        Thermal diffusivity in m²/s. Used only to compute τ_thermal.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N, ny, nx)`` array of temperature rises in K. Non-negative
+        and bounded above by the per-cell steady-state estimate
+        ``η·γ̇²·τ_thermal / (ρ·cp)``.
+    """
+    rho_cp = max(float(density_kg_m3) * float(specific_heat_J_kgK), 1e-6)
+    alpha = max(float(alpha_m2_s), 1e-15)
+
+    h_m = np.maximum(h_total_mm * 1e-3, _H_FLOOR_MM * 1e-3)  # (ny, nx)
+    tau_thermal = (h_m**2) / (np.pi**2 * alpha)  # (ny, nx)
+
+    eta = np.asarray(eta_per_layer_Pa_s, dtype=float)
+    gamma = np.asarray(gamma_dot_per_layer_s_inv, dtype=float)
+    if eta.shape != gamma.shape:
+        raise ValueError(f"eta and gamma shapes mismatch: {eta.shape} vs {gamma.shape}")
+
+    # Volumetric heat source [W/m³]
+    q_dot = eta * (gamma**2)
+    # Cap the effective dwell time at τ_thermal so the rise can't grow
+    # without bound for long t_arr.
+    t_eff = np.minimum(t_arr_s[None, :, :], tau_thermal[None, :, :])
+    t_eff = np.maximum(t_eff, 0.0)
+    return q_dot * t_eff / rho_cp
+
+
+def brinkman_number(
+    eta_per_layer_Pa_s: np.ndarray,
+    gamma_dot_per_layer_s_inv: np.ndarray,
+    h_total_mm: np.ndarray,
+    thermal_conductivity_W_mK: float,
+    delta_T_K: float,
+) -> np.ndarray:
+    """Brinkman number ``Br = η·γ̇²·h² / (k·ΔT)``.
+
+    Classical diagnostic for the importance of viscous dissipation
+    relative to wall conduction.
+
+    * ``Br < 1`` — conduction dominates, shear heating can be neglected.
+    * ``Br ≈ 1`` — both effects are comparable.
+    * ``Br > 1`` — shear heating dominates; the stage-1 correction may
+      under- or over-estimate the temperature rise and a full 1D FDM
+      (stage 2) is needed for accurate predictions.
+
+    Parameters
+    ----------
+    eta_per_layer_Pa_s, gamma_dot_per_layer_s_inv
+        ``(N, ny, nx)`` arrays in Pa·s and s⁻¹.
+    h_total_mm
+        ``(ny, nx)`` array of local thickness in mm.
+    thermal_conductivity_W_mK
+        Material thermal conductivity ``k`` in W/(m·K). Derived from
+        ``α · ρ · cp`` when not measured separately.
+    delta_T_K
+        Reference temperature gap used as denominator (typically
+        ``T_melt − T_mold``) in K. Must be positive.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N, ny, nx)`` array of dimensionless Brinkman numbers.
+    """
+    k = float(thermal_conductivity_W_mK)
+    dT = float(delta_T_K)
+    if k <= 0:
+        raise ValueError(f"thermal_conductivity_W_mK must be > 0, got {k}")
+    if dT <= 0:
+        raise ValueError(f"delta_T_K must be > 0, got {dT}")
+
+    eta = np.asarray(eta_per_layer_Pa_s, dtype=float)
+    gamma = np.asarray(gamma_dot_per_layer_s_inv, dtype=float)
+    if eta.shape != gamma.shape:
+        raise ValueError(f"eta and gamma shapes mismatch: {eta.shape} vs {gamma.shape}")
+
+    h_m = np.maximum(h_total_mm * 1e-3, _H_FLOOR_MM * 1e-3)  # (ny, nx)
+    return eta * (gamma**2) * (h_m[None, :, :] ** 2) / (k * dT)

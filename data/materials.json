@@ -4,6 +4,7 @@
     "note": "教育・概念検証用の代表値。実機検討にはベンダー実測データを使うこと。PP_T10 / PP_T20 / PP_T30 はタルク 10/20/30 wt% 配合の PP-T 系ジェネリック値で、PP 純品からの経験則ベース補正（D1 ×1.15/1.40/1.80、α ×1.17/1.44/1.72、融体密度は重量分率調合）。",
     "equation": "eta(gamma_dot, T) = eta0(T) / (1 + (eta0*gamma_dot / tau_star)^(1-n)); eta0(T) = D1 * exp(-A1*(T-T*)/(A2 + (T-T*))); T* = D2 + D3*P",
     "skin_layer": "Skin layer growth approximated by Neumann/Stefan form s(t) = c_skin * sqrt(alpha * t); thermal_diffusivity_m2_s = alpha [m^2/s]. Default c_skin is set in the solver and may be overridden per-material in future revisions.",
+    "shear_heating": "Viscous dissipation (剪断発熱) uses specific_heat_J_kgK and density_melt_kgm3 to convert volumetric power η·γ̇² [W/m³] into a temperature rise rate. Thermal conductivity is derived as k = α·ρ·cp [W/(m·K)] for the Brinkman number.",
     "units": {
       "T": "K",
       "P": "Pa",
@@ -13,7 +14,8 @@
       "A2": "K",
       "D2": "K",
       "D3": "K/Pa",
-      "thermal_diffusivity_m2_s": "m^2/s"
+      "thermal_diffusivity_m2_s": "m^2/s",
+      "specific_heat_J_kgK": "J/(kg.K)"
     }
   },
   "materials": {
@@ -29,7 +31,8 @@
       "T_melt_recommended": [453.15, 533.15],
       "T_mold_recommended": [293.15, 333.15],
       "density_melt_kgm3": 738,
-      "thermal_diffusivity_m2_s": 9.0e-8
+      "thermal_diffusivity_m2_s": 9.0e-8,
+      "specific_heat_J_kgK": 2400
     },
     "PP_T10": {
       "name": "PP + Talc 10wt% (generic)",
@@ -43,7 +46,8 @@
       "T_melt_recommended": [453.15, 533.15],
       "T_mold_recommended": [293.15, 333.15],
       "density_melt_kgm3": 795,
-      "thermal_diffusivity_m2_s": 1.05e-7
+      "thermal_diffusivity_m2_s": 1.05e-7,
+      "specific_heat_J_kgK": 2200
     },
     "PP_T20": {
       "name": "PP + Talc 20wt% (generic)",
@@ -57,7 +61,8 @@
       "T_melt_recommended": [453.15, 533.15],
       "T_mold_recommended": [293.15, 333.15],
       "density_melt_kgm3": 864,
-      "thermal_diffusivity_m2_s": 1.30e-7
+      "thermal_diffusivity_m2_s": 1.30e-7,
+      "specific_heat_J_kgK": 2050
     },
     "PP_T30": {
       "name": "PP + Talc 30wt% (generic)",
@@ -71,7 +76,8 @@
       "T_melt_recommended": [453.15, 533.15],
       "T_mold_recommended": [293.15, 333.15],
       "density_melt_kgm3": 943,
-      "thermal_diffusivity_m2_s": 1.55e-7
+      "thermal_diffusivity_m2_s": 1.55e-7,
+      "specific_heat_J_kgK": 1900
     },
     "ABS": {
       "name": "ABS (generic)",
@@ -85,7 +91,8 @@
       "T_melt_recommended": [493.15, 543.15],
       "T_mold_recommended": [313.15, 353.15],
       "density_melt_kgm3": 938,
-      "thermal_diffusivity_m2_s": 1.0e-7
+      "thermal_diffusivity_m2_s": 1.0e-7,
+      "specific_heat_J_kgK": 2000
     },
     "PC": {
       "name": "Polycarbonate (generic)",
@@ -99,7 +106,8 @@
       "T_melt_recommended": [553.15, 603.15],
       "T_mold_recommended": [353.15, 393.15],
       "density_melt_kgm3": 1085,
-      "thermal_diffusivity_m2_s": 1.3e-7
+      "thermal_diffusivity_m2_s": 1.3e-7,
+      "specific_heat_J_kgK": 1900
     },
     "PA66": {
       "name": "Polyamide 66 (generic)",
@@ -113,7 +121,8 @@
       "T_melt_recommended": [543.15, 583.15],
       "T_mold_recommended": [333.15, 363.15],
       "density_melt_kgm3": 980,
-      "thermal_diffusivity_m2_s": 1.0e-7
+      "thermal_diffusivity_m2_s": 1.0e-7,
+      "specific_heat_J_kgK": 2700
     },
     "PMMA": {
       "name": "Polymethyl methacrylate (generic)",
@@ -127,7 +136,8 @@
       "T_melt_recommended": [503.15, 553.15],
       "T_mold_recommended": [333.15, 363.15],
       "density_melt_kgm3": 1080,
-      "thermal_diffusivity_m2_s": 1.1e-7
+      "thermal_diffusivity_m2_s": 1.1e-7,
+      "specific_heat_J_kgK": 2100
     }
   }
 }

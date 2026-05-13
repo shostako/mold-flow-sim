@@ -64,6 +64,7 @@ def _solve_and_export(
     multilayer_max_iterations: int = 8,
     multilayer_convergence_tol: float = 1e-3,
     solidification_temperature_fraction: float = 0.3,
+    shear_heating_enabled: bool = False,
     num_frames: int = 30,
 ) -> None:
     if skin_layer and multilayer:
@@ -89,6 +90,7 @@ def _solve_and_export(
             max_iterations=multilayer_max_iterations,
             convergence_tol=multilayer_convergence_tol,
             solidification_temperature_fraction=solidification_temperature_fraction,
+            shear_heating_enabled=shear_heating_enabled,
         )
     else:
         solver = HeleShawSolver(
@@ -467,6 +469,32 @@ FILM_GATE_CASES: dict[str, dict] = {
         multilayer_max_iterations=8,
         multilayer_convergence_tol=1e-3,
         solidification_temperature_fraction=0.3,
+    ),
+    # ---- Stage-1 shear-heating reference case ----
+    # Same stepped-plate geometry as FilmGate_PP_multilayer_5L but with the
+    # viscous-dissipation correction enabled. Comparing the metadata
+    # (brinkman_number_max / shear_heating_max_K / tau_max) between the
+    # two cases shows what fraction of the temperature rise comes from
+    # shear heating, and how much the local viscosity drop accelerates
+    # the τ field. Targets gokuusu STEP4 ultra-thin (t < 0.5 mm) regime
+    # where Br ≫ 1 is the norm.
+    "FilmGate_PP_multilayer_5L_shear": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=300.0,  # high V → γ̇ large
+        inj_Q_cm3s=60.0,
+        compression=True,
+        compression_stroke_mm=0.70,
+        compression_fraction=0.60,
+        multilayer=True,
+        num_layers=7,
+        layer_distribution="wall_refined",
+        multilayer_max_iterations=12,
+        multilayer_convergence_tol=1e-3,
+        solidification_temperature_fraction=0.3,
+        shear_heating_enabled=True,
     ),
 }
 

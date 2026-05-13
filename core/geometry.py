@@ -76,6 +76,19 @@ class Geometry:
             return 0.0
         return float(np.sum(self.thickness_mm[self.mask & cm]) / denom)
 
+    def compression_area_mm2(self) -> float:
+        """Planar area of the compression target zone in mm^2.
+
+        Returns the cavity area when ``compression_mask`` is ``None``
+        (legacy whole-cavity inflation). Otherwise returns the area of the
+        ``compression_mask & mask`` cells. Used by the stroke-mode
+        compression model where ``ΔV = stroke * A`` independent of the
+        local thickness.
+        """
+        cm = self.compression_mask
+        target = self.mask if cm is None else (self.mask & cm)
+        return float(np.sum(target) * self.cell_size_mm**2)
+
     def add_gate(self, iy: int, ix: int) -> None:
         if not self.mask[iy, ix]:
             raise ValueError(f"gate ({iy},{ix}) is outside the cavity mask")

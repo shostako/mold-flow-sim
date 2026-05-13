@@ -67,7 +67,10 @@ S = h³ / (12·η_eff)   ← Hele-Shaw コンダクタンス
 - `_build_linear_system` で5点ステンシル CSR を組み、`scipy.sparse.linalg.spsolve` で `τ` を解く。面コンダクタンスは隣接セルの**調和平均**。**注意：行列組立がPython二重ループでN大に弱い**。中規模以上のメッシュでは性能ネックになる（vectorization 候補）。
 - `τ` は擬似到達時間場。絶対時間化は `fill_time = (τ/τ_max) · (V_cavity/Q)`。
 - `η_eff` はバルク温度 `0.7·T_melt + 0.3·T_mold` と代表剪断速度で Cross-WLF を1回評価する**定数値**（局所反復なし）。
-- 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を `compression_factor` 倍に膨らませて、`T_fill` を `compression_fraction/effective_factor + (1-compression_fraction)` で短縮する**等価モデル**。`effective_factor = 1 + (compression_factor - 1) · f_comp` で、`f_comp = Geometry.compression_volume_fraction()` は「圧縮対象セル体積 / 全キャビティ体積」。compression_mask が None なら `f_comp = 1.0` で旧挙動と一致、Film gate / Direct gate のように**プレート本体だけが膨らむ**形状なら `f_comp ≈ 0.9〜0.97` 程度になり、ランナー・スプルーが膨張に寄与しない分、`T_fill` 短縮効果が薄まる（実機の挙動と整合）。
+- 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を膨らませて `T_fill` を `compression_fraction/effective_factor + (1-compression_fraction)` で短縮する**等価モデル**。膨張対象は `compression_mask & mask` のセル（None なら全 cavity）。**2 モード対応**：
+  - **factor モード**（デフォルト、後方互換）: `h_eff = h * compression_factor`。`effective_factor = 1 + (compression_factor − 1) · f_comp`、`f_comp = Geometry.compression_volume_fraction()`（圧縮対象セル**体積** / 全 cavity 体積）。同じ倍率を全 target セルに掛けるので**薄肉ほど絶対膨張量が大きい**。圧縮比（型開き量比）が設計指標のときに使う。
+  - **stroke モード**（`compression_stroke_mm` が None 以外）: `h_eff = h + stroke`。全 target セルに同じ絶対量を加算するので**段差プレートの段差（例: t0.50 − t0.35 = 0.15 mm）が圧縮位相中も保存される**。金型シム量（絶対距離）が設計指標のときに使う。`effective_factor = 1 + stroke · A_cm / V_total`、`A_cm = Geometry.compression_area_mm2()`（圧縮対象セルの**面積** mm²）、`V_total = volume_cm3 × 1000` mm³。
+  - どちらのモードでも Film gate / Direct gate のように**プレート本体だけが膨らむ**形状ではランナー・スプルーが膨張に寄与しない分 `effective_factor` が薄まる（実機の挙動と整合）。uniform プレートで `factor = (h + stroke)/h` に揃えると両モードは厳密に等価（`tests/test_compression_stroke.py::test_uniform_plate_stroke_factor_equivalence_for_T_fill` で担保）。
 - ウェルドライン: 8近傍中6個以上が自分より小さい `τ` を持つセル（合流リッジヒューリスティック）。
 - エアトラップ: `τ` の局所最大点（最後に充填されるセル）。
 
@@ -204,12 +207,13 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に6ファイル、合計 **92テスト**：
+`tests/` 配下に7ファイル、合計 **105テスト**：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
 - `test_geometry_film_gate.py` — 43件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / **compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）**
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
+- `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
 
@@ -264,3 +268,4 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - **射出条件の単位系**: `injection_velocity_mms` / `injection_volume_flow_cm3s` の既定値は **実機ユニット域**（`eae5394` で再スケール済）。新ケースを足すときも実機相当の値を入れる前提で考える。CLI 既定値（`run_demo.py`）と UI 既定値（`app.py`）はこの方針で揃えてある。
 - **Direct gate**: UI では「製品幅 / 製品高 / 段差位置 / ゲート側肉厚 / 反ゲート側肉厚 / ゲート径 / ゲート位置」のスライダー群で `DirectGateConfig` を組み立てる。プレート分割の挙動は Film gate と同じ（段差位置 0 で uniform、`> 0` で 2 層化、cfg には `plate_lower_thk_mm` / `plate_upper_thk_mm` を渡す）。デフォルト値は Film gate と揃えてある（Wp=300 / Hp=50 / 段差=20 / lower=0.35 / upper=0.50 / Φ=3 / g_off=20）。ゲート位置スライダーの上下限はゲート径とプレート高さに連動して動的に計算（突き抜けバリデーションを UI 側でも防御）。CLI でも `DirectGateConfig` の引数に同じ制約がある。
 - **圧縮成形のスコープ**: 圧縮で膨らむのは `Geometry.compression_mask` が True のセルだけ。Film gate のビルダーは「プレート本体だけ True」（ランナー・スプルー・ゲートは膨張しない）、Direct gate のビルダーは「プレート全体 True」（cavity = プレート単体なので全部膨張）。`build_demo_geometry` と `geometry_from_image` は `compression_mask=None`（旧挙動＝全セル膨張）。新しい形状ビルダーを足すときは「製品本体だけ True」の compression_mask をセットすること。
+- **圧縮量の指定方式**: UI は ICM ON 時にラジオで `factor` / `stroke` を選ぶ。factor 選択時は「初期隙間倍率 h_init/h_final」スライダー（`compression_stroke_mm=None` で solver に渡る）、stroke 選択時は「圧縮ストローク [mm]」スライダー（`compression_factor=1.0` ＋ `compression_stroke_mm=<値>` で渡る）。CLI 側は両方を `make_solver()` の kwargs に直接渡し、ケース定義で片方だけ指定する（factor モードならデフォルト、stroke モードなら `compression_stroke_mm=0.70` 等を明示）。段差プレート（plate_lower_thk ≠ plate_upper_thk）の圧縮シミュレーションでは **stroke モード一択**（factor モードだと段差が崩れる）。`FilmGate_PP_stepped_stroke` がこの想定の CLI 参照ケース。

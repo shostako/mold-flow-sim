@@ -86,6 +86,14 @@ class HeleShawSolver:
 
     compression_molding: bool = False
     compression_factor: float = 1.5  # h_effective / h_actual during compression phase
+    # Absolute compression stroke [mm] added to each cell in the compression
+    # mask (h_effective = h_actual + stroke). When ``None`` the legacy
+    # multiplicative ``compression_factor`` model is used. The stroke model is
+    # physically faithful for stepped plates where the mold shim is a fixed
+    # absolute distance — both thin and thick zones grow by the same stroke,
+    # so the step (e.g. 0.50 - 0.35 = 0.15 mm) is preserved across the
+    # compression phase.
+    compression_stroke_mm: float | None = None
     compression_fraction: float = 0.6  # fraction of fill time under compression-open state
 
     pressure_iters: int = 1  # placeholder for future iteration on viscosity
@@ -110,21 +118,32 @@ class HeleShawSolver:
     def _open_thickness_field(self) -> np.ndarray:
         """Cavity thickness used as the skin-free reference (mm).
 
-        Equivalent to ``geometry.thickness_mm``, expanded by
-        ``compression_factor`` when compression molding is active. Only
-        cells flagged in ``geometry.compression_mask`` participate in the
-        inflation; runners / sprues / gates keep their original thickness.
-        ``compression_mask = None`` falls back to legacy whole-cavity
-        inflation. The skin-layer model carves into this reference field.
+        When compression molding is active, cells flagged in
+        ``geometry.compression_mask`` are inflated; runners / sprues / gates
+        keep their original thickness. ``compression_mask = None`` falls
+        back to legacy whole-cavity inflation. The skin-layer model carves
+        into this reference field.
+
+        Two inflation modes are supported:
+
+        - **Stroke mode** (``compression_stroke_mm`` is not None): each
+          target cell grows by the same absolute stroke, ``h_eff = h + s``.
+          Physically faithful for stepped plates (mold shim = fixed
+          absolute distance, so the step thickness is preserved).
+        - **Factor mode** (default, legacy): each target cell is scaled
+          by ``compression_factor``, ``h_eff = h * f``. Thin cells inflate
+          more than thick cells under the same factor — appropriate when
+          the compression ratio (not stroke) is the design quantity.
         """
         h_mm = self.geometry.thickness_mm.copy()
         if self.compression_molding:
             cm = self.geometry.compression_mask
-            factor = float(self.compression_factor)
-            if cm is None:
-                h_mm = h_mm * factor
+            target = self.geometry.mask if cm is None else (cm & self.geometry.mask)
+            if self.compression_stroke_mm is not None:
+                stroke = float(self.compression_stroke_mm)
+                h_mm[target] = h_mm[target] + stroke
             else:
-                target = cm & self.geometry.mask
+                factor = float(self.compression_factor)
                 h_mm[target] = h_mm[target] * factor
         return h_mm
 
@@ -237,12 +256,23 @@ class HeleShawSolver:
             T_fill_baseline = V_cm3 / Q
         if self.compression_molding:
             # Effective inflation acting on the whole cavity (Q = const proxy).
-            # When only the product body inflates (compression_mask set), the
-            # net resistance drop is proportional to that body's volume share,
-            # so the compression-phase speed-up is diluted accordingly.
-            f_comp = float(self.geometry.compression_volume_fraction())
-            f_comp = max(min(f_comp, 1.0), 0.0)
-            effective_factor = 1.0 + (float(self.compression_factor) - 1.0) * f_comp
+            # ``effective_factor`` is the open-state cavity volume divided by
+            # the as-cast volume. When only the product body inflates
+            # (compression_mask set), the net resistance drop is proportional
+            # to that body's contribution, so the compression-phase speed-up
+            # is diluted accordingly.
+            V_total_mm3 = self.geometry.volume_cm3() * 1000.0
+            if self.compression_stroke_mm is not None:
+                # Stroke mode: ΔV = stroke * A_target (independent of local h).
+                stroke = float(self.compression_stroke_mm)
+                A_cm_mm2 = self.geometry.compression_area_mm2()
+                delta_V = stroke * A_cm_mm2
+                effective_factor = 1.0 + (delta_V / max(V_total_mm3, 1e-9))
+            else:
+                # Factor mode (legacy): same expression as before.
+                f_comp = float(self.geometry.compression_volume_fraction())
+                f_comp = max(min(f_comp, 1.0), 0.0)
+                effective_factor = 1.0 + (float(self.compression_factor) - 1.0) * f_comp
             effective_factor = max(effective_factor, 1e-3)
             T_fill_baseline = T_fill_baseline * (
                 self.compression_fraction / effective_factor + (1.0 - self.compression_fraction)
@@ -341,6 +371,8 @@ class HeleShawSolver:
             "injection_Q_cm3s": self.injection_volume_flow_cm3s,
             "compression": self.compression_molding,
             "compression_factor": self.compression_factor,
+            "compression_stroke_mm": self.compression_stroke_mm,
+            "compression_mode": ("stroke" if self.compression_stroke_mm is not None else "factor"),
             "compression_fraction": self.compression_fraction,
             "tau_max": tau_max,
             "tau_max_baseline": tau_max_baseline,

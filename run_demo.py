@@ -50,6 +50,7 @@ def _solve_and_export(
     inj_Q_cm3s: float,
     compression: bool = False,
     compression_factor: float = 1.5,
+    compression_stroke_mm: float | None = None,
     compression_fraction: float = 0.6,
     skin_layer: bool = False,
     skin_growth_constant: float = 0.5,
@@ -67,6 +68,7 @@ def _solve_and_export(
         injection_volume_flow_cm3s=inj_Q_cm3s,
         compression_molding=compression,
         compression_factor=compression_factor,
+        compression_stroke_mm=compression_stroke_mm,
         compression_fraction=compression_fraction,
         skin_layer_enabled=skin_layer,
         skin_growth_constant=skin_growth_constant,
@@ -256,6 +258,29 @@ def _film_gate_cfg_full_aperture_thin_runner() -> FilmGateConfig:
     )
 
 
+def _film_gate_cfg_stepped_plate() -> FilmGateConfig:
+    """Stepped plate (t0.35 gate-side / t0.50 far-side) — mimics the
+    real ultra-thin product. Used as the baseline for stroke-mode
+    compression demos where the mold shim adds a fixed 0.7 mm stroke."""
+    return FilmGateConfig(
+        plate_w_mm=120.0,
+        plate_h_mm=80.0,
+        plate_thk_mm=0.50,  # fallback (ignored, split + lower/upper override)
+        runner_long_mm=80.0,
+        runner_short_diameter_mm=12.0,
+        runner_depth_mm=20.0,
+        runner_thk_mm=4.0,
+        runner_flat_depth_mm=8.0,
+        runner_slope_depth_mm=12.0,
+        valve_gate_diameter_mm=4.0,
+        gate_width_mm=60.0,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+        cell_size_mm=1.0,
+    )
+
+
 def _film_gate_cfg_with_balancer() -> FilmGateConfig:
     """LGP-style flow balancer: same outer geometry as the default case
     but with a ▽-shaped local thinning carved in the runner centerline."""
@@ -357,6 +382,21 @@ FILM_GATE_CASES: dict[str, dict] = {
         mold_K=313.15,
         inj_velocity_mms=100.0,
         inj_Q_cm3s=20.0,
+    ),
+    # Stepped plate (t0.35 / t0.50) + stroke compression. Mold shim adds
+    # 0.7 mm to every compression cell so the 0.15 mm step is preserved
+    # (factor mode would distort it). Direct counterpart to the gokuusu
+    # STEP4 design discussion.
+    "FilmGate_PP_stepped_stroke": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+        compression=True,
+        compression_stroke_mm=0.70,
+        compression_fraction=0.95,
     ),
 }
 

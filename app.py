@@ -179,8 +179,17 @@ with st.expander("📐 使用している方程式と適用範囲"):
     )
 
 
+# NOTE: Material DB schema version is embedded as a cache key so that
+# Streamlit Cloud invalidates the @st.cache_resource entry whenever the
+# Material dataclass shape changes (e.g. new field added). Without this,
+# old Material instances pickled in the deploy's persistent cache lack
+# the new attribute and the solver raises AttributeError.
+# Bump this string when you add/remove fields on `core.materials.Material`.
+_MATERIAL_DB_SCHEMA_VERSION = "v2_shear_heating"
+
+
 @st.cache_resource
-def _load_db() -> MaterialDB:
+def _load_db(_schema_version: str = _MATERIAL_DB_SCHEMA_VERSION) -> MaterialDB:
     return MaterialDB()
 
 

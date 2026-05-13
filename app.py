@@ -20,6 +20,7 @@ from core import (
     FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
+    MultilayerHeleShawSolver,
     build_direct_gate_geometry,
     build_film_gate_geometry,
     geometry_from_image,
@@ -33,6 +34,7 @@ from core import (
     render_weldlines,
 )
 from core.geometry import Geometry
+from core.visualizer import render_layer_grid, render_short_shot_map
 
 st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
 st.title("極薄プレート 簡易流動解析")
@@ -502,18 +504,39 @@ with st.sidebar:
         help="ソディック等の成形機取説の射出率に対応。",
     )
 
-    st.header("スキン層モデル")
-    skin_on = st.checkbox(
-        "スキン層形成を考慮",
-        value=True,
+    st.header("ウォール冷却モデル")
+    wall_model = st.radio(
+        "壁面冷却の表現",
+        options=("none", "skin", "multilayer"),
+        index=1,
+        format_func=lambda m: {
+            "none": "なし（等温・代表粘度のみ）",
+            "skin": "スキン層 (1層 + Stefan/Neumann)",
+            "multilayer": "層別 (N 層離散化 + Cross-WLF 結合)",
+        }[m],
         help=(
-            "金型壁面で樹脂が固化してスキン層が育つ現象を Stefan/Neumann 形 "
-            "s(t) = c_skin · √(α·t) で取り込む。流路はコア層 h_core = h - 2·s "
-            "のみを通る。コアが閉塞したセルは short shot 候補。バルクのコア "
-            "温度低下や粘度の動的追跡は引き続き無視。"
+            "なし: 既存 HeleShawSolver 相当、温度結合なし。\n"
+            "スキン層: 壁面で固化するスキン層を s(t)=c_skin·√(αt) で取り込み、"
+            "コア層 h_core=h-2s だけが流れる。短ショットも検出。\n"
+            "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
+            "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。"
         ),
     )
-    if skin_on:
+
+    # default container (so downstream `solver = HeleShawSolver(...)` /
+    # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
+    skin_on = wall_model == "skin"
+    c_skin = 0.0
+    skin_max_iter = 5
+    skin_tol = 1e-3
+    multilayer_on = wall_model == "multilayer"
+    num_layers = 5
+    layer_distribution = "wall_refined"
+    multilayer_max_iter = 8
+    multilayer_tol = 1e-3
+    solid_fraction = 0.3
+
+    if wall_model == "skin":
         c_skin = st.slider(
             "スキン層成長定数 c_skin",
             0.0,
@@ -537,10 +560,54 @@ with st.sidebar:
             help="τ場の相対L2変化が 10^tol を下回ったら収束。",
         )
         skin_tol = 10.0 ** float(skin_tol_log10)
-    else:
-        c_skin = 0.0
-        skin_max_iter = 5
-        skin_tol = 1e-3
+    elif wall_model == "multilayer":
+        num_layers = st.slider(
+            "層数 N",
+            3,
+            7,
+            5,
+            help="厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。",
+        )
+        layer_distribution = st.radio(
+            "層分布",
+            options=("wall_refined", "uniform"),
+            index=0,
+            format_func=lambda m: {
+                "wall_refined": "壁近傍密 (Chebyshev-Lobatto)",
+                "uniform": "等間隔",
+            }[m],
+            help=(
+                "wall_refined: ζ_k = 0.5·(1 - cos(πk/N))。Neumann 勾配の急な"
+                "壁面で解像度を稼ぐ。layer 数が同じなら推奨。\n"
+                "uniform: 等間隔。デバッグ・解析比較用。"
+            ),
+        )
+        multilayer_max_iter = st.slider(
+            "fixed-point 反復上限",
+            1,
+            15,
+            8,
+            help="τ ↔ T_k ↔ η_k 結合の反復回数。",
+        )
+        multilayer_tol_log10 = st.slider(
+            "収束判定 log10(tol)",
+            -5,
+            -1,
+            -3,
+            help="τ場の相対L2変化が 10^tol を下回ったら収束。",
+        )
+        multilayer_tol = 10.0 ** float(multilayer_tol_log10)
+        solid_fraction = st.slider(
+            "固化判定 fraction",
+            0.0,
+            0.9,
+            0.3,
+            step=0.05,
+            help=(
+                "中央層温度が T_mold + fraction·(T_melt - T_mold) を下回るセルを"
+                " short shot にマーク。PP は 0.3 が目安。"
+            ),
+        )
 
     st.header("射出圧縮成形 (ICM)")
     icm = st.checkbox("圧縮成形ON", value=True)
@@ -705,22 +772,42 @@ with col_left:
 
 if do_run:
     with st.spinner("Hele-Shaw方程式を解いている…"):
-        solver = HeleShawSolver(
-            geometry=geom,
-            material=mat,
-            melt_temperature_K=melt_C + 273.15,
-            mold_temperature_K=mold_C + 273.15,
-            injection_velocity_mms=inj_v,
-            injection_volume_flow_cm3s=inj_Q,
-            compression_molding=icm,
-            compression_factor=comp_factor,
-            compression_stroke_mm=comp_stroke,
-            compression_fraction=comp_frac,
-            skin_layer_enabled=skin_on,
-            skin_growth_constant=c_skin,
-            skin_max_iterations=skin_max_iter,
-            skin_convergence_tol=skin_tol,
-        )
+        if multilayer_on:
+            solver = MultilayerHeleShawSolver(
+                geometry=geom,
+                material=mat,
+                melt_temperature_K=melt_C + 273.15,
+                mold_temperature_K=mold_C + 273.15,
+                injection_velocity_mms=inj_v,
+                injection_volume_flow_cm3s=inj_Q,
+                compression_molding=icm,
+                compression_factor=comp_factor,
+                compression_stroke_mm=comp_stroke,
+                compression_fraction=comp_frac,
+                num_layers=num_layers,
+                layer_distribution=layer_distribution,
+                thermal_coupling=True,
+                max_iterations=multilayer_max_iter,
+                convergence_tol=multilayer_tol,
+                solidification_temperature_fraction=solid_fraction,
+            )
+        else:
+            solver = HeleShawSolver(
+                geometry=geom,
+                material=mat,
+                melt_temperature_K=melt_C + 273.15,
+                mold_temperature_K=mold_C + 273.15,
+                injection_velocity_mms=inj_v,
+                injection_volume_flow_cm3s=inj_Q,
+                compression_molding=icm,
+                compression_factor=comp_factor,
+                compression_stroke_mm=comp_stroke,
+                compression_fraction=comp_frac,
+                skin_layer_enabled=skin_on,
+                skin_growth_constant=c_skin,
+                skin_max_iterations=skin_max_iter,
+                skin_convergence_tol=skin_tol,
+            )
         result = solver.solve(num_frames=num_frames)
 
         # 重い PNG/GIF レンダリングはここで一回だけやる。後段の widget 操作で
@@ -733,13 +820,35 @@ if do_run:
         _weld_path = render_weldlines(result, _tmp_dir / "weld.png")
         _skin_path: Path | None = None
         _core_path: Path | None = None
+        _layer_T_grid_path: Path | None = None
+        _layer_eta_grid_path: Path | None = None
+        _layer_short_shot_path: Path | None = None
         if skin_on and result.skin_thickness_mm is not None:
             _skin_path = render_skin_layer_map(result, _tmp_dir / "skin.png")
             _core_path = render_core_layer_map(result, _tmp_dir / "core.png")
+        if multilayer_on and getattr(result, "layer_temperature_K", None) is not None:
+            _layer_T_grid_path = render_layer_grid(
+                result, _tmp_dir / "layer_temperature_grid.png", field="temperature"
+            )
+            _layer_eta_grid_path = render_layer_grid(
+                result, _tmp_dir / "layer_viscosity_grid.png", field="viscosity"
+            )
+            _layer_short_shot_path = render_short_shot_map(
+                result, _tmp_dir / "multilayer_short_shot.png"
+            )
 
         _zip_buf_run = io.BytesIO()
         with zipfile.ZipFile(_zip_buf_run, "w", zipfile.ZIP_DEFLATED) as _zf_run:
-            for _p in (_gif_path, _press_path, _weld_path, _skin_path, _core_path):
+            for _p in (
+                _gif_path,
+                _press_path,
+                _weld_path,
+                _skin_path,
+                _core_path,
+                _layer_T_grid_path,
+                _layer_eta_grid_path,
+                _layer_short_shot_path,
+            ):
                 if _p is not None and _p.exists():
                     _zf_run.write(_p, _p.name)
             _zf_run.writestr(
@@ -752,6 +861,7 @@ if do_run:
         st.session_state["mfs_result"] = result
         st.session_state["mfs_geom"] = geom
         st.session_state["mfs_skin_on"] = skin_on
+        st.session_state["mfs_multilayer_on"] = multilayer_on
         st.session_state["mfs_num_frames"] = num_frames
         st.session_state["mfs_tmp_dir"] = _tmp_dir
         st.session_state["mfs_gif_path"] = _gif_path
@@ -759,6 +869,9 @@ if do_run:
         st.session_state["mfs_weld_path"] = _weld_path
         st.session_state["mfs_skin_path"] = _skin_path
         st.session_state["mfs_core_path"] = _core_path
+        st.session_state["mfs_layer_T_grid_path"] = _layer_T_grid_path
+        st.session_state["mfs_layer_eta_grid_path"] = _layer_eta_grid_path
+        st.session_state["mfs_layer_short_shot_path"] = _layer_short_shot_path
         st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
 
 # 結果が session_state にある間は、do_run=False のときも（3D 倍率スライダー
@@ -767,12 +880,16 @@ if "mfs_result" in st.session_state:
     result = st.session_state["mfs_result"]
     geom = st.session_state["mfs_geom"]
     skin_on = st.session_state["mfs_skin_on"]
+    multilayer_on = st.session_state.get("mfs_multilayer_on", False)
     num_frames = st.session_state["mfs_num_frames"]
     gif_path = st.session_state["mfs_gif_path"]
     press_path = st.session_state["mfs_press_path"]
     weld_path = st.session_state["mfs_weld_path"]
     skin_path = st.session_state["mfs_skin_path"]
     core_path = st.session_state["mfs_core_path"]
+    layer_T_grid_path = st.session_state.get("mfs_layer_T_grid_path")
+    layer_eta_grid_path = st.session_state.get("mfs_layer_eta_grid_path")
+    layer_short_shot_path = st.session_state.get("mfs_layer_short_shot_path")
     _zip_bytes = st.session_state["mfs_zip_bytes"]
 
     with col_right:
@@ -823,6 +940,47 @@ if "mfs_result" in st.session_state:
                     "コア層 h_core = h - 2s。赤マーク = スキン同士が会合した short shot 候補。"
                 )
                 _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
+
+        if multilayer_on and layer_T_grid_path is not None:
+            with st.expander("層別プロファイル (Multi-layer N=...)"):
+                md = result.metadata
+                st.caption(
+                    f"層数 N={md.get('num_layers')}, 分布={md.get('layer_distribution')}, "
+                    f"反復={md.get('multilayer_iterations')}, "
+                    f"収束={md.get('multilayer_converged')}, "
+                    f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
+                    f"短ショット率={md.get('short_shot_fraction', 0.0):.3f}"
+                )
+                st.markdown(
+                    "**各層の温度マップ T_k(x,y)** — 壁層は T_mold へ、中央層は T_melt 寄り"
+                )
+                st.image(str(layer_T_grid_path))
+                _download(
+                    "⬇ 温度グリッド PNG",
+                    layer_T_grid_path,
+                    "image/png",
+                    "dl_layer_T_png",
+                )
+                if layer_eta_grid_path is not None:
+                    st.markdown(
+                        "**各層の粘度マップ η_k(x,y)** — 対数スケール、壁層は剪断高でも低温で η 大"
+                    )
+                    st.image(str(layer_eta_grid_path))
+                    _download(
+                        "⬇ 粘度グリッド PNG",
+                        layer_eta_grid_path,
+                        "image/png",
+                        "dl_layer_eta_png",
+                    )
+                if layer_short_shot_path is not None:
+                    st.markdown("**短ショット予測** — 中央層温度が T_solid を切ったセルを赤マーク")
+                    st.image(str(layer_short_shot_path))
+                    _download(
+                        "⬇ 短ショット PNG",
+                        layer_short_shot_path,
+                        "image/png",
+                        "dl_layer_short_png",
+                    )
 
         with st.expander("3D表示（plotly）"):
             st.caption(

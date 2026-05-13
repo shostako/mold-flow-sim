@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter
 
+from .multilayer_solver import MultilayerFlowResult
 from .solver import FlowResult
 
 
@@ -392,6 +393,289 @@ def render_core_layer_map(
     ax.set_title(f"Core thickness h_core = h - 2s [mm]  (short shot cells: {short_count})")
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("h_core [mm]")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+# --------------------------------------------------------------------------
+# Multilayer (PR-D)
+# --------------------------------------------------------------------------
+
+
+def _scalar_layer_field(
+    result: MultilayerFlowResult, field: str, layer_idx: int
+) -> tuple[np.ndarray, str, str]:
+    """Helper: fetch the requested per-layer field slice and pick a
+    matplotlib colormap / label suitable for that quantity.
+
+    Supported fields: ``"temperature"`` (K), ``"viscosity"`` (Pa·s, log),
+    ``"shear_rate"`` (s⁻¹, log), ``"thickness"`` (mm).
+    """
+    if field == "temperature":
+        arr = result.layer_temperature_K
+        cmap = "coolwarm"
+        label = "T [K]"
+    elif field == "viscosity":
+        arr = result.layer_viscosity_Pa_s_field
+        cmap = "plasma"
+        label = "η [Pa·s]"
+    elif field == "shear_rate":
+        arr = result.layer_shear_rate_s_inv
+        cmap = "viridis"
+        label = "γ̇ [1/s]"
+    elif field == "thickness":
+        arr = result.layer_thickness_mm
+        cmap = "cividis"
+        label = "h_k [mm]"
+    else:
+        raise ValueError(
+            f"field={field!r} not supported "
+            "(expected 'temperature' / 'viscosity' / 'shear_rate' / 'thickness')"
+        )
+    if arr is None:
+        raise ValueError(
+            f"result has no layer_{field}_* field — was the solver run with "
+            "``thermal_coupling=True``?"
+        )
+    N = arr.shape[0]
+    if not 0 <= layer_idx < N:
+        raise IndexError(f"layer_idx={layer_idx} out of range [0, {N})")
+    return arr[layer_idx], cmap, label
+
+
+def render_layer_map(
+    result: MultilayerFlowResult,
+    layer_idx: int,
+    output_path: str | Path,
+    field: str = "temperature",
+    log_scale: bool | None = None,
+) -> Path:
+    """Plot one per-layer scalar field at the given layer index.
+
+    ``field`` selects which quantity to plot (``temperature`` /
+    ``viscosity`` / ``shear_rate`` / ``thickness``). When ``log_scale``
+    is left ``None`` the routine auto-enables it for viscosity and shear
+    rate (which span orders of magnitude in a typical run).
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    layer_field, cmap, label = _scalar_layer_field(result, field, layer_idx)
+    g = result.geometry
+    masked = np.where(g.mask, layer_field, np.nan)
+
+    if log_scale is None:
+        log_scale = field in {"viscosity", "shear_rate"}
+    if log_scale:
+        valid = masked[np.isfinite(masked) & (masked > 0)]
+        if valid.size == 0:
+            log_scale = False
+            norm = None
+        else:
+            norm = mcolors.LogNorm(vmin=float(valid.min()), vmax=float(valid.max()))
+    if not log_scale:
+        valid = masked[np.isfinite(masked)]
+        if valid.size == 0:
+            vmin, vmax = 0.0, 1.0
+        else:
+            vmin = float(valid.min())
+            vmax = float(valid.max())
+            if vmin == vmax:
+                vmax = vmin + 1.0
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    extent = _base_extent(result)
+    x0, y0 = g.gate_origin_mm()
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+    im = ax.imshow(
+        masked, origin="lower", extent=extent, cmap=cmap, norm=norm, interpolation="nearest"
+    )
+    for iy, ix in g.gates:
+        ax.plot(
+            (ix + 0.5) * g.cell_size_mm - x0,
+            (iy + 0.5) * g.cell_size_mm - y0,
+            marker="o",
+            color="lime",
+            markersize=8,
+            markeredgecolor="black",
+        )
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    zeta = result.metadata.get("layer_zeta")
+    if zeta is not None and 0 <= layer_idx < len(zeta) - 1:
+        zeta_lo = zeta[layer_idx]
+        zeta_hi = zeta[layer_idx + 1]
+        title_zeta = f" — layer {layer_idx} (ζ ∈ [{zeta_lo:.3f}, {zeta_hi:.3f}])"
+    else:
+        title_zeta = f" — layer {layer_idx}"
+    ax.set_title(f"{field.replace('_', ' ').title()}{title_zeta}")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label(label)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_layer_grid(
+    result: MultilayerFlowResult,
+    output_path: str | Path,
+    field: str = "temperature",
+    log_scale: bool | None = None,
+) -> Path:
+    """Render every layer's scalar field as a single tiled PNG.
+
+    The N panels share a colorscale so the temperature drop from wall to
+    centre is immediately readable.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Fetch the (N, ny, nx) array and global colorscale anchors.
+    layer0, cmap, label = _scalar_layer_field(result, field, 0)
+    if field == "temperature":
+        arr = result.layer_temperature_K
+    elif field == "viscosity":
+        arr = result.layer_viscosity_Pa_s_field
+    elif field == "shear_rate":
+        arr = result.layer_shear_rate_s_inv
+    else:  # thickness
+        arr = result.layer_thickness_mm
+    if arr is None:
+        raise ValueError(
+            f"result has no layer_{field}_* field — was the solver run with "
+            "``thermal_coupling=True``?"
+        )
+    N = arr.shape[0]
+    g = result.geometry
+    masked = np.where(g.mask[None, :, :], arr, np.nan)
+
+    if log_scale is None:
+        log_scale = field in {"viscosity", "shear_rate"}
+    valid = masked[np.isfinite(masked)]
+    if log_scale:
+        valid = valid[valid > 0]
+    if valid.size == 0:
+        vmin, vmax = 0.0, 1.0
+        log_scale = False
+    else:
+        vmin = float(valid.min())
+        vmax = float(valid.max())
+        if vmin == vmax:
+            vmax = vmin + 1.0
+    norm = (
+        mcolors.LogNorm(vmin=vmin, vmax=vmax)
+        if log_scale
+        else mcolors.Normalize(vmin=vmin, vmax=vmax)
+    )
+
+    # Square-ish grid layout.
+    ncols = int(np.ceil(np.sqrt(N)))
+    nrows = int(np.ceil(N / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.6 * ncols, 3.0 * nrows), dpi=110, squeeze=False
+    )
+    extent = _base_extent(result)
+    zeta = result.metadata.get("layer_zeta")
+    last_im = None
+    for k in range(nrows * ncols):
+        ax = axes[k // ncols][k % ncols]
+        if k >= N:
+            ax.axis("off")
+            continue
+        last_im = ax.imshow(
+            masked[k],
+            origin="lower",
+            extent=extent,
+            cmap=cmap,
+            norm=norm,
+            interpolation="nearest",
+        )
+        if zeta is not None and k < len(zeta) - 1:
+            ax.set_title(f"k={k} (ζ∈[{zeta[k]:.2f},{zeta[k + 1]:.2f}])", fontsize=9)
+        else:
+            ax.set_title(f"k={k}", fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal")
+
+    if last_im is not None:
+        cbar = fig.colorbar(
+            last_im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02, shrink=0.85
+        )
+        cbar.set_label(label)
+    fig.suptitle(
+        f"Layer-resolved {field} (N={N}, distribution={result.metadata.get('layer_distribution')})"
+    )
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def render_short_shot_map(
+    result: MultilayerFlowResult,
+    output_path: str | Path,
+) -> Path:
+    """Plot the short-shot mask predicted by the multilayer solver.
+
+    The cavity outline is drawn underneath; flagged cells are overlaid
+    as red squares. When no cells are short-shot the cavity is rendered
+    in the standard grey with a 'no short shot' annotation.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    g = result.geometry
+    x0, y0 = g.gate_origin_mm()
+    extent = _base_extent(result)
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+    flagged = result.short_shot_mask
+    if flagged is not None and flagged.any():
+        iy_arr, ix_arr = np.where(flagged)
+        ax.scatter(
+            (ix_arr + 0.5) * g.cell_size_mm - x0,
+            (iy_arr + 0.5) * g.cell_size_mm - y0,
+            marker="s",
+            color="#e74c3c",
+            s=8,
+            linewidths=0,
+            label=f"short shot ({int(flagged.sum())} cells)",
+        )
+        ax.legend(loc="upper right", fontsize=9)
+    else:
+        ax.text(
+            0.5,
+            0.95,
+            "no short shot",
+            ha="center",
+            va="top",
+            transform=ax.transAxes,
+            fontsize=11,
+            color="#2c7a2c",
+        )
+    for iy, ix in g.gates:
+        ax.plot(
+            (ix + 0.5) * g.cell_size_mm - x0,
+            (iy + 0.5) * g.cell_size_mm - y0,
+            marker="o",
+            color="lime",
+            markersize=8,
+            markeredgecolor="black",
+        )
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    frac = result.metadata.get("short_shot_fraction", 0.0)
+    T_solid = result.metadata.get("T_solid_K", float("nan"))
+    ax.set_title(f"Short-shot prediction (fraction={frac:.3f}, T_solid={T_solid:.1f} K)")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)

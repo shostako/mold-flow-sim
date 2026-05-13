@@ -28,6 +28,7 @@ from core.multilayer_solver import (
     _multilayer_conductance,
     _poiseuille_layer_moments,
     _uniform_layer_zeta,
+    _wall_refined_layer_zeta,
 )
 
 
@@ -177,20 +178,20 @@ def test_multilayer_solver_rejects_zero_layers() -> None:
         MultilayerHeleShawSolver(geometry=g, material=db["PP"], num_layers=0, **_solver_kwargs())
 
 
-def test_multilayer_solver_rejects_unsupported_distribution() -> None:
-    """PR-A only ships ``uniform``; ``wall_refined`` comes in PR-C and
-    must be rejected until then (caught when ``solve()`` is called)."""
+def test_multilayer_solver_rejects_unknown_distribution() -> None:
+    """An unknown layer distribution name must raise ``ValueError`` at
+    solve time (the dispatcher is the line of defense)."""
     g = build_film_gate_geometry(_default_cfg())
     db = MaterialDB()
     solver = MultilayerHeleShawSolver(
         geometry=g,
         material=db["PP"],
         num_layers=5,
-        layer_distribution="wall_refined",
+        layer_distribution="not_a_real_distribution",
         thermal_coupling=False,
         **_solver_kwargs(),
     )
-    with pytest.raises(ValueError, match="wall_refined"):
+    with pytest.raises(ValueError, match="not_a_real_distribution"):
         solver.solve(num_frames=4)
 
 
@@ -464,3 +465,223 @@ def test_layer_temperature_near_wall_lower_than_centre() -> None:
     # Both wall layers (k=0 and k=N-1) must be cooler than the centre.
     assert layer_means[0] < layer_means[centre_idx]
     assert layer_means[-1] < layer_means[centre_idx]
+
+
+# --------------------------------------------------------------------------
+# PR-C: wall_refined layer distribution
+# --------------------------------------------------------------------------
+
+
+def test_wall_refined_endpoints_and_length() -> None:
+    """The wall-refined boundaries span [0, 1] and are length ``N+1``."""
+    for N in (2, 3, 5, 6, 7):
+        z = _wall_refined_layer_zeta(N)
+        assert z.shape == (N + 1,)
+        assert z[0] == 0.0
+        assert z[-1] == 1.0
+        # Monotonically increasing — basic sanity for a layer partition.
+        assert np.all(np.diff(z) > 0.0)
+
+
+def test_wall_refined_symmetric_about_centre() -> None:
+    """``ζ_k + ζ_{N-k} = 1`` for all k (mirror symmetry about ζ=0.5)."""
+    for N in (2, 4, 6, 7):
+        z = _wall_refined_layer_zeta(N)
+        np.testing.assert_allclose(z + z[::-1], 1.0, atol=1e-12)
+
+
+def test_wall_refined_walls_thinner_than_centre() -> None:
+    """The first and last layers are *strictly thinner* than the centre
+    layer — the whole point of refining at the walls."""
+    for N in (4, 5, 6, 7):
+        z = _wall_refined_layer_zeta(N)
+        widths = np.diff(z)
+        centre = widths[N // 2]
+        assert widths[0] < centre
+        assert widths[-1] < centre
+
+
+def test_wall_refined_matches_plan_example_n6() -> None:
+    """The N=6 wall-refined boundaries are exactly the values quoted in
+    the implementation plan: [0, 0.067, 0.25, 0.5, 0.75, 0.933, 1]."""
+    z = _wall_refined_layer_zeta(6)
+    expected = np.array(
+        [
+            0.0,
+            0.5 * (1.0 - np.cos(np.pi * 1 / 6)),
+            0.5 * (1.0 - np.cos(np.pi * 2 / 6)),
+            0.5 * (1.0 - np.cos(np.pi * 3 / 6)),
+            0.5 * (1.0 - np.cos(np.pi * 4 / 6)),
+            0.5 * (1.0 - np.cos(np.pi * 5 / 6)),
+            1.0,
+        ]
+    )
+    np.testing.assert_allclose(z, expected, atol=1e-12)
+    # Spot-check the rounded values from the plan.
+    assert abs(z[1] - 0.067) < 5e-3  # ≈ 0.0670
+    assert abs(z[2] - 0.250) < 1e-3
+    assert abs(z[3] - 0.500) < 1e-12
+    assert abs(z[5] - 0.933) < 5e-3
+
+
+def test_wall_refined_moments_sum_to_one_sixth() -> None:
+    """Σ m_k = 1/6 is the Hele-Shaw factor; no distribution may break it."""
+    for N in (2, 3, 5, 6, 7, 11):
+        z = _wall_refined_layer_zeta(N)
+        m = _poiseuille_layer_moments(z)
+        assert m.shape == (N,)
+        np.testing.assert_allclose(m.sum(), 1.0 / 6.0, rtol=1e-12)
+
+
+def test_wall_refined_n1_falls_back_to_uniform() -> None:
+    """``N=1`` cannot be refined; the dispatcher returns the uniform
+    [0, 1] partition so the N=1 ↔ classical Hele-Shaw identity holds
+    even when the user asks for ``wall_refined``."""
+    z_wr = _wall_refined_layer_zeta(1)
+    z_un = _uniform_layer_zeta(1)
+    np.testing.assert_array_equal(z_wr, z_un)
+
+
+def test_solver_accepts_wall_refined_distribution() -> None:
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        layer_distribution="wall_refined",
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["layer_distribution"] == "wall_refined"
+    zeta = r.metadata["layer_zeta"]
+    # Symmetric about 0.5 (sanity).
+    rev = list(reversed(zeta))
+    for a, b in zip(zeta, rev):
+        assert abs(a + b - 1.0) < 1e-12
+
+
+# --------------------------------------------------------------------------
+# PR-C: short-shot detection
+# --------------------------------------------------------------------------
+
+
+def test_short_shot_metadata_present() -> None:
+    """Both ``short_shot_cells`` and ``short_shot_fraction`` are always
+    in the metadata when ``thermal_coupling=True``."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, **_solver_kwargs()
+    ).solve(num_frames=4)
+    assert "short_shot_cells" in r.metadata
+    assert "short_shot_fraction" in r.metadata
+    assert "T_solid_K" in r.metadata
+    assert 0.0 <= r.metadata["short_shot_fraction"] <= 1.0
+
+
+def test_short_shot_off_in_default_warm_run() -> None:
+    """A vanilla 2 mm plate at 503 K / 313 K does *not* freeze the
+    centre layer below T_solid → short_shot_fraction == 0."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, **_solver_kwargs()
+    ).solve(num_frames=4)
+    assert r.metadata["short_shot_cells"] == 0
+    assert r.metadata["short_shot_fraction"] == 0.0
+    assert r.short_shot_mask is None or not r.short_shot_mask.any()
+
+
+def test_short_shot_on_thin_plate_high_mold_threshold() -> None:
+    """A thin plate (t=0.35 mm gate-side / 0.50 mm far-side) and a very
+    aggressive solidification threshold (60% of the melt-mold span)
+    forces the centre layer through the threshold for *some* cells.
+    """
+    cfg = _default_cfg(
+        plate_thk_mm=0.50,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+    g = build_film_gate_geometry(cfg)
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        layer_distribution="wall_refined",
+        solidification_temperature_fraction=0.6,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["short_shot_cells"] > 0
+    assert r.metadata["short_shot_fraction"] > 0.0
+    assert r.short_shot_mask is not None and r.short_shot_mask.any()
+    # Sanity: only cavity cells participate.
+    assert np.all(r.short_shot_mask <= g.mask)
+
+
+def test_short_shot_threshold_zero_marks_nothing() -> None:
+    """``solidification_temperature_fraction=0.0`` ⇒ threshold equals
+    ``T_mold``; the clamp keeps centre-layer T ≥ T_mold so no cell is
+    ever flagged."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        solidification_temperature_fraction=0.0,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    # T_mid > T_mold for any finite t_arr after the clamp, but the
+    # T_solid is at the floor, so flagged set is small or zero.
+    assert r.metadata["short_shot_fraction"] <= 0.0 + 1e-9
+
+
+# --------------------------------------------------------------------------
+# PR-C: adaptive damping
+# --------------------------------------------------------------------------
+
+
+def test_damping_metadata_present() -> None:
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, **_solver_kwargs()
+    ).solve(num_frames=4)
+    assert "damping_factor" in r.metadata
+    assert "damping_events" in r.metadata
+    assert r.metadata["damping_factor"] == 0.7  # default
+    assert r.metadata["damping_events"] >= 0
+
+
+def test_damping_factor_validation() -> None:
+    """``damping_factor`` must sit in (0, 1]."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    for bad in (-0.1, 0.0, 1.5):
+        solver = MultilayerHeleShawSolver(
+            geometry=g,
+            material=db["PP"],
+            num_layers=3,
+            damping_factor=bad,
+            **_solver_kwargs(),
+        )
+        with pytest.raises(ValueError, match="damping_factor"):
+            solver.solve(num_frames=4)
+
+
+def test_damping_omega_one_is_undamped() -> None:
+    """``damping_factor=1.0`` is the no-damping pass-through; we can't
+    easily detect *that* (the path is the same), but the solver must
+    accept it and run."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        damping_factor=1.0,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["damping_factor"] == 1.0

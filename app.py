@@ -116,28 +116,11 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "圧縮位相を時間ステッピングで解かず、**製品本体の厚みを膨張**させた等価モデルとして扱う。"
         "流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
         "膨張対象は「製品本体セルだけ」、ランナー・スプルー・ゲートは射出時の肉厚のまま不変。"
-        "膨張のさせ方は **factor モード**と **stroke モード**の 2 系統から選べる。"
+        "UI は **stroke モード**（金型シム量の物理に整合）で統一。"
+        "倍率指定の **factor モード**は CLI / solver 引数で後方互換のためだけに残す。"
     )
 
-    st.markdown("#### 5-1. factor モード（倍率指定、後方互換）")
-    st.markdown(
-        "全 target セルに同じ倍率を掛ける。**圧縮比**（型開き量倍率）が設計指標のときに使う。"
-        "薄肉ほど絶対膨張量が大きくなるので、段差プレートでは段差が崩れる点に注意。"
-    )
-    st.latex(r"h_{\text{eff}}(x,y) = h(x,y) \cdot CF \quad \text{on compression cells}")
-    st.latex(
-        r"T_{\text{fill}}^{\text{ICM}} = T_{\text{fill}}^{\text{base}} \cdot "
-        r"\left[\,\frac{f_{\text{cmp}}}{1 + (CF-1)\,f_{V}}\,"
-        r"+\,(1 - f_{\text{cmp}})\,\right]"
-    )
-    st.markdown(
-        "- $CF$: `compression_factor`（型開き量倍率）\n"
-        "- $f_{\\text{cmp}}$: `compression_fraction`（圧縮位相の充填占有率）\n"
-        "- $f_V$: 圧縮対象セル**体積** / 全キャビティ体積（プレート単独形状なら 1.0、"
-        "Film gate のようにランナー有りなら $\\approx 0.93$ 程度）"
-    )
-
-    st.markdown("#### 5-2. stroke モード（絶対加算、段差保存）")
+    st.markdown("#### 5-1. stroke モード（絶対加算、段差保存、UI 既定）")
     st.markdown(
         "全 target セルに同じ絶対量（ストローク $s$）を**加算**する。"
         "**金型シム量**が設計指標のとき（＝実機の射出圧縮成形そのもの）に使う。"
@@ -169,7 +152,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
         "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
         "- スキン層形成によるコア閉塞・ショートショット予測（オプション）\n"
-        "- 射出圧縮成形による等価流路拡大（factor / stroke 2 モード、オプション）"
+        "- 射出圧縮成形による等価流路拡大（stroke モード、CLI に factor 後方互換あり、オプション）"
     )
 
     st.markdown("### ❌ モデル化していない現象（重要）")
@@ -612,34 +595,29 @@ with st.sidebar:
     st.header("射出圧縮成形 (ICM)")
     icm = st.checkbox("圧縮成形ON", value=True)
     if icm:
-        comp_mode = st.radio(
-            "圧縮量の指定方式",
-            options=("factor", "stroke"),
-            index=0,
-            format_func=lambda m: {
-                "factor": "倍率 (h_init / h_final)",
-                "stroke": "ストローク [mm] (絶対加算)",
-            }[m],
-            horizontal=True,
+        # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
+        # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
+        # 旧倍率モードは solver / CLI には後方互換で残しているが UI には出さない。
+        comp_stroke = st.slider(
+            "圧縮ストローク [mm]",
+            0.0,
+            2.0,
+            0.70,
+            step=0.05,
             help=(
-                "倍率モード: 全 compression セルを同じ倍率で膨張。薄肉ほど絶対量が小さい。\n"
-                "ストロークモード: 全セルに同じ絶対量を加算。段差プレートで段差が保存される（金型シム相当）。"
+                "金型シム量。圧縮 mask セル全てに加算される絶対量。"
+                "段差プレートでも段差が圧縮位相中も保存される (実機の挙動と整合)。"
             ),
         )
-        if comp_mode == "stroke":
-            comp_stroke = st.slider(
-                "圧縮ストローク [mm]",
-                0.0,
-                2.0,
-                0.7,
-                step=0.05,
-                help="圧縮 mask セル全てに加算される絶対量。",
-            )
-            comp_factor = 1.0  # unused in stroke mode but kept for solver kwargs
-        else:
-            comp_factor = st.slider("初期隙間倍率 h_init/h_final", 1.05, 3.0, 2.2, step=0.05)
-            comp_stroke = None
-        comp_frac = st.slider("圧縮位相の充填占有率", 0.1, 1.0, 0.95, step=0.05)
+        comp_factor = 1.0  # unused, kept for solver kwargs symmetry
+        comp_frac = st.slider(
+            "圧縮位相の充填占有率",
+            0.1,
+            1.0,
+            0.60,
+            step=0.05,
+            help="充填全体に対し、圧縮位相 (型開き状態) で占める時間比率。",
+        )
     else:
         comp_factor = 1.0
         comp_stroke = None

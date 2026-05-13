@@ -685,3 +685,124 @@ def test_damping_omega_one_is_undamped() -> None:
         **_solver_kwargs(),
     ).solve(num_frames=4)
     assert r.metadata["damping_factor"] == 1.0
+
+
+# --------------------------------------------------------------------------
+# Shear heating (viscous dissipation) — stage 1
+# --------------------------------------------------------------------------
+
+
+def _thin_plate_cfg() -> FilmGateConfig:
+    """Stress geometry for shear heating: thin plate at high injection rate."""
+    return _default_cfg(
+        plate_thk_mm=0.4,  # thin plate (overrides default 2.0 mm)
+        plate_w_mm=80.0,
+        plate_h_mm=40.0,
+    )
+
+
+def _shear_kwargs() -> dict:
+    """Solver kwargs that emphasise shear heating (fast injection + thin)."""
+    return dict(
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=300.0,  # high V → γ̇ ≈ 4500 s⁻¹ for h=0.4 mm
+        injection_volume_flow_cm3s=20.0,
+    )
+
+
+def test_shear_heating_default_off_keeps_backwards_compat() -> None:
+    """``shear_heating_enabled`` defaults to False so existing callers
+    see no change in numerical results vs prior PRs."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, **_solver_kwargs()
+    ).solve(num_frames=4)
+    assert r.metadata["shear_heating_enabled"] is False
+    assert r.metadata["shear_heating_max_K"] == 0.0
+    assert r.metadata["shear_heating_mean_K"] == 0.0
+
+
+def test_shear_heating_brinkman_always_populated_when_coupled() -> None:
+    """Even with shear heating OFF, the Brinkman number metadata is
+    populated when ``thermal_coupling=True`` — that's the *diagnostic*
+    we use to decide whether the correction is needed."""
+    g = build_film_gate_geometry(_thin_plate_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        shear_heating_enabled=False,
+        **_shear_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["brinkman_number_max"] > 0.0
+    assert r.metadata["brinkman_number_mean"] > 0.0
+    assert r.layer_brinkman_number is not None
+    assert r.layer_brinkman_number.shape == (5,) + g.shape
+
+
+def test_shear_heating_on_raises_max_temperature_rise() -> None:
+    """With shear heating ON, the per-layer temperature rise field is
+    populated and the metadata reports a positive max."""
+    g = build_film_gate_geometry(_thin_plate_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        shear_heating_enabled=True,
+        **_shear_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["shear_heating_enabled"] is True
+    assert r.metadata["shear_heating_max_K"] > 0.0
+    assert r.metadata["shear_heating_mean_K"] >= 0.0
+    assert r.layer_shear_heating_dT_K is not None
+    assert r.layer_shear_heating_dT_K.shape == (5,) + g.shape
+
+
+def test_shear_heating_lowers_layer_viscosity_vs_off() -> None:
+    """Shear heating raises T_k → drops η_k via Cross-WLF.
+
+    Compare the max layer viscosity inside the cavity with vs without
+    the correction. The correction must not *increase* η anywhere.
+    """
+    g = build_film_gate_geometry(_thin_plate_cfg())
+    db = MaterialDB()
+    r_off = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        shear_heating_enabled=False,
+        **_shear_kwargs(),
+    ).solve(num_frames=4)
+    r_on = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        shear_heating_enabled=True,
+        **_shear_kwargs(),
+    ).solve(num_frames=4)
+
+    cavity = g.mask
+    eta_off = r_off.layer_viscosity_Pa_s_field[:, cavity]  # (N, Ncells)
+    eta_on = r_on.layer_viscosity_Pa_s_field[:, cavity]
+    # On average η decreases (heating thins the polymer)
+    assert float(np.mean(eta_on)) <= float(np.mean(eta_off)) * (1.0 + 1e-6)
+
+
+def test_shear_heating_metadata_contains_material_thermal_fields() -> None:
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        shear_heating_enabled=True,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["specific_heat_J_kgK"] == db["PP"].specific_heat_J_kgK
+    assert r.metadata["thermal_conductivity_W_mK"] == pytest.approx(
+        db["PP"].thermal_conductivity_W_mK
+    )

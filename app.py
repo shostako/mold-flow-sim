@@ -601,6 +601,18 @@ with st.sidebar:
                 " short shot にマーク。PP は 0.3 が目安。"
             ),
         )
+        shear_heating_enabled = st.checkbox(
+            "剪断発熱補正 (viscous dissipation, 段階1)",
+            value=True,
+            help=(
+                "ON で Neumann 温度に剪断発熱補正項 ΔT_k = (η_k·γ̇_k²)·min(t_arr, τ_thermal)/(ρ·cp) を加算。"
+                "τ_thermal = h²/(π²·α) で頭打ち。"
+                "極薄プレート (t<0.5mm) では Brinkman 数 Br ≫ 1 になりがちなので推奨。"
+                "OFF でも Br 数は結果ペインに表示されるので、必要性を事前判定できる。"
+            ),
+        )
+    else:
+        shear_heating_enabled = False
 
     st.header("射出圧縮成形 (ICM)")
     icm = st.checkbox("圧縮成形ON", value=True)
@@ -778,6 +790,7 @@ if do_run:
                 max_iterations=multilayer_max_iter,
                 convergence_tol=multilayer_tol,
                 solidification_temperature_fraction=solid_fraction,
+                shear_heating_enabled=shear_heating_enabled,
             )
         else:
             solver = HeleShawSolver(
@@ -938,6 +951,24 @@ if "mfs_result" in st.session_state:
                     f"収束={md.get('multilayer_converged')}, "
                     f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
                     f"短ショット率={md.get('short_shot_fraction', 0.0):.3f}"
+                )
+                _br_max = md.get("brinkman_number_max", 0.0)
+                _br_mean = md.get("brinkman_number_mean", 0.0)
+                _sh_max = md.get("shear_heating_max_K", 0.0)
+                _sh_mean = md.get("shear_heating_mean_K", 0.0)
+                _sh_enabled = md.get("shear_heating_enabled", False)
+                # Brinkman number sanity-band: < 0.5 negligible, < 2 moderate, >= 2 strong.
+                if _br_max < 0.5:
+                    _br_emoji = "🟢"
+                elif _br_max < 2.0:
+                    _br_emoji = "🟡"
+                else:
+                    _br_emoji = "🔴"
+                _badge = "✅ ON" if _sh_enabled else "OFF"
+                st.caption(
+                    f"剪断発熱 {_badge}: ΔT_max={_sh_max:.1f}K / mean={_sh_mean:.2f}K　"
+                    f"{_br_emoji} Brinkman数 Br_max={_br_max:.2f} / mean={_br_mean:.3f}"
+                    "（Br>1 で剪断発熱が支配的）"
                 )
                 st.markdown(
                     "**各層の温度マップ T_k(x,y)** — 壁層は T_mold へ、中央層は T_melt 寄り"

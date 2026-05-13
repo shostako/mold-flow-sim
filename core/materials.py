@@ -28,6 +28,26 @@ class Material:
     # model: s(t) = c_skin · sqrt(α · t). Generic values for educational use;
     # 1e-7 m^2/s is a typical melt-polymer order of magnitude.
     thermal_diffusivity_m2_s: float = 1.0e-7
+    # Specific heat capacity at the melt state [J/(kg·K)]. Used by the
+    # shear-heating (viscous dissipation) correction in the multilayer
+    # solver: ΔT/Δt = η·γ̇² / (ρ·cp). 2400 J/(kg·K) is a generic PP-melt
+    # default; talc-filled grades have lower values (lower for higher
+    # filler fraction). Together with ``density_melt_kgm3`` and
+    # ``thermal_diffusivity_m2_s`` the thermal conductivity is recovered
+    # as ``k = α · ρ · cp`` (used for the Brinkman number).
+    specific_heat_J_kgK: float = 2400.0
+
+    @property
+    def thermal_conductivity_W_mK(self) -> float:
+        """Derived thermal conductivity ``k = α · ρ · cp`` [W/(m·K)].
+
+        Derived from existing fields so the material DB doesn't need a
+        separate column. For PP this gives ``≈ 0.16 W/(m·K)`` which is
+        in the right ballpark for molten polypropylene.
+        """
+        return float(
+            self.thermal_diffusivity_m2_s * self.density_melt_kgm3 * self.specific_heat_J_kgK
+        )
 
 
 class MaterialDB:
@@ -57,6 +77,7 @@ class MaterialDB:
                 T_mold_recommended=tuple(m["T_mold_recommended"]),
                 density_melt_kgm3=m.get("density_melt_kgm3", 1000.0),
                 thermal_diffusivity_m2_s=m.get("thermal_diffusivity_m2_s", 1.0e-7),
+                specific_heat_J_kgK=m.get("specific_heat_J_kgK", 2400.0),
             )
 
     @property

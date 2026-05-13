@@ -111,10 +111,18 @@ with st.expander("📐 使用している方程式と適用範囲"):
 
     st.markdown("### 5. 射出圧縮成形（ICM、オプション）：等価厚み膨張モデル")
     st.markdown(
-        "圧縮位相を時間ステッピングで解かず、**製品本体の厚みを `compression_factor` 倍に膨張**"
-        "させた等価モデルとして扱う。流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
+        "圧縮位相を時間ステッピングで解かず、**製品本体の厚みを膨張**させた等価モデルとして扱う。"
+        "流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
         "膨張対象は「製品本体セルだけ」、ランナー・スプルー・ゲートは射出時の肉厚のまま不変。"
+        "膨張のさせ方は **factor モード**と **stroke モード**の 2 系統から選べる。"
     )
+
+    st.markdown("#### 5-1. factor モード（倍率指定、後方互換）")
+    st.markdown(
+        "全 target セルに同じ倍率を掛ける。**圧縮比**（型開き量倍率）が設計指標のときに使う。"
+        "薄肉ほど絶対膨張量が大きくなるので、段差プレートでは段差が崩れる点に注意。"
+    )
+    st.latex(r"h_{\text{eff}}(x,y) = h(x,y) \cdot CF \quad \text{on compression cells}")
     st.latex(
         r"T_{\text{fill}}^{\text{ICM}} = T_{\text{fill}}^{\text{base}} \cdot "
         r"\left[\,\frac{f_{\text{cmp}}}{1 + (CF-1)\,f_{V}}\,"
@@ -123,8 +131,30 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "- $CF$: `compression_factor`（型開き量倍率）\n"
         "- $f_{\\text{cmp}}$: `compression_fraction`（圧縮位相の充填占有率）\n"
-        "- $f_V$: 圧縮対象セル体積 / 全キャビティ体積（プレート単独形状なら 1.0、"
+        "- $f_V$: 圧縮対象セル**体積** / 全キャビティ体積（プレート単独形状なら 1.0、"
         "Film gate のようにランナー有りなら $\\approx 0.93$ 程度）"
+    )
+
+    st.markdown("#### 5-2. stroke モード（絶対加算、段差保存）")
+    st.markdown(
+        "全 target セルに同じ絶対量（ストローク $s$）を**加算**する。"
+        "**金型シム量**が設計指標のとき（＝実機の射出圧縮成形そのもの）に使う。"
+        "段差プレート（例: 薄肉部 $t_0=0.35$ mm ／ 厚肉部 $t_0=0.50$ mm）に "
+        "$s=0.70$ mm を加算すると薄肉部 $1.05$ mm ／ 厚肉部 $1.20$ mm となり、"
+        "**段差 $0.15$ mm が圧縮位相中も保存される**（factor モードだと "
+        "$0.35 \\to 1.05$ / $0.50 \\to 1.50$ で段差が $0.45$ mm に膨らんで非物理）。"
+    )
+    st.latex(r"h_{\text{eff}}(x,y) = h(x,y) + s \quad \text{on compression cells}")
+    st.latex(
+        r"T_{\text{fill}}^{\text{ICM}} = T_{\text{fill}}^{\text{base}} \cdot "
+        r"\left[\,\frac{f_{\text{cmp}}}{1 + s \cdot A_{\text{cm}} / V_{\text{total}}}\,"
+        r"+\,(1 - f_{\text{cmp}})\,\right]"
+    )
+    st.markdown(
+        "- $s$: `compression_stroke_mm`（圧縮ストローク [mm]、絶対加算量）\n"
+        "- $A_{\\text{cm}}$: 圧縮対象セルの**面積** [mm²]（`compression_area_mm2()`）\n"
+        "- $V_{\\text{total}}$: 全キャビティ体積 [mm³]\n"
+        "- uniform プレートで $CF = (h + s)/h$ に揃えると factor モードと厳密に等価"
     )
 
     st.markdown("---")
@@ -137,7 +167,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
         "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
         "- スキン層形成によるコア閉塞・ショートショット予測（オプション）\n"
-        "- 射出圧縮成形による等価流路拡大（オプション）"
+        "- 射出圧縮成形による等価流路拡大（factor / stroke 2 モード、オプション）"
     )
 
     st.markdown("### ❌ モデル化していない現象（重要）")

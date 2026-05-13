@@ -48,7 +48,7 @@ st.caption(
 with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown("### 1. 全体モデル：Hele-Shaw 近似（薄板潤滑流れ）")
     st.markdown(
-        "金型キャビティが**薄板（厚み h ≪ 平面サイズ）**であることを前提に、"
+        "金型キャビティが**薄板（厚み $h \\ll$ 平面サイズ）**であることを前提に、"
         "面内 2D + 厚み方向の解析積分という簡略モデル。"
         "射出成形の薄肉製品では商用 CAE（Moldflow / Moldex3D）の中間面ソルバーも"
         "本質的に同じ Hele-Shaw 系を使う。"
@@ -59,12 +59,26 @@ with st.expander("📐 使用している方程式と適用範囲"):
     )
     st.markdown(
         "- $h(x,y)$: 局所キャビティ厚み [m]\n"
-        "- $\\eta_{\\text{eff}}$: 代表剪断速度・代表温度で評価した粘度 [Pa·s]\n"
+        "- $\\eta_{\\text{eff}}$: コンダクタンス計算用の有効粘度 [Pa·s]\n"
         "- $S$: コンダクタンス（流れやすさ）。$h^3$ で効くので**厚み変化が支配的**\n"
         "- 圧力 $p$ はゲートで一定、流動先端で 0 を境界条件にして解く"
     )
 
-    st.markdown("### 2. 粘度モデル：Cross-WLF")
+    st.markdown("### 2. 充填時間場：Pseudo-Conduction 法")
+    st.markdown(
+        "Hele-Shaw の圧力場を時間ステップで進めず、**楕円型（熱伝導型）方程式に置き換えて 1 発で解く**"
+        "高速化テクニック。$\\tau$ は擬似的な「ゲートからの到達時間場」。"
+    )
+    st.latex(r"-\,\nabla \cdot \left( S\, \nabla \tau \right) = 1 \quad \text{in cavity}")
+    st.markdown(
+        "- ゲートで $\\tau = 0$（ディリクレ境界）、キャビティ壁で no-flux（ノイマン境界）\n"
+        "- 解いた $\\tau$ を最大値で正規化し、絶対時間に換算: "
+        r"$t_{\text{fill}}(x,y) = \dfrac{\tau(x,y)}{\tau_{\max}} \cdot T_{\text{fill}}$"
+        "\n- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$（射出率一定）\n"
+        "- 流動先端の進行は $\\tau$ の等値線として可視化"
+    )
+
+    st.markdown("### 3. 粘度モデル：Cross-WLF")
     st.markdown(
         "剪断速度依存の擬塑性 + 温度依存（WLF型）を組み合わせた業界標準モデル。"
         "`data/materials.json` に PP / PP_T10 / PP_T20 / PP_T30 / ABS / PC / PA66 / PMMA の代表値を保持。"
@@ -75,33 +89,17 @@ with st.expander("📐 使用している方程式と適用範囲"):
     )
     st.latex(r"\eta_0(T) = D_1 \exp\!\left[\,-\,\frac{A_1 (T - T^{*})}{A_2 + (T - T^{*})}\,\right]")
     st.markdown(
-        "- 代表剪断速度は Newtonian plate 近似 "
-        r"$\dot\gamma = 6V/h$ で 1 回だけ評価（ローカル反復なし）"
-        "\n- バルク温度は射出温度と金型温度の重み付き平均 "
-        r"$T_{\text{bulk}} = 0.7\,T_{\text{melt}} + 0.3\,T_{\text{mold}}$"
+        "**温度・剪断速度の評価は壁面冷却モデルで変わる**:\n"
+        "- **なし**: バルク温度 $T_{\\text{bulk}} = 0.7\\,T_{\\text{melt}} + 0.3\\,T_{\\text{mold}}$ と"
+        " 代表剪断速度 $\\dot\\gamma = 6V/h$ で 1 回だけ評価\n"
+        "- **スキン層 / 層別**: 厚み方向に **層別** $T_k$・$\\dot\\gamma_k$ を割り振り、各層で別個に $\\eta_k$"
+        " を評価（後述 §4・§5）"
     )
 
-    st.markdown("### 3. 充填時間場：Pseudo-Conduction 法")
-    st.markdown(
-        "Hele-Shaw の圧力場を時間ステップで進めず、**楕円型（熱伝導型）方程式に置き換えて 1 発で解く**"
-        "高速化テクニック。$\\tau$ は擬似的な「ゲートからの到達時間場」。"
-    )
-    st.latex(
-        r"-\,\nabla \cdot \left( S\, \nabla \tau \right) = 1 "
-        r"\quad \text{in cavity}"
-    )
-    st.markdown(
-        "- ゲートで $\\tau = 0$（ディリクレ境界）、キャビティ壁で no-flux（ノイマン境界）\n"
-        "- 解いた $\\tau$ を最大値で正規化し、絶対時間に換算: "
-        r"$t_{\text{fill}}(x,y) = \dfrac{\tau(x,y)}{\tau_{\max}} \cdot T_{\text{fill}}$"
-        "\n- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$（射出率一定）\n"
-        "- 流動先端の進行は $\\tau$ の等値線として可視化"
-    )
-
-    st.markdown("### 4. スキン層（オプション）：Stefan / Neumann 近似")
+    st.markdown("### 4. 壁面冷却モデル A：スキン層（Stefan / Neumann 1 層近似）")
     st.markdown(
         "金型壁で樹脂が固化して育つ「スキン層」を熱拡散の Stefan 解で表現し、"
-        "流動はコア層 $h_{\\text{core}} = h - 2s$ のみを通る。"
+        "流動はコア層 $h_{\\text{core}} = h - 2s$ のみを通る。**コア温度は melt のまま固定**。"
     )
     st.latex(r"s(t) = c_{\text{skin}} \sqrt{\alpha\,t}")
     st.markdown(
@@ -111,7 +109,87 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- $h_{\\text{core}}$ が下限を切ったセル＝**ショートショット候補**として赤マーク"
     )
 
-    st.markdown("### 5. 射出圧縮成形（ICM、オプション）：等価厚み膨張モデル")
+    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（推奨・極薄向け既定）")
+    st.markdown(
+        "厚み方向を $N$ 層に離散化し、**各層に固有の温度・粘度・剪断速度** を持たせる。"
+        "スキン層モデルが「壁面凍結フロント」しか扱わないのに対し、こちらは**コア内部の温度・粘度プロファイル**"
+        "まで解像する。極薄プレート（$t < 0.5$ mm）で必須。"
+    )
+
+    st.markdown("**5-1. 厚み離散化**")
+    st.latex(r"\zeta_k \in [0, 1],\quad h_k(x,y) = (\zeta_k - \zeta_{k-1}) \cdot h(x,y)")
+    st.markdown(
+        "- **wall_refined**（既定）: Chebyshev-Lobatto 点 "
+        r"$\zeta_k = \tfrac{1}{2}(1 - \cos(\pi k / N))$ で壁近傍を細かく"
+        "\n- **uniform**: 等間隔"
+    )
+
+    st.markdown("**5-2. 層別温度（Neumann 1D 重ね合わせ）**")
+    st.latex(
+        r"T_k(x,y) = T_{\text{mold}} + (T_{\text{melt}} - T_{\text{mold}}) \cdot "
+        r"\left[\,\operatorname{erf}\!\left(\tfrac{z_k}{2\sqrt{\alpha t_{\text{arr}}}}\right)"
+        r"+ \operatorname{erf}\!\left(\tfrac{h - z_k}{2\sqrt{\alpha t_{\text{arr}}}}\right) - 1\,\right]"
+    )
+    st.markdown(
+        "両壁から育つ熱境界層の重ね合わせ。長時間極限の数値発散を避けるため "
+        r"$T_k \ge T_{\text{mold}}$ で clamp。$t_{\text{arr}}(x,y) = (\tau/\tau_{\max}) \cdot T_{\text{fill}}$"
+        " はセル到達時間。"
+    )
+
+    st.markdown("**5-3. 層別剪断速度（Poiseuille 解析微分）**")
+    st.latex(r"\dot\gamma_k(x,y) = \frac{6 V}{h(x,y)} \cdot |2\zeta_k - 1|")
+    st.markdown(
+        "壁で最大、中央でゼロ。中央層は Cross-WLF の $D_1$ 発散を避けるため "
+        "$\\dot\\gamma_{\\text{floor}} = 0.01 \\cdot 6V/h$ でクリップ。"
+    )
+
+    st.markdown("**5-4. 並列流路統合（Poiseuille モーメント積分）**")
+    st.latex(r"S_{\text{total}}(x,y) = \frac{h(x,y)^3}{2} \sum_{k=1}^{N} \frac{m_k}{\eta_k(x,y)}")
+    st.latex(
+        r"m_k = \left[\frac{\zeta^2}{2} - \frac{\zeta^3}{3}\right]_{\zeta_{k-1}}^{\zeta_k},"
+        r"\quad \sum_k m_k = \frac{1}{6}"
+    )
+    st.markdown(
+        r"$\sum m_k = 1/6$ が保存するので $N=1$ では従来 $S = h^3/(12\eta)$ と厳密一致（後方互換）。"
+    )
+
+    st.markdown("**5-5. 固定点反復で $\\tau$ と層フィールドを結合**")
+    st.markdown(
+        r"$\tau \to t_{\text{arr}} \to T_k \to \eta_k \to S_{\text{total}} \to \tau_{\text{new}}$"
+        " を $\\|\\Delta\\tau\\|_2 / \\|\\tau\\|_2 < $ tol まで反復。"
+        "発散時のみ $\\omega = 0.7$ で適応的 damping。**短ショット判定**は最終 iteration の中央層温度ベース:"
+        r" $T_{\text{solid}} = T_{\text{mold}} + f_{\text{solid}} (T_{\text{melt}} - T_{\text{mold}})$。"
+    )
+
+    st.markdown("### 6. 剪断発熱（viscous dissipation, 段階1）")
+    st.markdown(
+        "粘性散逸による発熱を**層別モード内で**取り込む補正。"
+        "極薄プレート + 高速射出で Brinkman 数 $Br \\gg 1$ になりがちな領域で必須。"
+    )
+    st.latex(
+        r"\Delta T_{\text{shear},k}(x,y) = \frac{\eta_k \,\dot\gamma_k^{\,2}}{\rho \, c_p}"
+        r"\cdot \min\!\left(t_{\text{arr}},\; \tau_{\text{thermal}}\right)"
+    )
+    st.latex(r"\tau_{\text{thermal}} = \frac{h^2}{\pi^2 \, \alpha}")
+    st.markdown(
+        "$\\tau_{\\text{thermal}}$ は厚み方向 1D 拡散の最低モード時定数で頭打ち。"
+        "実態は **粘性散逸 vs 1D 壁面冷却** の準定常バランス近似。"
+        " $T_k \\leftarrow T_{k,\\text{Neumann}} + \\Delta T_{\\text{shear},k}$ で Cross-WLF を再評価、"
+        "粘度低下→流動加速→発熱低下の負のフィードバックは fixed-point 反復で自然収束。"
+    )
+
+    st.markdown("**Brinkman 数（剪断発熱の必要性診断、補正 OFF でも常時計算）**")
+    st.latex(
+        r"Br = \frac{\eta \,\dot\gamma^{\,2}\, h^2}{k \, (T_{\text{melt}} - T_{\text{mold}})},"
+        r"\quad k = \alpha \cdot \rho \cdot c_p"
+    )
+    st.markdown(
+        "- 🟢 $Br < 0.5$: 熱伝導支配、剪断発熱無視可\n"
+        "- 🟡 $0.5 \\le Br < 2$: 同程度、補正 ON 推奨\n"
+        "- 🔴 $Br \\ge 2$: 剪断発熱支配、本来は **段階2（1D FDM 陰解法）** が必要"
+    )
+
+    st.markdown("### 7. 射出圧縮成形（ICM、オプション）：等価厚み膨張モデル")
     st.markdown(
         "圧縮位相を時間ステッピングで解かず、**製品本体の厚みを膨張**させた等価モデルとして扱う。"
         "流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
@@ -120,14 +198,13 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "倍率指定の **factor モード**は CLI / solver 引数で後方互換のためだけに残す。"
     )
 
-    st.markdown("#### 5-1. stroke モード（絶対加算、段差保存、UI 既定）")
+    st.markdown("**stroke モード（絶対加算、段差保存、UI 既定）**")
     st.markdown(
         "全 target セルに同じ絶対量（ストローク $s$）を**加算**する。"
         "**金型シム量**が設計指標のとき（＝実機の射出圧縮成形そのもの）に使う。"
         "段差プレート（例: 薄肉部 $t_0=0.35$ mm ／ 厚肉部 $t_0=0.50$ mm）に "
         "$s=0.70$ mm を加算すると薄肉部 $1.05$ mm ／ 厚肉部 $1.20$ mm となり、"
-        "**段差 $0.15$ mm が圧縮位相中も保存される**（factor モードだと "
-        "$0.35 \\to 1.05$ / $0.50 \\to 1.50$ で段差が $0.45$ mm に膨らんで非物理）。"
+        "**段差 $0.15$ mm が圧縮位相中も保存される**（factor モードだと段差が $0.45$ mm に膨らんで非物理）。"
     )
     st.latex(r"h_{\text{eff}}(x,y) = h(x,y) + s \quad \text{on compression cells}")
     st.latex(
@@ -139,34 +216,41 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- $s$: `compression_stroke_mm`（圧縮ストローク [mm]、絶対加算量）\n"
         "- $A_{\\text{cm}}$: 圧縮対象セルの**面積** [mm²]（`compression_area_mm2()`）\n"
         "- $V_{\\text{total}}$: 全キャビティ体積 [mm³]\n"
-        "- uniform プレートで $CF = (h + s)/h$ に揃えると factor モードと厳密に等価"
+        "- $f_{\\text{cmp}}$: 充填占有率（圧縮開始時にキャビティ何%まで充填されているか）"
     )
 
     st.markdown("---")
     st.markdown("### ✅ モデル化している現象")
     st.markdown(
         "- 薄板キャビティ内の 2D 流動（局所剪断と局所抵抗の効果）\n"
-        "- 樹脂物性（密度・熱拡散率・Cross-WLF 粘度パラメータ）\n"
-        "- ゲート位置・ゲート径・ランナー形状・プレート分割（2 層肉厚）\n"
+        "- 樹脂物性（密度・比熱・熱拡散率 → 熱伝導率派生・Cross-WLF 粘度パラメータ）\n"
+        "- ゲート位置・ゲート径・ランナー形状・プレート分割（2 層肉厚）・バランサー（最大5段）\n"
         "- 流動先端の到達順、ウェルドライン、エアトラップ\n"
         "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
         "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
-        "- スキン層形成によるコア閉塞・ショートショット予測（オプション）\n"
+        "- **壁面冷却**: スキン層 1 層モデル または **層別 $N$ 層モデル**（厚み方向温度・粘度プロファイル）\n"
+        "- **剪断発熱（段階1, 層別モード内）**: 粘性散逸による局所温度上昇、Brinkman 数診断\n"
+        "- **ショートショット予測**: スキン層モデルでは $h_{\\text{core}} \\le h_{\\min}$ 判定、"
+        "層別モデルでは中央層温度ベース判定\n"
         "- 射出圧縮成形による等価流路拡大（stroke モード、CLI に factor 後方互換あり、オプション）"
     )
 
     st.markdown("### ❌ モデル化していない現象（重要）")
     st.markdown(
-        "- **コアバルク温度の動的低下と粘度の局所更新**：粘度は単一代表値で固定。"
-        "実際は流動中に温度が落ちて粘度が上がるが、本ツールは捉えない\n"
-        "- **真の 3D 流れ・ジェッティング・噴流・コーナー効果**：あくまで 2D Hele-Shaw\n"
-        "- **保圧（パッキング段階）**：充填までしかモデル化しない\n"
-        "- **収縮・反り・残留応力**：熱固化収縮も結晶化も入っていない\n"
-        "- **局所剪断速度の反復**：粘度評価は代表点 1 回のみ\n"
-        "- **ベント・脱気挙動**：エアトラップ位置は予測するが圧抜けは考慮しない\n"
-        "- **STL/STEP 直接読み込み**：パラメトリック形状（Film gate / Direct gate）"
+        "- **面内 3D 流れ・ジェッティング・噴流・コーナー渦**: あくまで 2D Hele-Shaw（厚み方向は層別化済みだが、"
+        "**面内**の 3D 性は完全 3D FVM / FEM ソルバーでないと出ない。Hele-Shaw 系の根本限界）\n"
+        "- **剪断発熱の自己整合（段階2）**: 段階1 は閉形式の局所近似のみ。"
+        r"$\rho c_p \partial_t T = k \partial_z^2 T + \eta \dot\gamma^2$ を厚み方向 1D FDM で陰解法積分する"
+        "段階2 は別ロードマップ。$Br \\ge 2$ 領域では段階1 がズレる\n"
+        "- **保圧（パッキング段階）**: 充填までしかモデル化しない\n"
+        "- **収縮・反り・残留応力**: 熱固化収縮も結晶化も入っていない\n"
+        "- **層内対流項**: 1D Neumann は純粋拡散のみ（薄板では妥当な近似だが、極厚 $h > 4$ mm では破綻）\n"
+        "- **ベント・脱気挙動**: エアトラップ位置は予測するが圧抜けは考慮しない\n"
+        "- **STL/STEP 直接読み込み**: パラメトリック形状（Film gate / Direct gate）"
         "または PNG/JPG 二値画像のみ\n"
-        "- **非構造格子・中立面メッシュ**：構造格子（正方形セル）固定"
+        "- **非構造格子・中立面メッシュ**: 構造格子（正方形セル）固定\n"
+        "- **絶対圧力場の出力**: 圧力は正規化値（ゲート=1 / フロント=0）のみ。"
+        "実機の必要型締力評価には未対応"
     )
 
     st.markdown("### 用途と適用範囲")
@@ -174,8 +258,9 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "本ツールは**初期スクリーニング・概念検証**用途。商用 CAE "
         "（Moldflow / Moldex3D 等）の置き換えではない。\n\n"
         "- ◯ 向く：ゲート位置候補の比較、ランナー形状の方向性決定、"
-        "プレート薄肉化時のショートショット予兆、フローバランサー（▽肉盗み）の効きの感覚的把握\n"
-        "- × 向かない：寸法精度予測、保圧設計、収縮反り、最終肉厚分布の精密計算"
+        "**極薄プレート（$t < 0.5$ mm）の壁面冷却・剪断発熱の効きの可視化**、"
+        "プレート薄肉化時のショートショット予兆、フローバランサー（▽肉盗み）の段数効果\n"
+        "- × 向かない：寸法精度予測、保圧設計、収縮反り、面内コーナー流動詳細、最終肉厚分布の精密計算"
     )
 
 

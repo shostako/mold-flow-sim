@@ -487,11 +487,11 @@ with st.sidebar:
         help="ソディック等の成形機取説の射出率に対応。",
     )
 
-    st.header("ウォール冷却モデル")
+    st.header("壁面冷却モデル")
     wall_model = st.radio(
         "壁面冷却の表現",
         options=("none", "skin", "multilayer"),
-        index=1,
+        index=2,
         format_func=lambda m: {
             "none": "なし（等温・代表粘度のみ）",
             "skin": "スキン層 (1層 + Stefan/Neumann)",
@@ -502,20 +502,25 @@ with st.sidebar:
             "スキン層: 壁面で固化するスキン層を s(t)=c_skin·√(αt) で取り込み、"
             "コア層 h_core=h-2s だけが流れる。短ショットも検出。\n"
             "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
-            "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。"
+            "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
+            "極薄プレート (t<0.5mm) では層別を推奨。"
         ),
     )
 
     # default container (so downstream `solver = HeleShawSolver(...)` /
     # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
+    # 極薄プレート (t0.35〜0.50 想定) 向けに既定値を調整:
+    #   モード: 層別 (index=2)
+    #   層数 N: 7 (壁勾配が急なので N=5 から増量)
+    #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
     skin_on = wall_model == "skin"
     c_skin = 0.0
     skin_max_iter = 5
     skin_tol = 1e-3
     multilayer_on = wall_model == "multilayer"
-    num_layers = 5
+    num_layers = 7
     layer_distribution = "wall_refined"
-    multilayer_max_iter = 8
+    multilayer_max_iter = 12
     multilayer_tol = 1e-3
     solid_fraction = 0.3
 
@@ -547,9 +552,12 @@ with st.sidebar:
         num_layers = st.slider(
             "層数 N",
             3,
+            9,
             7,
-            5,
-            help="厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。",
+            help=(
+                "厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。"
+                "極薄プレートでは壁勾配が急なので N=7 を推奨。"
+            ),
         )
         layer_distribution = st.radio(
             "層分布",
@@ -568,9 +576,11 @@ with st.sidebar:
         multilayer_max_iter = st.slider(
             "fixed-point 反復上限",
             1,
-            15,
-            8,
-            help="τ ↔ T_k ↔ η_k 結合の反復回数。",
+            20,
+            12,
+            help=(
+                "τ ↔ T_k ↔ η_k 結合の反復回数。極薄プレートでは収束が遅くなりがちなので 12 を推奨。"
+            ),
         )
         multilayer_tol_log10 = st.slider(
             "収束判定 log10(tol)",

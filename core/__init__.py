@@ -10,6 +10,7 @@ from .geometry import (
     geometry_from_image,
 )
 from .materials import MaterialDB, cross_wlf_viscosity
+from .multilayer_solver import MultilayerHeleShawSolver
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
     export_frames,
@@ -36,6 +37,7 @@ __all__ = [
     "build_direct_gate_geometry",
     "geometry_from_image",
     "HeleShawSolver",
+    "MultilayerHeleShawSolver",
     "FlowResult",
     "render_fill_animation",
     "render_pressure_map",

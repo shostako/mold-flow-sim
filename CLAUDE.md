@@ -150,11 +150,27 @@ short_shot_mask = cavity & (T_k_mid <= T_solid)
 - `solidification_temperature_fraction = 0.3` 既定 (PP 想定の粗い目安、Tg 近傍)
 - 材料 DB に固化温度フィールドは追加せず、既存 `T_melt_recommended` / `T_mold_recommended` から派生
 
+**剪断発熱 (viscous dissipation) — 段階1**:
+
+`shear_heating_enabled=True` で Neumann 温度に粘性散逸補正を加算する閉形式モデル：
+
+```
+ΔT_shear,k(x,y) = (η_k · γ̇_k²) / (ρ · cp) · min(t_arr(x,y), τ_thermal(x,y))
+τ_thermal(x,y) = h_total(x,y)² / (π² · α)         ← 厚み方向 1D 熱拡散の最低モード時定数
+T_k_corrected = T_Neumann,k + ΔT_shear,k         ← 局所温度上昇
+```
+
+fixed-point ループの**各反復で 1 回**評価する：前イテレーションの `η_k` で発熱密度を計算 → ΔT_shear,k を Neumann 温度に加算 → 新しい T_k で Cross-WLF を再評価 → η_k 更新 →（負のフィードバック: T↑ → η↓ → 発熱↓）→ 全体が同じ fixed-point に収束。物理的には保証された定常解ではないが、**Br ≈ 1 までの領域では妥当**な近似。
+
+Brinkman 数 `Br = η·γ̇²·h² / (k·ΔT_ref)` (`ΔT_ref = T_melt − T_mold`) は `shear_heating_enabled` の値に関わらず**毎回計算してメタデータに出す**。`Br < 0.5` で発熱無視可、`Br > 2` で発熱支配 → 段階2 (1D FDM 陰解法) が本来必要なシグナル。
+
+熱伝導率は材料 DB に保持せず、`k = α · ρ · cp` で派生する (PP で約 0.16 W/(m·K))。新規フィールドは `specific_heat_J_kgK` のみ追加 (8 樹脂分)。
+
 **出力**:
 
-- `MultilayerFlowResult(FlowResult)` (継承): 既存フィールドに加えて `layer_thickness_mm` / `layer_temperature_K` / `layer_viscosity_Pa_s_field` / `layer_shear_rate_s_inv` (shape `(N, ny, nx)`)。`thermal_coupling=False` では layer_temperature_K 以下 3 つは None (thickness のみ populated)。
-- `short_shot_mask` (継承元 FlowResult のフィールド) が中央層温度ベースで populated。
-- `metadata` に `solver_kind="multilayer"` / `num_layers` / `layer_distribution` / `layer_zeta` / `layer_moments` / `multilayer_iterations` / `multilayer_converged` / `T_fill_inflation` / `damping_factor` / `damping_events` / `T_solid_K` / `short_shot_cells` / `short_shot_fraction`。
+- `MultilayerFlowResult(FlowResult)` (継承): 既存フィールドに加えて `layer_thickness_mm` / `layer_temperature_K` / `layer_viscosity_Pa_s_field` / `layer_shear_rate_s_inv` / `layer_shear_heating_dT_K` / `layer_brinkman_number` (shape `(N, ny, nx)`)。`thermal_coupling=False` では `layer_temperature_K` 以下すべて None (thickness のみ populated)。
+- `short_shot_mask` (継承元 FlowResult のフィールド) が中央層温度ベースで populated。剪断発熱補正後の温度を反映。
+- `metadata` に `solver_kind="multilayer"` / `num_layers` / `layer_distribution` / `layer_zeta` / `layer_moments` / `multilayer_iterations` / `multilayer_converged` / `T_fill_inflation` / `damping_factor` / `damping_events` / `T_solid_K` / `short_shot_cells` / `short_shot_fraction` / `shear_heating_enabled` / `shear_heating_max_K` / `shear_heating_mean_K` / `brinkman_number_max` / `brinkman_number_mean` / `specific_heat_J_kgK` / `thermal_conductivity_W_mK`。
 
 **可視化** (`core/visualizer.py`):
 
@@ -169,6 +185,7 @@ short_shot_mask = cavity & (T_k_mid <= T_solid)
 - **面内コーナー効果**: 角部の渦、二次流、流動偏向。Hele-Shaw 近似では原理的に出ない。
 - **ジェッティング**: 高速ゲートで樹脂が固相のまま射出される現象。3D 流れ前提。
 - **コア対流項**: 厚み方向の対流による熱輸送。1D Neumann は純粋拡散のみ。
+- **剪断発熱の段階1近似**: `min(t_arr, τ_thermal)` で頭打ちにする閉形式は **Br > 2 で系統的にズレる** (発熱と熱伝導のバランスをエネルギー的に保証していない)。Br ≫ 1 領域の精密予測には**段階2 (層別 1D FDM 陰解法)** が必要。
 - これらは **完全 3D FVM / FEM ソルバー (別ロードマップ)** が必要。
 
 ### `build_film_gate_geometry` の形状仕様
@@ -280,6 +297,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - 結晶化・収縮反り
 - パッキング段階の保圧
 - 中立面メッシュ・非構造格子・STL/STEP 入力
+- **剪断発熱の自己整合 (段階2)**: 段階1 (`shear_heating_enabled=True`) は閉形式の局所近似のみ。エネルギー方程式 `ρcp·∂T/∂t = k·∂²T/∂z² + η·γ̇²` を厚み方向 1D FDM で陰解法積分する段階2 は別 PR で対応予定
 
 スキン層モデル (`HeleShawSolver` の `skin_layer_enabled=True`) と層別ソルバー (`MultilayerHeleShawSolver`) は **厚み方向の 3D 性** (壁面凍結、層別温度、層別粘度、局所剪断速度の層別評価) を取り込んでいるので、これらは「モデル化していない」リストから外れる。一方、**面内の 3D 性**（角部の二次流、ジェッティング、コーナー渦）は依然として捕捉できない — Hele-Shaw 系の根本的限界。
 
@@ -287,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 10 ファイル、合計 **166 テスト** (165 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 10 ファイル、合計 **177 テスト** (176 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -295,8 +313,8 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
-- `test_multilayer_solver.py` — 37件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作)
-- `test_multilayer_thermal.py` — 11件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証)
+- `test_multilayer_solver.py` — 42件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認)
+- `test_multilayer_thermal.py` — 22件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証) / **剪断発熱段階1** (shape & 非負、γ̇=0 で ΔT=0、γ̇² スケーリング、t≫τ_thermal で頭打ち、極薄 PP の桁感、shape 不整合検出) / **Brinkman 数** (shape & 非負、γ̇=0 でゼロ、極薄高速で Br>1、k と ΔT の非正検出)
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
 - `test_visualizer_layer.py` — 13件 (1 skip): `render_layer_map` 4 field smoke / 不正 field / 範囲外 layer_idx / thermal_off で field 別動作 / `render_layer_grid` / `render_short_shot_map` (flagged あり/なし、後者は skip 想定可) / `_scalar_layer_field` helper / ζ レンジが metadata に乗ること
 
@@ -355,6 +373,7 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - **壁面冷却モデル**: UI ヘッダー「壁面冷却モデル」のラジオで `なし` / `スキン層` / `層別` の 3 択。**排他選択**により skin と multilayer の同時 ON は構造的に不可能。極薄プレート (t<0.5mm 想定) 向けに UI 既定は **層別 / N=7 / wall_refined / max_iter=12**。
   - **なし**: 既存 `HeleShawSolver`、温度結合なし。
   - **スキン層**: `HeleShawSolver(skin_layer_enabled=True, skin_growth_constant=c_skin, ...)`。Stefan/Neumann 1 層モデル。
-  - **層別**: `MultilayerHeleShawSolver(num_layers=N, layer_distribution="wall_refined", thermal_coupling=True, ...)`。Cross-WLF 結合 N 層モデル。スライダーで `num_layers` (3..9、既定 7) / `layer_distribution` (`wall_refined` 既定 / `uniform`) / `max_iterations` (1..20、既定 12) / `convergence_tol` / `solidification_temperature_fraction` を出す。
-  - CLI 側は `_solve_and_export(multilayer=True, num_layers=..., layer_distribution=..., ...)` で明示。`skin_layer=True` と `multilayer=True` の同時指定は `ValueError`。`FilmGate_PP_multilayer_5L` が層別の参照ケース。
-  - 結果ペインに「層別プロファイル (Multi-layer N=...)」expander が現れ、温度グリッド / 粘度グリッド / 短ショットマップを表示、各 PNG ダウンロード + ZIP exports に同梱。
+  - **層別**: `MultilayerHeleShawSolver(num_layers=N, layer_distribution="wall_refined", thermal_coupling=True, ...)`。Cross-WLF 結合 N 層モデル。スライダーで `num_layers` (3..9、既定 7) / `layer_distribution` (`wall_refined` 既定 / `uniform`) / `max_iterations` (1..20、既定 12) / `convergence_tol` / `solidification_temperature_fraction` を出す。**剪断発熱補正 (段階1)** はチェックボックス `shear_heating_enabled` (極薄向け既定 ON)。
+  - CLI 側は `_solve_and_export(multilayer=True, num_layers=..., layer_distribution=..., shear_heating_enabled=..., ...)` で明示。`skin_layer=True` と `multilayer=True` の同時指定は `ValueError`。`FilmGate_PP_multilayer_5L` が層別の参照ケース、`FilmGate_PP_multilayer_5L_shear` が剪断発熱 ON の比較ケース (高 V、N=7、極薄)。
+  - 結果ペインに「層別プロファイル (Multi-layer N=...)」expander が現れ、温度グリッド / 粘度グリッド / 短ショットマップを表示、各 PNG ダウンロード + ZIP exports に同梱。**剪断発熱メタデータ** (ΔT_max / ΔT_mean / Brinkman 数 max & mean、信号灯 🟢/🟡/🔴) は expander 直下のキャプションに出る。
+- **剪断発熱補正 (viscous dissipation, 段階1)**: 層別モード専用。`ΔT_shear,k = (η_k·γ̇_k²)·min(t_arr, τ_thermal)/(ρ·cp)`、`τ_thermal = h²/(π²·α)`。fixed-point ループで前イテレーションの `η_k` から ΔT_shear を計算 → Neumann 温度に加算 → Cross-WLF で η 再評価。負のフィードバック (T↑ → η↓ → 発熱↓) なので発散しにくい。**Brinkman 数 `Br = η·γ̇²·h²/(k·ΔT_ref)` は補正 OFF でも常に計算**してメタデータに出すので、必要性を事前判定できる。Br>2 は段階2 (1D FDM 陰解法) が本来必要なシグナル。材料 DB 拡張: `specific_heat_J_kgK` 追加 (8 樹脂)、熱伝導率は `k = α·ρ·cp` で派生。

@@ -47,7 +47,12 @@ import numpy as np
 
 from .geometry import Geometry
 from .materials import Material, cross_wlf_viscosity
-from .multilayer_thermal import neumann_layer_temperatures, poiseuille_shear_rates
+from .multilayer_thermal import (
+    brinkman_number,
+    neumann_layer_temperatures,
+    poiseuille_shear_rates,
+    shear_heating_temperature_rise,
+)
 from .solver import FlowResult, HeleShawSolver
 
 
@@ -68,6 +73,13 @@ class MultilayerFlowResult(FlowResult):
     layer_temperature_K: np.ndarray | None = None  # (N, ny, nx) [K]
     layer_viscosity_Pa_s_field: np.ndarray | None = None  # (N, ny, nx) [Pa·s]
     layer_shear_rate_s_inv: np.ndarray | None = None  # (N, ny, nx) [1/s]
+    # Shear-heating (stage 1) diagnostic fields. Always populated when
+    # ``thermal_coupling=True`` so visualisers / callers can decide
+    # whether the correction is needed even when it was *off* during
+    # the solve. ``None`` when the solver was run without thermal
+    # coupling at all.
+    layer_shear_heating_dT_K: np.ndarray | None = None  # (N, ny, nx) [K]
+    layer_brinkman_number: np.ndarray | None = None  # (N, ny, nx) [-]
 
 
 def _uniform_layer_zeta(num_layers: int) -> np.ndarray:
@@ -253,6 +265,15 @@ class MultilayerHeleShawSolver:
     # are out of scope until ``data/materials.json`` grows a solidus field.
     solidification_temperature_fraction: float = 0.3
 
+    # ----- shear heating (viscous dissipation), stage 1 -----
+    # When ON, the Neumann temperature field is corrected by
+    # ΔT_k = (η_k·γ̇_k²)·min(t_arr, τ_thermal) / (ρ·cp). This raises
+    # local temperatures, drops the Cross-WLF viscosity, and feeds back
+    # into the fixed-point loop. Off by default for backwards
+    # compatibility with existing tests / cases; recommended ON for
+    # ultra-thin plates (t < 0.5 mm) where Br ≫ 1.
+    shear_heating_enabled: bool = False
+
     # Internal helper, populated in __post_init__.
     _base: HeleShawSolver = field(init=False, repr=False)
 
@@ -368,6 +389,8 @@ class MultilayerHeleShawSolver:
         layer_T_K: np.ndarray | None = None
         layer_eta_Pa_s: np.ndarray | None = None
         layer_gamma_dot: np.ndarray | None = None
+        layer_shear_dT_K: np.ndarray | None = None
+        layer_Brinkman: np.ndarray | None = None
         short_shot_mask: np.ndarray | None = None
         iters_done = 0
         converged = False
@@ -416,6 +439,38 @@ class MultilayerHeleShawSolver:
                     T_mold_K=float(self.mold_temperature_K),
                     alpha_m2_s=alpha,
                 )
+
+                # Shear-heating correction (stage 1, optional). Uses the
+                # *previous* iteration's per-layer viscosity to evaluate
+                # the volumetric heat source — this lags by one iteration
+                # but converges along with the rest of the fixed-point
+                # since η drops as T rises.
+                if self.shear_heating_enabled:
+                    if layer_eta_Pa_s is None:
+                        # First iteration: bootstrap with the bulk
+                        # representative viscosity, broadcast to all
+                        # layers and cells.
+                        eta_prev_field = np.full(
+                            (self.num_layers,) + h_open.shape,
+                            float(eta_baseline),
+                            dtype=float,
+                        )
+                    else:
+                        eta_prev_field = layer_eta_Pa_s
+                    layer_shear_dT_K = shear_heating_temperature_rise(
+                        eta_per_layer_Pa_s=eta_prev_field,
+                        gamma_dot_per_layer_s_inv=layer_gamma_dot,
+                        t_arr_s=t_arr,
+                        h_total_mm=h_open,
+                        density_kg_m3=float(self.material.density_melt_kgm3),
+                        specific_heat_J_kgK=float(self.material.specific_heat_J_kgK),
+                        alpha_m2_s=alpha,
+                    )
+                    # Apply only inside the cavity (outside cells have
+                    # T_bulk placeholders that should not be perturbed).
+                    layer_shear_dT_K = np.where(cavity_mask[None, :, :], layer_shear_dT_K, 0.0)
+                    layer_T_K = layer_T_K + layer_shear_dT_K
+
                 # Cells outside the cavity carry no meaningful temperature.
                 # Use the bulk so cross_wlf is well-defined (the conductance
                 # masks them out anyway).
@@ -480,6 +535,22 @@ class MultilayerHeleShawSolver:
                 T_mid = layer_T_K[k_mid]
                 short_shot_mask = cavity_mask & (T_mid <= T_solid_K)
 
+            # Diagnostic Brinkman number from the converged state. Always
+            # computed (even when shear_heating_enabled is False) so the
+            # user can decide whether the correction is needed for their
+            # geometry / injection conditions.
+            if layer_eta_Pa_s is not None and layer_gamma_dot is not None:
+                delta_T_ref = max(
+                    float(self.melt_temperature_K) - float(self.mold_temperature_K), 1.0
+                )
+                layer_Brinkman = brinkman_number(
+                    eta_per_layer_Pa_s=layer_eta_Pa_s,
+                    gamma_dot_per_layer_s_inv=layer_gamma_dot,
+                    h_total_mm=h_open,
+                    thermal_conductivity_W_mK=self.material.thermal_conductivity_W_mK,
+                    delta_T_K=delta_T_ref,
+                )
+
         # Standard post-processing (mirrors HeleShawSolver.solve).
         msk = ~np.isnan(tau)
         fill_time_s = np.full_like(tau, np.nan)
@@ -523,7 +594,46 @@ class MultilayerHeleShawSolver:
             "damping_events": int(damping_events),
             "T_solid_K": float(T_solid_K),
             "solidification_temperature_fraction": float(self.solidification_temperature_fraction),
+            # shear-heating (stage 1) diagnostics — always populated when
+            # thermal_coupling is True so users can judge whether the
+            # correction is needed; only meaningful when the layer fields
+            # exist (thermal_coupling=False leaves them None).
+            "shear_heating_enabled": bool(self.shear_heating_enabled),
+            "specific_heat_J_kgK": float(self.material.specific_heat_J_kgK),
+            "thermal_conductivity_W_mK": float(self.material.thermal_conductivity_W_mK),
         }
+        if layer_shear_dT_K is not None:
+            # Only the cavity cells carry meaningful values (outside cells
+            # were zeroed during the loop).
+            cavity_dT = layer_shear_dT_K[:, cavity_mask] if cavity_mask.any() else layer_shear_dT_K
+            metadata.update(
+                {
+                    "shear_heating_max_K": float(np.max(cavity_dT)) if cavity_dT.size else 0.0,
+                    "shear_heating_mean_K": float(np.mean(cavity_dT)) if cavity_dT.size else 0.0,
+                }
+            )
+        else:
+            metadata.update(
+                {
+                    "shear_heating_max_K": 0.0,
+                    "shear_heating_mean_K": 0.0,
+                }
+            )
+        if layer_Brinkman is not None:
+            cavity_Br = layer_Brinkman[:, cavity_mask] if cavity_mask.any() else layer_Brinkman
+            metadata.update(
+                {
+                    "brinkman_number_max": float(np.max(cavity_Br)) if cavity_Br.size else 0.0,
+                    "brinkman_number_mean": float(np.mean(cavity_Br)) if cavity_Br.size else 0.0,
+                }
+            )
+        else:
+            metadata.update(
+                {
+                    "brinkman_number_max": 0.0,
+                    "brinkman_number_mean": 0.0,
+                }
+            )
         if short_shot_mask is not None:
             cells_total = max(int(cavity_mask.sum()), 1)
             short_count = int(short_shot_mask.sum())
@@ -556,4 +666,6 @@ class MultilayerHeleShawSolver:
             layer_temperature_K=layer_T_K,
             layer_viscosity_Pa_s_field=layer_eta_Pa_s,
             layer_shear_rate_s_inv=layer_gamma_dot,
+            layer_shear_heating_dT_K=layer_shear_dT_K,
+            layer_brinkman_number=layer_Brinkman,
         )

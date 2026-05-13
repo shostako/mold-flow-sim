@@ -20,6 +20,7 @@ from core import (
     FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
+    MultilayerFlowResult,
     MultilayerHeleShawSolver,
     build_film_gate_geometry,
 )
@@ -186,6 +187,7 @@ def test_multilayer_solver_rejects_unsupported_distribution() -> None:
         material=db["PP"],
         num_layers=5,
         layer_distribution="wall_refined",
+        thermal_coupling=False,
         **_solver_kwargs(),
     )
     with pytest.raises(ValueError, match="wall_refined"):
@@ -193,14 +195,21 @@ def test_multilayer_solver_rejects_unsupported_distribution() -> None:
 
 
 def test_n1_matches_legacy_tau() -> None:
-    """The anchor test: ``num_layers=1`` must reproduce the existing
-    ``HeleShawSolver`` τ field byte-for-byte (modulo tiny FP noise).
+    """The anchor test: ``num_layers=1`` + ``thermal_coupling=False`` must
+    reproduce the existing ``HeleShawSolver`` τ field byte-for-byte
+    (modulo tiny FP noise). With thermal coupling ON the layer-centre
+    temperature drops below the bulk and the τ field deliberately
+    diverges — that case is covered separately.
     """
     g = build_film_gate_geometry(_default_cfg())
     db = MaterialDB()
     r_legacy = HeleShawSolver(geometry=g, material=db["PP"], **_solver_kwargs()).solve(num_frames=4)
     r_multi = MultilayerHeleShawSolver(
-        geometry=g, material=db["PP"], num_layers=1, **_solver_kwargs()
+        geometry=g,
+        material=db["PP"],
+        num_layers=1,
+        thermal_coupling=False,
+        **_solver_kwargs(),
     ).solve(num_frames=4)
     np.testing.assert_allclose(
         np.nan_to_num(r_legacy.tau, nan=0.0),
@@ -215,13 +224,17 @@ def test_n1_matches_legacy_tau() -> None:
 
 
 def test_n1_matches_legacy_total_fill_time() -> None:
-    """A consequence of the τ match: the absolute fill time is identical
-    too (modulo FP noise)."""
+    """A consequence of the τ match: with ``thermal_coupling=False`` the
+    absolute fill time is identical too (modulo FP noise)."""
     g = build_film_gate_geometry(_default_cfg())
     db = MaterialDB()
     r_legacy = HeleShawSolver(geometry=g, material=db["PP"], **_solver_kwargs()).solve(num_frames=4)
     r_multi = MultilayerHeleShawSolver(
-        geometry=g, material=db["PP"], num_layers=1, **_solver_kwargs()
+        geometry=g,
+        material=db["PP"],
+        num_layers=1,
+        thermal_coupling=False,
+        **_solver_kwargs(),
     ).solve(num_frames=4)
     np.testing.assert_allclose(
         r_multi.total_fill_time_s,
@@ -267,7 +280,8 @@ def test_metadata_carries_layer_fields() -> None:
 
 
 def test_smoke_n5_runs_and_produces_finite_tau() -> None:
-    """End-to-end smoke for the default ``N=5`` configuration."""
+    """End-to-end smoke for the default ``N=5`` configuration (thermal
+    coupling default ON)."""
     g = build_film_gate_geometry(_default_cfg())
     db = MaterialDB()
     r = MultilayerHeleShawSolver(
@@ -278,3 +292,175 @@ def test_smoke_n5_runs_and_produces_finite_tau() -> None:
     assert np.all(np.isfinite(r.tau[msk]))
     assert r.metadata["tau_max"] > 0.0
     assert r.total_fill_time_s > 0.0
+
+
+# --------------------------------------------------------------------------
+# PR-B: thermal coupling
+# --------------------------------------------------------------------------
+
+
+def test_solve_returns_multilayer_flow_result() -> None:
+    """``solve()`` returns a :class:`MultilayerFlowResult` (subclass of
+    ``FlowResult``) so visualisers that expect either type work."""
+    from core import FlowResult
+
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=3, **_solver_kwargs()
+    ).solve(num_frames=4)
+    assert isinstance(r, MultilayerFlowResult)
+    assert isinstance(r, FlowResult)  # backwards-compatible
+
+
+def test_layer_fields_populated_when_thermal_on() -> None:
+    """With thermal coupling enabled the layer-resolved fields are
+    populated with the expected shapes."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    N = 5
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=N,
+        thermal_coupling=True,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+
+    shape = (N, *g.thickness_mm.shape)
+    assert r.layer_thickness_mm is not None and r.layer_thickness_mm.shape == shape
+    assert r.layer_temperature_K is not None and r.layer_temperature_K.shape == shape
+    assert r.layer_viscosity_Pa_s_field is not None and r.layer_viscosity_Pa_s_field.shape == shape
+    assert r.layer_shear_rate_s_inv is not None and r.layer_shear_rate_s_inv.shape == shape
+
+    # Sanity bounds inside the cavity.
+    cm = g.mask[None, :, :]
+    T_in = r.layer_temperature_K[np.broadcast_to(cm, shape)]
+    assert np.all(T_in >= 313.15 - 1e-6), "temperatures clamp to mold"
+    assert np.all(T_in <= 503.15 + 1e-6), "temperatures bounded by melt"
+
+
+def test_layer_temperature_none_when_thermal_off() -> None:
+    """With ``thermal_coupling=False`` the per-layer T/η/γ̇ arrays are
+    ``None`` (the layer-thickness field is still emitted because it is
+    purely geometric)."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=3,
+        thermal_coupling=False,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.layer_thickness_mm is not None  # geometry only
+    assert r.layer_temperature_K is None
+    assert r.layer_viscosity_Pa_s_field is None
+    assert r.layer_shear_rate_s_inv is None
+    assert r.metadata["thermal_coupling"] is False
+    assert r.metadata["multilayer_iterations"] == 0
+
+
+def test_thermal_coupling_changes_tau_max() -> None:
+    """The thermal coupling fundamentally changes the per-cell viscosity
+    profile (wall layers vs centre), so τ_max must differ from the
+    uncoupled baseline. Whether it goes up or down depends on the
+    balance of wall-cooling (η ↑) vs centre-high-temperature low-shear
+    (η ↓ via ``η₀`` evaluation at the melt) — assert *some* deviation,
+    not its sign.
+    """
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    kwargs = _solver_kwargs()
+
+    r_off = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, thermal_coupling=False, **kwargs
+    ).solve(num_frames=4)
+    r_on = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, thermal_coupling=True, **kwargs
+    ).solve(num_frames=4)
+    rel = abs(r_on.metadata["tau_max"] - r_off.metadata["tau_max"]) / r_off.metadata["tau_max"]
+    assert rel > 1e-3, "thermal coupling must non-trivially change τ_max"
+
+
+def test_thermal_coupling_converges() -> None:
+    """The default ``max_iterations=8`` is plenty for a moderate plate;
+    ``multilayer_converged`` must be True."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        thermal_coupling=True,
+        max_iterations=8,
+        convergence_tol=1e-3,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    assert r.metadata["multilayer_converged"] is True
+    assert 1 <= r.metadata["multilayer_iterations"] <= 8
+
+
+def test_tighter_tol_does_not_take_fewer_iters() -> None:
+    """A stricter ``convergence_tol`` cannot reduce the iteration count
+    (monotone — looser tol may stop earlier)."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    kwargs = _solver_kwargs()
+    loose = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        thermal_coupling=True,
+        max_iterations=15,
+        convergence_tol=1e-1,
+        **kwargs,
+    ).solve(num_frames=4)
+    tight = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=5,
+        thermal_coupling=True,
+        max_iterations=15,
+        convergence_tol=1e-5,
+        **kwargs,
+    ).solve(num_frames=4)
+    assert tight.metadata["multilayer_iterations"] >= loose.metadata["multilayer_iterations"]
+
+
+def test_thermal_metadata_carries_iteration_state() -> None:
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=5, **_solver_kwargs()
+    ).solve(num_frames=4)
+    md = r.metadata
+    assert md["thermal_coupling"] is True
+    assert md["multilayer_max_iterations"] == 8
+    assert md["multilayer_convergence_tol"] == 1e-3
+    assert md["thermal_diffusivity_m2_s"] > 0
+    assert md["T_fill_baseline_s"] > 0
+    # T_fill_inflation may sit above or below 1.0 depending on which
+    # layer effect (wall cooling vs centre-high-T zero-shear) dominates;
+    # only require it to be positive and finite.
+    assert md["T_fill_inflation"] > 0 and np.isfinite(md["T_fill_inflation"])
+
+
+def test_layer_temperature_near_wall_lower_than_centre() -> None:
+    """The Neumann profile cools the wall-side layers faster than the
+    centre — the bookkeeping must surface this physical asymmetry."""
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    N = 5
+    r = MultilayerHeleShawSolver(
+        geometry=g, material=db["PP"], num_layers=N, **_solver_kwargs()
+    ).solve(num_frames=4)
+    T = r.layer_temperature_K
+    assert T is not None
+    # Average over cavity cells per layer.
+    cavity = g.mask
+    layer_means = np.array([T[k][cavity].mean() for k in range(N)])
+    centre_idx = N // 2  # 2 for N=5
+    # Both wall layers (k=0 and k=N-1) must be cooler than the centre.
+    assert layer_means[0] < layer_means[centre_idx]
+    assert layer_means[-1] < layer_means[centre_idx]

@@ -26,20 +26,24 @@ Streamlit Community Cloud にホスト（無料枠）。ブラウザだけで触
 - 充填先端アニメーション（GIF）、相対圧力マップ、ウェルドライン候補、エアトラップ候補
 - パラメータ：樹脂（PP / PP_T10 / PP_T20 / PP_T30 / ABS / PC / PA66 / PMMA）、樹脂温度、金型温度、射出速度、射出体積流量
 - 形状入力：合成プレート + ランナー + スプルー、または閾値処理した PNG/JPG 画像
-- 簡易圧縮成形 (ICM) 等価モデル
+- 射出圧縮成形 (ICM) 等価モデル — factor / stroke の 2 モード（段差プレートでの段差保存に対応）
+- **壁面冷却モデル（3 択）**:
+  - スキン層 1 層モデル — Stefan/Neumann で壁凍結フロント `s(t) = c_skin·√(αt)` を取り込み、コア層 `h_core = h - 2s` だけが流れる。ショートショット予測あり
+  - **層別 N 層モデル** — 厚み方向を `N` 層に離散化し、Neumann 1D 温度プロファイル + 層別 Cross-WLF 粘度を fixed-point で結合。壁近傍細密 (Chebyshev-Lobatto) と等間隔の 2 分布、中央層温度ベースの短ショット判定、適応的 damping を装備
 
 ## 何ができないか（既知の制限）
 
 | 項目 | 状態 |
 |------|------|
-| 過渡熱結合（壁面冷却・固化層） | ❌ 未実装 |
-| 真の 3D 流れ・ジェッティング | ❌ 未実装 |
+| 過渡熱結合（壁面冷却・固化層） | ✅ スキン層 / 層別 N 層モデルで実装 |
+| 厚み方向の温度・粘度プロファイル | ✅ 層別 N 層モデルで実装 |
+| **面内 3D 流れ・ジェッティング・コーナー渦** | ❌ 未実装 (Hele-Shaw 系の根本限界、完全 3D FVM が必要) |
 | 結晶化・収縮反り | ❌ 未実装 |
 | パッキング段階の保圧 | ❌ 未実装 |
 | 局所剪断速度反復 | ❌ 単一代表値のみ |
 | STL / STEP 直接読込 | ❌ 画像のみ |
 | 中立面メッシュ（非構造格子） | ❌ 構造格子のみ |
-| 解析解検証テスト | ⚠ 整備中 |
+| 解析解検証テスト | ✅ 1D 解析解との比較、Neumann 境界条件、N=1 等価性 |
 
 ## ロードマップ（射程：初期スクリーニングツール）
 
@@ -112,6 +116,21 @@ T* = D₂ + D₃ P
 ```
 
 材料パラメータは `data/materials.json`（generic 値）。
+
+### 層別 Hele-Shaw ソルバー（オプション）
+
+厚み方向を `N` 層に離散化し、各層に **温度・粘度・剪断速度** を持たせる。Neumann 1D の重ね合わせで層別温度を評価し、Cross-WLF で層別粘度に変換、Poiseuille モーメント積分でコンダクタンスを統合：
+
+```
+T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(αt))) - 1]
+γ̇_k(x,y) = (6V/h) · |2ζ_k - 1|                               # Poiseuille 解析微分
+η_k(x,y) = cross_wlf_viscosity(material, T_k, γ̇_k, 0)
+S_total(x,y) = (h³/2) · Σ_k m_k / η_k                         # Σ m_k = 1/6
+```
+
+`τ ↔ T_k ↔ η_k ↔ S_total` を fixed-point で結合、`τ_max` 比で `T_fill` をスケール。中央層温度が固化しきい値を切ったセルを short shot にマーク。`MultilayerHeleShawSolver(num_layers=5, layer_distribution="wall_refined", thermal_coupling=True)` から呼ぶ。`num_layers=1` + `thermal_coupling=False` で既存 `HeleShawSolver` と数値同一 (テスト担保)。
+
+詳細・限界 (面内コーナー効果は依然として捕捉不可) は `CLAUDE.md` 参照。
 
 ## ライセンス
 

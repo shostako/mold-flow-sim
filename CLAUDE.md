@@ -34,7 +34,7 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 `run_demo.py` のケース定義は3系統：
 - `DEMO_CASES`（8件）— `build_demo_geometry` 系（プレート+ランナー+スプルー合成形状）。`PP_skin_layer` がスキン層モデル ON のサンプル。CLI 専用（UI からは選択不可）
-- `FILM_GATE_CASES`（4件）— `build_film_gate_geometry` 系（パラメトリックフィルムゲート、バランサー含む）
+- `FILM_GATE_CASES`（6件）— `build_film_gate_geometry` 系（パラメトリックフィルムゲート、バランサー含む）。`FilmGate_PP_stepped_stroke` は段差プレート + stroke 圧縮の参照ケース。`FilmGate_PP_multilayer_5L` は同じ段差プレートを **層別ソルバー (N=5 wall_refined)** で解いた対比ケース — gokuusu STEP4 議論ログの直接対応
 - `DIRECT_GATE_CASES`（2件）— `build_direct_gate_geometry` 系（パラメトリックダイレクトゲート、Φピン+細スプルー+プレート）
 
 `--cases` はどの系列のキーも受け付ける。出力先は `outputs/<label>/{fill.gif, pressure.png, weld_airtraps.png, frames/}`、スキン層 ON ならさらに `skin.png / core.png` が追加される。`outputs/` は gitignore 済み。
@@ -48,7 +48,9 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 - **`materials.py`** — `MaterialDB`（`data/materials.json` から樹脂パラメータ読込）、`cross_wlf_viscosity(material, T_K, gamma_dot, P_Pa)`。代表剪断速度は `representative_shear_rate(V_mms, h_mm) = 6V/h`（Newtonian plate 近似）。
 - **`geometry.py`** — `Geometry` データ容器、`build_demo_geometry`（合成プレート、CLI 専用）、`build_film_gate_geometry` + `FilmGateConfig`（パラメトリックフィルムゲート、後述）、`build_direct_gate_geometry` + `DirectGateConfig`（パラメトリックダイレクトゲート、後述）、`geometry_from_image`（画像閾値処理）。`Geometry.compression_mask` は **圧縮成形時にどのセルが膨らむか**を表す任意の bool 配列（`None` で全セル膨張＝旧挙動、配列指定で True セルだけ膨張）。パラメトリックビルダーは「製品本体だけ True」の compression_mask を埋め込む。
 - **`solver.py`** — `HeleShawSolver` と結果 `FlowResult`。中核アルゴリズムは下記。
-- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
+- **`multilayer_solver.py`** — `MultilayerHeleShawSolver` と継承結果 `MultilayerFlowResult`。厚み方向を `N` 層に離散化して **層別温度・粘度** の coupling を fixed-point で解く新ソルバー。既存 `HeleShawSolver` を内部に保持して helper メソッド (`_effective_viscosity` / `_open_thickness_field` / `_solve_tau_field` / weld・airtrap) を委譲で再利用、線形代数の重複なし。詳細は後述「層別 Hele-Shaw ソルバー」セクション。
+- **`multilayer_thermal.py`** — 純関数 `neumann_layer_temperatures()` と `poiseuille_shear_rates()`。前者は両壁から育つ Neumann 半無限解の重ね合わせ `T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(αt))) - 1]` (長時間極限で `T_mold` 以下に落ちるので clamp)、後者は Poiseuille 解析微分 `γ̇_k = (6V/h) · |2ζ - 1|` (中央発散回避の floor 付き)。両方とも shape `(N, ny, nx)` を返す。
+- **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`render_layer_map` / `render_layer_grid` / `render_short_shot_map`（層別ソルバーの結果用、後述）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
 - **`visualizer_3d.py`** — `render_3d_thickness_map` / `render_3d_fill_time` / `render_3d_pressure`。**インタラクティブな3D表示**用。Plotly の `go.Figure` を返し、Streamlit の `st.plotly_chart` で埋め込む想定。各図は **PL（Z=0）= 半透明の薄グレー床 + 側壁 Mesh3d（天面と同じ物理量カラーマップで着色、`coloraxis="coloraxis"` 共有）+ 天面 Surface** の3トレース構成。1本のカラーバーで天面・側壁を一気に読む設計。**`aspectmode="data"`** で x/y/z すべて mm 等倍（誇張なし）。プレートが薄板に見えるのは実物比率そのもの。物理は 2D Hele-Shaw のまま、表現上の3D化のみ。
 
 ### 中核アルゴリズム（`solver.py`）
@@ -91,6 +93,83 @@ S = h_core³ / (12·η)                  ← Hele-Shaw コンダクタンス
 - **short shot**: 反復後に `h - 2·s ≤ h_min` となったセルを `short_shot_mask` に記録。本来流路が遮断されるが、数値安定性のため `h_core` には `min_core_thickness_mm` 以上のフロアが残る。可視化で赤マーク。
 - 出力: `FlowResult.skin_thickness_mm`, `core_thickness_mm`, `short_shot_mask`、metadata に `skin_iterations / skin_converged / T_fill_inflation / short_shot_cells / short_shot_fraction`。
 - 可視化: `render_skin_layer_map(result, path)` でスキン厚マップ、`render_core_layer_map(result, path)` でコア層 + short shot。
+
+#### 層別 Hele-Shaw ソルバー（`MultilayerHeleShawSolver`）
+
+スキン層モデルが「壁面凍結フロント」だけを扱うのに対し、こちらは厚み方向を `N` 層に離散化し、各層に **温度・粘度・剪断速度** を持たせる完全結合ソルバー。`core/multilayer_solver.py` に独立クラスとして実装、既存 `HeleShawSolver` には一切手を入れない (内部で保持して helper メソッドを委譲する形)。スキン層モデルとは排他的に使う想定 (UI ラジオで強制、CLI `_solve_and_export` で `skin_layer and multilayer` を `ValueError`)。
+
+**厚み離散化**:
+
+```
+ζ_k ∈ [0, 1]                 ← 相対厚み座標 (N+1 個の境界)
+h_k(x,y) = (ζ_k - ζ_{k-1}) · h_total(x,y)   ← 絶対層厚 (圧縮 factor/stroke の効果は h_total に統合済み)
+```
+
+- `uniform`: `ζ_k = k/N`
+- `wall_refined` (デフォルト): Chebyshev-Lobatto 点 `ζ_k = 0.5·(1 - cos(πk/N))`。Neumann 勾配の急な壁面で解像度を稼ぐ (N=6 で `[0, 0.067, 0.25, 0.5, 0.75, 0.933, 1]`)。N=1 は uniform にフォールバック (Hele-Shaw 単層極限を維持)。
+
+**Poiseuille モーメント積分** (`_multilayer_conductance`):
+
+```
+S_total(x,y) = (h_total³ / 2) · Σ_k m_k / η_k
+m_k = [ζ²/2 - ζ³/3]_{ζ_{k-1}}^{ζ_k}
+Σ_k m_k = 1/6   ← Hele-Shaw 因子 (どの distribution でも保存)
+```
+
+N=1 で `m_1 = 1/6` → `S = h³/(12η)` と厳密に一致 (`test_n1_matches_legacy_tau` で担保)。
+
+**Fixed-point 結合** (`thermal_coupling=True` のみ):
+
+```
+初期化: τ ← baseline (等温・代表 η) で _solve_tau_field
+反復:
+  t_arr ← (τ/τ_max) · T_fill
+  T_k(x,y) ← neumann_layer_temperatures(ζ_centers, t_arr, h_total, T_melt, T_mold, α)  (max(_, T_mold) で clamp)
+  γ̇_k(x,y) ← poiseuille_shear_rates(ζ_centers, V, h_total, floor=0.01)
+  η_k(x,y) ← cross_wlf_viscosity(material, T_k, γ̇_k, 0)
+  S_total ← Σ_k h_total³ m_k / (12 η_k)
+  τ_new ← _solve_tau_field(S_total, dirichlet)
+  T_fill_new ← T_fill_baseline · (τ_max_new / τ_max_baseline)   ← 圧力一定近似
+  rel ← ‖τ_new - τ‖_2 / ‖τ‖_2
+  if rel >= prev_rel: τ_new ← (1-ω)τ_old + ω·τ_new (適応的 damping、ω=damping_factor=0.7 既定)
+  if rel < convergence_tol: 収束、終了
+```
+
+- `max_iterations = 8`、`convergence_tol = 1e-3` 既定 (スキン層モデルより 1〜2 回深め、温度の変化が緩いため)。
+- `shear_rate_floor_factor = 0.01` で中央層 γ̇ をクリップ (Cross-WLF ゼロ剪断粘度 `D₁` の暴走を防止)。
+
+**短ショット判定** (PR-C):
+
+中央層 (`k = N // 2`) の最終温度が固化しきい値を下回るセルを `short_shot_mask` にマーク:
+
+```
+T_solid = T_mold + solidification_temperature_fraction · (T_melt - T_mold)
+short_shot_mask = cavity & (T_k_mid <= T_solid)
+```
+
+- `solidification_temperature_fraction = 0.3` 既定 (PP 想定の粗い目安、Tg 近傍)
+- 材料 DB に固化温度フィールドは追加せず、既存 `T_melt_recommended` / `T_mold_recommended` から派生
+
+**出力**:
+
+- `MultilayerFlowResult(FlowResult)` (継承): 既存フィールドに加えて `layer_thickness_mm` / `layer_temperature_K` / `layer_viscosity_Pa_s_field` / `layer_shear_rate_s_inv` (shape `(N, ny, nx)`)。`thermal_coupling=False` では layer_temperature_K 以下 3 つは None (thickness のみ populated)。
+- `short_shot_mask` (継承元 FlowResult のフィールド) が中央層温度ベースで populated。
+- `metadata` に `solver_kind="multilayer"` / `num_layers` / `layer_distribution` / `layer_zeta` / `layer_moments` / `multilayer_iterations` / `multilayer_converged` / `T_fill_inflation` / `damping_factor` / `damping_events` / `T_solid_K` / `short_shot_cells` / `short_shot_fraction`。
+
+**可視化** (`core/visualizer.py`):
+
+- `render_layer_map(result, layer_idx, path, field)` — 1 層単独マップ。`field` は `"temperature"` / `"viscosity"` / `"shear_rate"` / `"thickness"`。viscosity と shear_rate は自動で log カラースケール。
+- `render_layer_grid(result, path, field)` — 全 N 層を 1 PNG にタイル化、共通スケールで壁→中央の勾配が一目で読める。
+- `render_short_shot_map(result, path)` — 短ショットセルを赤マークでオーバーレイ。flagged 0 時は "no short shot" 注釈。
+
+**重要な限界**:
+
+層別化しても **2D Hele-Shaw の前提（面内のみ圧力勾配、厚み方向は積分）は不変**。捕捉できない物理：
+
+- **面内コーナー効果**: 角部の渦、二次流、流動偏向。Hele-Shaw 近似では原理的に出ない。
+- **ジェッティング**: 高速ゲートで樹脂が固相のまま射出される現象。3D 流れ前提。
+- **コア対流項**: 厚み方向の対流による熱輸送。1D Neumann は純粋拡散のみ。
+- これらは **完全 3D FVM / FEM ソルバー (別ロードマップ)** が必要。
 
 ### `build_film_gate_geometry` の形状仕様
 
@@ -197,17 +276,18 @@ y = pad                     ← ゲート側辺（gate-side edge）
 ### 意図的にモデル化していないもの
 
 - コアのバルク温度低下と粘度の動的更新（スキン層は Stefan/Neumann 近似で扱うが、コア温度は melt のまま固定）
-- 真の3D流れ、ジェッティング、コーナー効果
+- **面内コーナー効果・ジェッティング・二次流**（層別 Hele-Shaw でも 2D 前提は不変。捕捉には完全 3D FVM/FEM が必要）
 - 結晶化・収縮反り
 - パッキング段階の保圧
-- 局所剪断速度反復（粘度は単一代表値）
 - 中立面メッシュ・非構造格子・STL/STEP 入力
 
-これらを「solver に足す」のは前提が崩れる。新機能として別解法を立てて並列に置く方向で考えろ。
+スキン層モデル (`HeleShawSolver` の `skin_layer_enabled=True`) と層別ソルバー (`MultilayerHeleShawSolver`) は **厚み方向の 3D 性** (壁面凍結、層別温度、層別粘度、局所剪断速度の層別評価) を取り込んでいるので、これらは「モデル化していない」リストから外れる。一方、**面内の 3D 性**（角部の二次流、ジェッティング、コーナー渦）は依然として捕捉できない — Hele-Shaw 系の根本的限界。
+
+これらを「solver に足す」のは前提が崩れる。新機能として別解法を立てて並列に置く方向で考えろ（既存スキン層 / 層別ソルバーが既に並列パターンの実例）。
 
 ## テスト
 
-`tests/` 配下に7ファイル、合計 **105テスト**：
+`tests/` 配下に 10 ファイル、合計 **166 テスト** (165 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -215,9 +295,12 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
+- `test_multilayer_solver.py` — 37件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作)
+- `test_multilayer_thermal.py` — 11件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証)
 - `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
+- `test_visualizer_layer.py` — 13件 (1 skip): `render_layer_map` 4 field smoke / 不正 field / 範囲外 layer_idx / thermal_off で field 別動作 / `render_layer_grid` / `render_short_shot_map` (flagged あり/なし、後者は skip 想定可) / `_scalar_layer_field` helper / ζ レンジが metadata に乗ること
 
-新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` または `test_skin_layer.py`、3D系なら `test_visualizer_3d.py`。
+新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` か `test_skin_layer.py` か `test_multilayer_solver.py`、純関数の helper なら `test_multilayer_thermal.py`、3D 系なら `test_visualizer_3d.py`、層別可視化なら `test_visualizer_layer.py`。
 
 ## 開発ワークフロー
 
@@ -269,3 +352,9 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
 - **Direct gate**: UI では「製品幅 / 製品高 / 段差位置 / ゲート側肉厚 / 反ゲート側肉厚 / ゲート径 / ゲート位置」のスライダー群で `DirectGateConfig` を組み立てる。プレート分割の挙動は Film gate と同じ（段差位置 0 で uniform、`> 0` で 2 層化、cfg には `plate_lower_thk_mm` / `plate_upper_thk_mm` を渡す）。デフォルト値は Film gate と揃えてある（Wp=300 / Hp=50 / 段差=20 / lower=0.35 / upper=0.50 / Φ=3 / g_off=20）。ゲート位置スライダーの上下限はゲート径とプレート高さに連動して動的に計算（突き抜けバリデーションを UI 側でも防御）。CLI でも `DirectGateConfig` の引数に同じ制約がある。
 - **圧縮成形のスコープ**: 圧縮で膨らむのは `Geometry.compression_mask` が True のセルだけ。Film gate のビルダーは「プレート本体だけ True」（ランナー・スプルー・ゲートは膨張しない）、Direct gate のビルダーは「プレート全体 True」（cavity = プレート単体なので全部膨張）。`build_demo_geometry` と `geometry_from_image` は `compression_mask=None`（旧挙動＝全セル膨張）。新しい形状ビルダーを足すときは「製品本体だけ True」の compression_mask をセットすること。
 - **圧縮量の指定方式**: UI は ICM ON 時にラジオで `factor` / `stroke` を選ぶ。factor 選択時は「初期隙間倍率 h_init/h_final」スライダー（`compression_stroke_mm=None` で solver に渡る）、stroke 選択時は「圧縮ストローク [mm]」スライダー（`compression_factor=1.0` ＋ `compression_stroke_mm=<値>` で渡る）。CLI 側は両方を `make_solver()` の kwargs に直接渡し、ケース定義で片方だけ指定する（factor モードならデフォルト、stroke モードなら `compression_stroke_mm=0.70` 等を明示）。段差プレート（plate_lower_thk ≠ plate_upper_thk）の圧縮シミュレーションでは **stroke モード一択**（factor モードだと段差が崩れる）。`FilmGate_PP_stepped_stroke` がこの想定の CLI 参照ケース。
+- **ウォール冷却モデル**: UI ヘッダー「ウォール冷却モデル」のラジオで `なし` / `スキン層` / `層別` の 3 択。**排他選択**により skin と multilayer の同時 ON は構造的に不可能。
+  - **なし**: 既存 `HeleShawSolver`、温度結合なし。
+  - **スキン層**: `HeleShawSolver(skin_layer_enabled=True, skin_growth_constant=c_skin, ...)`。Stefan/Neumann 1 層モデル。
+  - **層別**: `MultilayerHeleShawSolver(num_layers=N, layer_distribution="wall_refined", thermal_coupling=True, ...)`。Cross-WLF 結合 N 層モデル。スライダーで `num_layers` (3..7、既定 5) / `layer_distribution` (`wall_refined` 既定 / `uniform`) / `max_iterations` / `convergence_tol` / `solidification_temperature_fraction` を出す。
+  - CLI 側は `_solve_and_export(multilayer=True, num_layers=..., layer_distribution=..., ...)` で明示。`skin_layer=True` と `multilayer=True` の同時指定は `ValueError`。`FilmGate_PP_multilayer_5L` が層別の参照ケース。
+  - 結果ペインに「層別プロファイル (Multi-layer N=...)」expander が現れ、温度グリッド / 粘度グリッド / 短ショットマップを表示、各 PNG ダウンロード + ZIP exports に同梱。

@@ -10,7 +10,7 @@ from .geometry import (
     geometry_from_image,
 )
 from .materials import MaterialDB, cross_wlf_viscosity
-from .multilayer_solver import MultilayerHeleShawSolver
+from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
     export_frames,
@@ -38,6 +38,7 @@ __all__ = [
     "geometry_from_image",
     "HeleShawSolver",
     "MultilayerHeleShawSolver",
+    "MultilayerFlowResult",
     "FlowResult",
     "render_fill_animation",
     "render_pressure_map",

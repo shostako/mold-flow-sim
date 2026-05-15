@@ -405,7 +405,7 @@ with st.sidebar:
             "長辺 L_long [mm] (≤ 製品幅)",
             min_value=10.0,
             max_value=float(plate_w),
-            value=float(min(250.0, plate_w)),
+            value=float(plate_w),
             step=1.0,
         )
         runner_short_d = st.slider(
@@ -741,7 +741,7 @@ with st.sidebar:
         comp_frac = 0.0
 
     st.header("出力")
-    num_frames = st.slider("アニメーションフレーム数", 12, 60, 30)
+    num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
 
 
 # ----------------------- main panel -----------------------

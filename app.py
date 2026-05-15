@@ -23,6 +23,7 @@ from core import (
     MultilayerHeleShawSolver,
     build_direct_gate_geometry,
     build_film_gate_geometry,
+    export_frames,
     geometry_from_image,
     render_3d_fill_time,
     render_3d_pressure,
@@ -911,6 +912,9 @@ if do_run:
         _gif_path = render_fill_animation(
             result, _tmp_dir / "fill.gif", num_frames=num_frames, fps=8
         )
+        # 各フレームの PNG 連番も書き出す。GIF と同じ ZIP に frames/ で同梱して、
+        # ユーザーが GIF とフレーム画像を 1 ダウンロードで両取りできるようにする。
+        _frame_paths = export_frames(result, _tmp_dir / "frames", num_frames=num_frames)
         _press_path = render_pressure_map(result, _tmp_dir / "pressure.png")
         _weld_path = render_weldlines(result, _tmp_dir / "weld.png")
         _skin_path: Path | None = None
@@ -946,6 +950,10 @@ if do_run:
             ):
                 if _p is not None and _p.exists():
                     _zf_run.write(_p, _p.name)
+            # 各フレーム PNG を frames/ 配下に同梱
+            for _fp in _frame_paths:
+                if _fp.exists():
+                    _zf_run.write(_fp, f"frames/{_fp.name}")
             _zf_run.writestr(
                 "metadata.json",
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
@@ -1007,12 +1015,15 @@ if "mfs_result" in st.session_state:
         st.markdown("**充填先端アニメーション**")
         st.image(str(gif_path))
         st.download_button(
-            "⬇ GIFをダウンロード",
+            "⬇ GIF + フレーム画像をダウンロード",
             data=_zip_bytes,
             file_name="mold_flow_results.zip",
             mime="application/zip",
             key="dl_zip_all",
-            help="GIF・各マップ PNG・metadata.json を1つの ZIP にまとめてダウンロード",
+            help=(
+                "GIF（fill.gif）・各フレーム PNG（frames/frame_NNN.png）・"
+                "各マップ PNG・metadata.json を1つの ZIP にまとめてダウンロード"
+            ),
         )
 
         with st.expander("圧力マップ"):

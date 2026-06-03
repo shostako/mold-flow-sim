@@ -1,5 +1,10 @@
 # 商用CAEの物理モデルと数式
 
+<div align="right">
+株式会社ハモコ・ジャパン<br>
+菊池
+</div>
+
 本資料は、商用CAE（Moldflow / Moldex3D）が射出成形の解析で連成している主な物理モデルと、その代表的な数式をまとめたものです。本ツール（mold-flow-sim）が使うのは、このうち ① の薄肉近似版（Hele-Shaw）と ②（Cross-WLF）の2つだけで、③ 以降は扱いません。商用CAEがどれだけ広い物理を解いているか、そして本ツールが何を割り切ったかを示す対比資料です。
 
 > **注記**: ④〜⑦ はモデル・手法の流派が複数あります（例: 自由表面追跡なら VOF / Control Volume(FAN) / Level-Set、結晶化なら Nakamura / Hoffman-Lauritzen、繊維配向なら Folgar-Tucker とその改良版 ARD-RSC / iARD-RPR）。ここに挙げたのは代表形・骨格で、特に ⑥⑦ の完全形は本来さらに複雑です。

@@ -17,11 +17,13 @@ import streamlit as st
 
 from core import (
     DirectGateConfig,
+    FilmGate2Config,
     FilmGateConfig,
     HeleShawSolver,
     MaterialDB,
     MultilayerHeleShawSolver,
     build_direct_gate_geometry,
+    build_film_gate2_geometry,
     build_film_gate_geometry,
     export_frames,
     geometry_from_image,
@@ -293,7 +295,8 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Film gate (parametric)",
+            "Film gate 1 (台形)",
+            "Film gate 2 (肉厚調整ゲート)",
             "Direct gate (parametric)",
             "画像から生成 (PNG/JPG)",
         ],
@@ -365,6 +368,94 @@ with st.sidebar:
             ),
         )
         cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+        upload = None
+    elif geom_source.startswith("Film gate 2"):
+        plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+        plate_h_f2 = st.slider("製品高 Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+
+        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
+        plate_split_f2 = st.slider(
+            "段差位置 [mm]",
+            0.0,
+            float(plate_h_f2),
+            min(20.0, float(plate_h_f2)),
+            step=1.0,
+            help="製品長辺からの距離。0 で均一肉厚。",
+        )
+        if plate_split_f2 > 0:
+            plate_lower_f2 = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+            plate_upper_f2 = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
+            plate_thk_f2 = float(plate_lower_f2)
+        else:
+            plate_thk_f2 = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+            plate_lower_f2 = float(plate_thk_f2)
+            plate_upper_f2 = float(plate_thk_f2)
+
+        st.markdown("**ゲート台形（直角台形）**")
+        gate_depth_f2 = st.slider(
+            "ゲート高さ D [mm]（注入点側）",
+            10.0,
+            60.0,
+            30.0,
+            step=1.0,
+            help="製品長辺から注入点までの距離（台形の高さ）。",
+        )
+        gate_position_f2 = st.slider(
+            "ゲート位置 [mm]（0=右端 / Wp÷2=中央=二等辺）",
+            0.0,
+            float(plate_w_f2),
+            0.0,
+            step=5.0,
+            help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
+        )
+        left_edge_f2 = st.slider(
+            "左端の高さ [mm]",
+            0.0,
+            min(15.0, float(gate_depth_f2)),
+            min(10.0, float(gate_depth_f2)),
+            step=1.0,
+            help="製品長辺端での台形高さ（台形化＝左端の尖り防止）。",
+        )
+        valve_f2 = st.slider("バルブゲート径 Φ [mm]", 1.0, 10.0, 3.0, step=0.5)
+
+        st.markdown("**ゲートランド（製品長辺接続部）**")
+        land_width_f2 = st.slider("ランド幅 [mm]", 1.0, 5.0, 1.0, step=0.5)
+        land_depth_f2 = st.slider("ランド深さ [mm]", 0.2, 2.0, 0.35, step=0.05)
+
+        st.markdown("**2段テーパ（底辺距離・段差可）**")
+        taper1_len_f2 = st.slider("上段テーパ長 L1 [mm]", 1.0, 30.0, 8.0, step=0.5)
+        mid_a_f2 = st.slider("上段深端 [mm]", 0.2, 5.0, 1.5, step=0.1, help="上段テーパの深い端。")
+        mid_b_f2 = st.slider(
+            "下段浅端 [mm]",
+            0.2,
+            5.0,
+            1.5,
+            step=0.1,
+            help="下段テーパの浅い端。上段深端と違う値にすると境界に段差ができる。",
+        )
+        taper2_left_f2 = st.slider(
+            "下段テーパ 端側の最遠点 [mm]",
+            1.0,
+            20.0,
+            5.0,
+            step=0.5,
+            help="青テーパ（下段）の製品長辺から一番離れた点。端（楔先端）側。",
+        )
+        taper2_right_f2 = st.slider(
+            "下段テーパ 注入点側の最遠点 [mm]",
+            1.0,
+            20.0,
+            10.0,
+            step=0.5,
+            help="青テーパ（下段）の製品長辺から一番離れた点。注入点側（台形の大きい辺）。",
+        )
+
+        st.markdown("**深ランナー（左斜辺沿い・台形断面）**")
+        runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)
+        runner_top_f2 = st.slider("上底（開口幅）[mm]", 2.0, 5.0, 4.0, step=0.5)
+        runner_bottom_f2 = st.slider("下底（底幅・抜き勾配）[mm]", 1.0, 3.0, 2.0, step=0.5)
+
+        cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     elif geom_source.startswith("Film gate"):
         plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -760,6 +851,35 @@ def build_geometry() -> Geometry:
                 plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
             )
             return build_direct_gate_geometry(cfg_dg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
+    if geom_source.startswith("Film gate 2"):
+        try:
+            cfg_f2 = FilmGate2Config(
+                plate_w_mm=plate_w_f2,
+                plate_h_mm=plate_h_f2,
+                plate_thk_mm=plate_thk_f2,
+                gate_depth_mm=gate_depth_f2,
+                gate_position_mm=gate_position_f2,
+                left_edge_mm=left_edge_f2,
+                land_width_mm=land_width_f2,
+                land_depth_mm=land_depth_f2,
+                taper1_len_mm=taper1_len_f2,
+                mid_depth_a_mm=mid_a_f2,
+                mid_depth_b_mm=mid_b_f2,
+                taper2_left_mm=taper2_left_f2,
+                taper2_right_mm=taper2_right_f2,
+                runner_depth_mm=runner_depth_f2,
+                runner_top_mm=runner_top_f2,
+                runner_bottom_mm=runner_bottom_f2,
+                valve_gate_diameter_mm=valve_f2,
+                cell_size_mm=cell_size_f2,
+                plate_split_height_mm=plate_split_f2 if plate_split_f2 > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_f2 if plate_split_f2 > 0 else None,
+                plate_upper_thk_mm=plate_upper_f2 if plate_split_f2 > 0 else None,
+            )
+            return build_film_gate2_geometry(cfg_f2)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()

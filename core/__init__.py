@@ -2,10 +2,12 @@
 
 from .geometry import (
     DirectGateConfig,
+    FilmGate2Config,
     FilmGateConfig,
     Geometry,
     build_demo_geometry,
     build_direct_gate_geometry,
+    build_film_gate2_geometry,
     build_film_gate_geometry,
     geometry_from_image,
 )
@@ -31,9 +33,11 @@ __all__ = [
     "cross_wlf_viscosity",
     "Geometry",
     "FilmGateConfig",
+    "FilmGate2Config",
     "DirectGateConfig",
     "build_demo_geometry",
     "build_film_gate_geometry",
+    "build_film_gate2_geometry",
     "build_direct_gate_geometry",
     "geometry_from_image",
     "HeleShawSolver",

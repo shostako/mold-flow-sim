@@ -22,6 +22,7 @@ from pathlib import Path
 
 from core import (
     DirectGateConfig,
+    FilmGate2Config,
     FilmGateConfig,
     Geometry,
     HeleShawSolver,
@@ -29,6 +30,7 @@ from core import (
     MultilayerHeleShawSolver,
     build_demo_geometry,
     build_direct_gate_geometry,
+    build_film_gate2_geometry,
     build_film_gate_geometry,
     export_frames,
     render_core_layer_map,
@@ -502,6 +504,127 @@ FILM_GATE_CASES: dict[str, dict] = {
 # ---------------------- entrypoint ----------------------
 
 
+def _film_gate2_cfg_rightangle() -> FilmGate2Config:
+    """Right trapezoid (gate_position=0, valve at the right end)."""
+    return FilmGate2Config(
+        plate_w_mm=300.0,
+        plate_h_mm=50.0,
+        plate_thk_mm=0.35,
+        gate_depth_mm=30.0,
+        gate_position_mm=0.0,
+        left_edge_mm=10.0,
+        land_width_mm=1.0,
+        land_depth_mm=0.35,
+        taper1_len_mm=8.0,
+        mid_depth_a_mm=1.5,
+        mid_depth_b_mm=1.5,
+        taper2_left_mm=5.0,
+        taper2_right_mm=10.0,
+        runner_depth_mm=3.0,
+        runner_top_mm=4.0,
+        runner_bottom_mm=2.0,
+        valve_gate_diameter_mm=3.0,
+        cell_size_mm=1.0,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+
+
+def _film_gate2_cfg_isosceles() -> FilmGate2Config:
+    """Isosceles trapezoid (gate_position=Wp/2, valve at the center)."""
+    return FilmGate2Config(
+        plate_w_mm=300.0,
+        plate_h_mm=50.0,
+        plate_thk_mm=0.35,
+        gate_depth_mm=30.0,
+        gate_position_mm=150.0,
+        left_edge_mm=10.0,
+        land_width_mm=1.0,
+        land_depth_mm=0.35,
+        taper1_len_mm=8.0,
+        mid_depth_a_mm=1.5,
+        mid_depth_b_mm=1.5,
+        taper2_left_mm=5.0,
+        taper2_right_mm=10.0,
+        runner_depth_mm=3.0,
+        runner_top_mm=4.0,
+        runner_bottom_mm=2.0,
+        valve_gate_diameter_mm=3.0,
+        cell_size_mm=1.0,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+
+
+def _film_gate2_cfg_stepped() -> FilmGate2Config:
+    """Right trapezoid with a depth step between the two taper stages
+    (mid_depth_a != mid_depth_b)."""
+    return FilmGate2Config(
+        plate_w_mm=300.0,
+        plate_h_mm=50.0,
+        plate_thk_mm=0.35,
+        gate_depth_mm=30.0,
+        gate_position_mm=0.0,
+        left_edge_mm=10.0,
+        land_width_mm=1.0,
+        land_depth_mm=0.35,
+        taper1_len_mm=8.0,
+        mid_depth_a_mm=1.0,
+        mid_depth_b_mm=2.4,
+        taper2_left_mm=5.0,
+        taper2_right_mm=10.0,
+        runner_depth_mm=3.0,
+        runner_top_mm=4.0,
+        runner_bottom_mm=2.0,
+        valve_gate_diameter_mm=3.0,
+        cell_size_mm=1.0,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+
+
+def run_film_gate2_case(
+    label: str,
+    out_root: Path,
+    *,
+    cfg: FilmGate2Config,
+    **solver_kwargs,
+) -> None:
+    geom = build_film_gate2_geometry(cfg)
+    _solve_and_export(label, out_root, geom, **solver_kwargs)
+
+
+FILM_GATE2_CASES: dict[str, dict] = {
+    "FilmGate2_rightangle": dict(
+        cfg=_film_gate2_cfg_rightangle(),
+        material_key="PP_T20",
+        melt_K=523.15,
+        mold_K=323.15,
+        inj_velocity_mms=400.0,
+        inj_Q_cm3s=589.0,
+    ),
+    "FilmGate2_isosceles": dict(
+        cfg=_film_gate2_cfg_isosceles(),
+        material_key="PP_T20",
+        melt_K=523.15,
+        mold_K=323.15,
+        inj_velocity_mms=400.0,
+        inj_Q_cm3s=589.0,
+    ),
+    "FilmGate2_stepped": dict(
+        cfg=_film_gate2_cfg_stepped(),
+        material_key="PP_T20",
+        melt_K=523.15,
+        mold_K=323.15,
+        inj_velocity_mms=400.0,
+        inj_Q_cm3s=589.0,
+    ),
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="outputs", help="output root directory")
@@ -517,7 +640,10 @@ def main() -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     all_keys = (
-        list(DEMO_CASES.keys()) + list(FILM_GATE_CASES.keys()) + list(DIRECT_GATE_CASES.keys())
+        list(DEMO_CASES.keys())
+        + list(FILM_GATE_CASES.keys())
+        + list(FILM_GATE2_CASES.keys())
+        + list(DIRECT_GATE_CASES.keys())
     )
     keys = args.cases or all_keys
     for k in keys:
@@ -525,6 +651,8 @@ def main() -> None:
             run_demo_case(k, out_root, **DEMO_CASES[k])
         elif k in FILM_GATE_CASES:
             run_film_gate_case(k, out_root, **FILM_GATE_CASES[k])
+        elif k in FILM_GATE2_CASES:
+            run_film_gate2_case(k, out_root, **FILM_GATE2_CASES[k])
         elif k in DIRECT_GATE_CASES:
             run_direct_gate_case(k, out_root, **DIRECT_GATE_CASES[k])
         else:

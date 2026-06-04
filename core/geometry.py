@@ -922,3 +922,311 @@ def geometry_from_image(
         label=Path(image_path).stem,
     )
     return geom
+
+
+@dataclass(frozen=True)
+class FilmGate2Config:
+    """Parameters for :func:`build_film_gate2_geometry`.
+
+    Film gate 2 ("肉厚調整ゲート", thickness-adjusting gate) is a separate
+    family from the isosceles trapezoid of :class:`FilmGateConfig`. Its
+    top-down silhouette is a **right trapezoid** attached to the full width
+    of the product long edge (the trapezoid base). The injection valve gate
+    slides along the long edge via ``gate_position_mm``.
+
+    Coordinate convention matches :func:`build_film_gate_geometry` (y up,
+    x right, gate on the small-y side, product on the large-y side). Depth
+    maps directly onto ``Geometry.thickness_mm`` (deep runner ~3 mm,
+    land ~0.35 mm).
+
+    Silhouette (``gate_position_mm=0`` → valve at the right end → right
+    trapezoid)::
+
+        A top-left ──[product long edge = base, width Wp]── top-right
+        | land (land_width_mm, land_depth_mm)
+        |left_edge     upper/lower taper (depth set by distance-from-base t)
+        +----deep runner (along the slanted edge, trapezoid section)--* valve
+          left height      slanted edge = farthest from the product
+
+    The valve position is ``x_g = pad + (Wp - gate_position_mm)``, so
+    ``0`` → right end (right trapezoid), ``Wp/2`` → center (isosceles),
+    ``Wp`` → left end. The trapezoid depth (y) is ``gate_depth_mm`` at the
+    valve side and ``left_edge_mm`` at both long-edge ends.
+
+    Depth profile f(t)  (t = distance from the product long edge)::
+
+        t <= land_width                  : land_depth
+        land_width < t <= land_width+L1  : land_depth   -> mid_depth_a  (upper taper)
+        (a step mid_depth_a -> mid_depth_b is allowed at t = land_width+L1)
+        land_width+L1 < t <= t_lower(x)  : mid_depth_b  -> runner_depth (lower taper)
+        else                             : runner_depth
+
+    ``mid_depth_a`` (upper-taper deep end) and ``mid_depth_b`` (lower-taper
+    shallow end) are independent: set them equal for a continuous slope, or
+    different for a step at the shared boundary ``t = land_width+L1``.
+
+    The deep runner overrides the depth along the **left** slanted edge
+    (valve -> left end) with a trapezoid cross-section (opening
+    ``runner_top_mm`` / bottom ``runner_bottom_mm`` / depth
+    ``runner_depth_mm``) keyed on the normal distance from that edge.
+
+    The lower taper (青テーパ) is a trapezoid in plan view: its far point
+    ``t_lower(x)`` (the deepest distance from the long edge) is
+    ``taper2_right_mm`` at the valve side and ``taper2_left_mm`` at the far
+    end, interpolated linearly by distance from the valve. This removes the
+    sharp wedge tip — both ends keep a finite lower-taper length.
+
+    Optional plate split (gate-side / far-side two-zone thickness) works
+    exactly like :class:`FilmGateConfig`: when ``plate_split_height_mm > 0``
+    the plate body splits at ``y_long + plate_split_height_mm`` into a
+    gate-side band (``plate_lower_thk_mm``) and a far-side band
+    (``plate_upper_thk_mm``); both default to ``plate_thk_mm`` when ``None``.
+    """
+
+    plate_w_mm: float
+    plate_h_mm: float
+    plate_thk_mm: float
+    gate_depth_mm: float  # D: trapezoid depth (y) at the valve side
+    gate_position_mm: float = 0.0  # 0 -> valve at right end (right trapezoid)
+    left_edge_mm: float = 10.0  # trapezoid depth (y) at the long-edge ends
+    land_width_mm: float = 1.0  # land band width (distance from long edge)
+    land_depth_mm: float = 0.35  # land thickness
+    taper1_len_mm: float = 8.0  # L1: upper taper y-length
+    mid_depth_a_mm: float = 1.5  # upper-taper deep end
+    mid_depth_b_mm: float = 1.5  # lower-taper shallow end (= a -> continuous)
+    taper2_left_mm: float = 5.0  # lower-taper far point (from long edge), end side
+    taper2_right_mm: float = 10.0  # lower-taper far point (from long edge), valve side
+    runner_depth_mm: float = 3.0  # deep runner z-depth
+    runner_top_mm: float = 4.0  # deep runner opening width (y)
+    runner_bottom_mm: float = 2.0  # deep runner bottom width (draft taper)
+    valve_gate_diameter_mm: float = 3.0
+    cell_size_mm: float = 0.5
+    pad_mm: float = 5.0
+    # ----- optional gate-side / far-side plate split -----
+    plate_split_height_mm: float = 0.0
+    plate_lower_thk_mm: float | None = None
+    plate_upper_thk_mm: float | None = None
+
+    def resolved_plate_zones(self) -> tuple[float, float, float]:
+        """Return ``(split_height_mm, lower_thk_mm, upper_thk_mm)``.
+
+        Uniform mode (``plate_split_height_mm == 0``) returns
+        ``(0.0, plate_thk_mm, plate_thk_mm)``; otherwise ``None`` fields
+        fall back to ``plate_thk_mm``.
+        """
+        if self.plate_split_height_mm > 0:
+            lower = (
+                self.plate_lower_thk_mm
+                if self.plate_lower_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            upper = (
+                self.plate_upper_thk_mm
+                if self.plate_upper_thk_mm is not None
+                else self.plate_thk_mm
+            )
+            return float(self.plate_split_height_mm), float(lower), float(upper)
+        return 0.0, float(self.plate_thk_mm), float(self.plate_thk_mm)
+
+    def validate(self) -> None:
+        eps = 1e-6
+        positives = (
+            ("plate_w_mm", self.plate_w_mm),
+            ("plate_h_mm", self.plate_h_mm),
+            ("plate_thk_mm", self.plate_thk_mm),
+            ("gate_depth_mm", self.gate_depth_mm),
+            ("land_width_mm", self.land_width_mm),
+            ("land_depth_mm", self.land_depth_mm),
+            ("taper1_len_mm", self.taper1_len_mm),
+            ("taper2_left_mm", self.taper2_left_mm),
+            ("taper2_right_mm", self.taper2_right_mm),
+            ("mid_depth_a_mm", self.mid_depth_a_mm),
+            ("mid_depth_b_mm", self.mid_depth_b_mm),
+            ("runner_depth_mm", self.runner_depth_mm),
+            ("runner_top_mm", self.runner_top_mm),
+            ("runner_bottom_mm", self.runner_bottom_mm),
+            ("valve_gate_diameter_mm", self.valve_gate_diameter_mm),
+            ("cell_size_mm", self.cell_size_mm),
+        )
+        for name, val in positives:
+            if val <= 0:
+                raise ValueError(f"{name} must be positive (got {val})")
+        if self.left_edge_mm < 0:
+            raise ValueError(f"left_edge_mm must be >= 0 (got {self.left_edge_mm})")
+        if self.gate_position_mm < -eps or self.gate_position_mm > self.plate_w_mm + eps:
+            raise ValueError(
+                f"gate_position_mm ({self.gate_position_mm}) must be in "
+                f"[0, plate_w_mm] ([0, {self.plate_w_mm}])"
+            )
+        if self.left_edge_mm > self.gate_depth_mm + eps:
+            raise ValueError(
+                f"left_edge_mm ({self.left_edge_mm}) must be <= "
+                f"gate_depth_mm ({self.gate_depth_mm})"
+            )
+        if self.runner_bottom_mm > self.runner_top_mm + eps:
+            raise ValueError(
+                f"runner_bottom_mm ({self.runner_bottom_mm}) must be <= "
+                f"runner_top_mm ({self.runner_top_mm})"
+            )
+        far_max = max(self.taper2_left_mm, self.taper2_right_mm)
+        depth_used = max(self.land_width_mm + self.taper1_len_mm, far_max)
+        if depth_used > self.gate_depth_mm + eps:
+            raise ValueError(
+                f"taper depth (max of land+taper1, taper2 far point = {depth_used}) "
+                f"must be <= gate_depth_mm ({self.gate_depth_mm})"
+            )
+        # plate split validation (same constraints as FilmGateConfig)
+        if self.plate_split_height_mm < 0:
+            raise ValueError(f"plate_split_height_mm ({self.plate_split_height_mm}) must be >= 0")
+        if self.plate_split_height_mm > self.plate_h_mm + eps:
+            raise ValueError(
+                f"plate_split_height_mm ({self.plate_split_height_mm}) must be <= "
+                f"plate_h_mm ({self.plate_h_mm})"
+            )
+        if self.plate_lower_thk_mm is not None and self.plate_lower_thk_mm <= 0:
+            raise ValueError(f"plate_lower_thk_mm ({self.plate_lower_thk_mm}) must be > 0 when set")
+        if self.plate_upper_thk_mm is not None and self.plate_upper_thk_mm <= 0:
+            raise ValueError(f"plate_upper_thk_mm ({self.plate_upper_thk_mm}) must be > 0 when set")
+
+
+def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
+    """Build a right-trapezoid "thickness-adjusting" film gate (フィルム2).
+
+    The silhouette is a right trapezoid whose base is the full product long
+    edge. A valve gate at ``x_g = pad + (Wp - gate_position_mm)`` injects at
+    the farthest point from the long edge. The depth field combines a
+    distance-from-base taper profile (land / 2-stage taper with optional
+    step) and a deep runner running along the left slanted edge with a
+    trapezoid cross-section. See :class:`FilmGate2Config` for the geometry.
+    """
+    cfg.validate()
+
+    pad = cfg.pad_mm
+    Wp = cfg.plate_w_mm
+    Hp = cfg.plate_h_mm
+    D = cfg.gate_depth_mm
+    dx = cfg.cell_size_mm
+    le = cfg.left_edge_mm
+    gp = cfg.gate_position_mm
+    w_land = cfg.land_width_mm
+    d_land = cfg.land_depth_mm
+    L1 = cfg.taper1_len_mm
+    taper2_left = cfg.taper2_left_mm
+    taper2_right = cfg.taper2_right_mm
+    d_a = cfg.mid_depth_a_mm
+    d_b = cfg.mid_depth_b_mm
+    r_depth = cfg.runner_depth_mm
+    r_top = cfg.runner_top_mm
+    r_bot = cfg.runner_bottom_mm
+    split_h, h_lo, h_up = cfg.resolved_plate_zones()
+
+    y_long = pad + D  # product long edge (trapezoid base)
+    y_plate_top = y_long + Hp
+    total_w = 2 * pad + Wp
+    total_h = 2 * pad + D + Hp
+    nx = int(round(total_w / dx))
+    ny = int(round(total_h / dx))
+
+    iy_idx, ix_idx = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    yy = (iy_idx + 0.5) * dx
+    xx = (ix_idx + 0.5) * dx
+
+    # valve gate position (farthest point from the long edge)
+    x_g = pad + (Wp - gp)
+    y_c = y_long - D
+
+    # --- silhouette: per-column trapezoid bottom y_bottom(x) ---
+    left_x1, left_y1 = pad, y_long - le  # left long-edge end
+    right_y2 = y_long - le  # right long-edge end y
+    left_span = x_g - pad
+    right_span = (pad + Wp) - x_g
+    if left_span > 1e-9:
+        t_left = np.clip((xx - pad) / left_span, 0.0, 1.0)
+        yb_left = left_y1 + (y_c - left_y1) * t_left
+    else:
+        yb_left = np.full_like(xx, y_c)
+    if right_span > 1e-9:
+        t_right = np.clip((xx - x_g) / right_span, 0.0, 1.0)
+        yb_right = y_c + (right_y2 - y_c) * t_right
+    else:
+        yb_right = np.full_like(xx, y_c)
+    y_bottom = np.where(xx <= x_g, yb_left, yb_right)
+
+    in_gate = (yy >= y_bottom - 1e-9) & (yy <= y_long) & (xx >= pad) & (xx <= pad + Wp)
+    in_plate = (yy >= y_long) & (yy <= y_plate_top) & (xx >= pad) & (xx <= pad + Wp)
+    mask = in_gate | in_plate
+
+    # --- gate depth: distance-from-base taper profile f(t) ---
+    t = y_long - yy  # distance from the product long edge (>=0 inside gate)
+    t2_ = w_land + L1  # upper/lower taper boundary (distance from long edge)
+    # Lower-taper far point (青テーパの下端) varies along x: taper2_right at
+    # the valve side, taper2_left at the far end → the blue lower taper is a
+    # trapezoid, not a sharp wedge. dist_ratio is 0 at the valve, 1 at the
+    # farthest long-edge end.
+    far_span = max(x_g - pad, (pad + Wp) - x_g, 1e-12)
+    t_lower = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
+    base = np.full_like(t, r_depth)
+    base = np.where(t <= w_land, d_land, base)
+    upper = (t > w_land) & (t <= t2_)
+    base = np.where(upper, d_land + (d_a - d_land) * (t - w_land) / max(L1, 1e-12), base)
+    l2x = np.maximum(t_lower - t2_, 1e-12)  # lower-taper length at this x
+    lower = (t > t2_) & (t <= t_lower)
+    base = np.where(lower, d_b + (r_depth - d_b) * (t - t2_) / l2x, base)
+
+    # --- deep runner along the LEFT slanted edge (trapezoid cross-section) ---
+    runner = np.zeros_like(t)
+    if left_span > 1e-9:
+        dxv = x_g - left_x1
+        dyv = y_c - left_y1
+        seg_len = float(np.hypot(dxv, dyv))
+        nx_ = -dyv / seg_len
+        ny_ = dxv / seg_len
+        if ny_ < 0:  # orient the normal toward the inside (increasing y)
+            nx_, ny_ = -nx_, -ny_
+        r = (xx - left_x1) * nx_ + (yy - left_y1) * ny_
+        half_top = r_top / 2.0
+        half_bot = r_bot / 2.0
+        dfc = np.abs(r - half_top)  # distance from the groove center
+        denom = max(half_top - half_bot, 1e-12)
+        wall = r_depth * (half_top - dfc) / denom
+        prof = np.where(dfc <= half_bot, r_depth, np.where(dfc <= half_top, wall, 0.0))
+        valid = (r >= -1e-9) & (r <= r_top + 1e-9) & (xx <= x_g)
+        runner = np.where(valid, np.clip(prof, 0.0, r_depth), 0.0)
+
+    thk = np.zeros_like(xx, dtype=float)
+    gate_thk = np.maximum(base, runner)
+    thk[in_gate] = gate_thk[in_gate]
+
+    # --- product plate (optional gate-side / far-side split) ---
+    thk[in_plate] = h_lo
+    if split_h > 0:
+        thk[in_plate & (yy >= y_long + split_h)] = h_up
+
+    thk[~mask] = 0.0
+
+    # Compression mask: only the product plate body inflates during the ICM
+    # open phase; the gate trapezoid stays at its original depth.
+    compression_mask = in_plate & mask
+
+    # --- valve gate (circular Dirichlet at the farthest point) ---
+    in_valve = ((xx - x_g) ** 2 + (yy - y_c) ** 2) <= (cfg.valve_gate_diameter_mm / 2.0) ** 2
+    valve_iys, valve_ixs = np.where(in_valve & mask)
+
+    geom = Geometry(
+        mask=mask,
+        thickness_mm=thk,
+        cell_size_mm=dx,
+        label="film_gate2",
+        compression_mask=compression_mask,
+    )
+    if valve_iys.size == 0:
+        # Defensive: snap to the single cell nearest the valve point.
+        ic_y = int(np.argmin(np.abs(yy[:, 0] - y_c)))
+        ic_x = int(np.argmin(np.abs(xx[0, :] - x_g)))
+        if mask[ic_y, ic_x]:
+            geom.gates.append((ic_y, ic_x))
+    else:
+        for iy, ix in zip(valve_iys, valve_ixs, strict=True):
+            geom.gates.append((int(iy), int(ix)))
+
+    return geom

@@ -956,14 +956,19 @@ class FilmGate2Config:
     Depth profile f(t)  (t = distance from the product long edge)::
 
         t <= land_width                  : land_depth
-        land_width < t <= land_width+L1  : land_depth   -> mid_depth_a  (upper taper)
-        (a step mid_depth_a -> mid_depth_b is allowed at t = land_width+L1)
-        land_width+L1 < t <= t_lower(x)  : mid_depth_b  -> runner_depth (lower taper)
-        else                             : runner_depth
+        land_width < t <= land_width+L1  : land_depth -> mid_depth_a  (1st stage, THICK)
+        land_width+L1 < t <= t_lower(x)  : mid_depth_b (2nd stage, THIN, constant)
+                                           — only where x >= the 2nd-stage left end
+        (left of that left end           : stays at mid_depth_a, the 1st-stage floor)
+        else (toward the slanted edge)   : runner_depth (deep runner)
 
-    ``mid_depth_a`` (upper-taper deep end) and ``mid_depth_b`` (lower-taper
-    shallow end) are independent: set them equal for a continuous slope, or
-    different for a step at the shared boundary ``t = land_width+L1``.
+    The 1st stage (near the product long edge, i.e. far from the valve) is
+    the THICK floor ``mid_depth_a`` so resin flows easier there; the 2nd
+    stage (toward the deep runner) is the THIN constant ``mid_depth_b``.
+    ``mid_depth_a`` > ``mid_depth_b`` makes the design step at the boundary.
+    The 2nd-stage left end is set by ``gate_left_offset_mm`` (distance from
+    the product left edge); left of it the 2nd stage is absent (the 1st
+    stage and the deep runner stay full width).
 
     The deep runner overrides the depth along the **left** slanted edge
     (valve -> left end) with a trapezoid cross-section (opening
@@ -988,12 +993,13 @@ class FilmGate2Config:
     plate_thk_mm: float
     gate_depth_mm: float  # D: trapezoid depth (y) at the valve side
     gate_position_mm: float = 0.0  # 0 -> valve at right end (right trapezoid)
+    gate_left_offset_mm: float = 0.0  # trapezoid left end; trim everything left of it
     left_edge_mm: float = 10.0  # trapezoid depth (y) at the long-edge ends
     land_width_mm: float = 1.0  # land band width (distance from long edge)
     land_depth_mm: float = 0.35  # land thickness
     taper1_len_mm: float = 8.0  # L1: upper taper y-length
-    mid_depth_a_mm: float = 1.5  # upper-taper deep end
-    mid_depth_b_mm: float = 1.5  # lower-taper shallow end (= a -> continuous)
+    mid_depth_a_mm: float = 2.0  # 1st stage (long-edge side) floor — thick
+    mid_depth_b_mm: float = 1.0  # 2nd stage (runner side) depth — thin
     taper2_left_mm: float = 5.0  # lower-taper far point (from long edge), end side
     taper2_right_mm: float = 10.0  # lower-taper far point (from long edge), valve side
     runner_depth_mm: float = 3.0  # deep runner z-depth
@@ -1058,6 +1064,15 @@ class FilmGate2Config:
                 f"gate_position_mm ({self.gate_position_mm}) must be in "
                 f"[0, plate_w_mm] ([0, {self.plate_w_mm}])"
             )
+        if self.gate_left_offset_mm < -eps:
+            raise ValueError("gate_left_offset_mm must be >= 0")
+        if self.gate_left_offset_mm >= self.plate_w_mm - self.gate_position_mm - eps:
+            raise ValueError(
+                f"gate_left_offset_mm ({self.gate_left_offset_mm}) must be < "
+                f"plate_w_mm - gate_position_mm "
+                f"({self.plate_w_mm - self.gate_position_mm}); "
+                f"the 2nd-stage left end must stay left of the valve"
+            )
         if self.left_edge_mm > self.gate_depth_mm + eps:
             raise ValueError(
                 f"left_edge_mm ({self.left_edge_mm}) must be <= "
@@ -1108,6 +1123,7 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     dx = cfg.cell_size_mm
     le = cfg.left_edge_mm
     gp = cfg.gate_position_mm
+    gate_left_offset = cfg.gate_left_offset_mm
     w_land = cfg.land_width_mm
     d_land = cfg.land_depth_mm
     L1 = cfg.taper1_len_mm
@@ -1133,9 +1149,10 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
 
     # valve gate position (farthest point from the long edge)
     x_g = pad + (Wp - gp)
+    x_2nd = pad + gate_left_offset  # lower-taper (2nd stage) left end
     y_c = y_long - D
 
-    # --- silhouette: per-column trapezoid bottom y_bottom(x) ---
+    # --- silhouette: full width (1st stage + deep runner span the whole edge) ---
     left_x1, left_y1 = pad, y_long - le  # left long-edge end
     right_y2 = y_long - le  # right long-edge end y
     left_span = x_g - pad
@@ -1169,9 +1186,16 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     base = np.where(t <= w_land, d_land, base)
     upper = (t > w_land) & (t <= t2_)
     base = np.where(upper, d_land + (d_a - d_land) * (t - w_land) / max(L1, 1e-12), base)
-    l2x = np.maximum(t_lower - t2_, 1e-12)  # lower-taper length at this x
-    lower = (t > t2_) & (t <= t_lower)
-    base = np.where(lower, d_b + (r_depth - d_b) * (t - t2_) / l2x, base)
+    # 1st stage (long-edge side) is the THICK floor mid_a; the 2nd stage
+    # (runner side) is the THIN constant mid_b sitting beyond it — gate-far
+    # depth (mid_a) is larger so resin flows easier toward the long edge.
+    # The deep runner (slanted edge) is added separately and stays deepest.
+    # The 2nd stage exists only right of its left end x_2nd.
+    has_2nd = xx >= x_2nd
+    lower = (t > t2_) & (t <= t_lower) & has_2nd
+    base = np.where(lower, d_b, base)  # 2nd stage: thin, constant mid_b
+    no_2nd = (t > t2_) & (~has_2nd)
+    base = np.where(no_2nd, d_a, base)  # left of x_2nd: stay at 1st-stage floor
 
     # --- deep runner along the LEFT slanted edge (trapezoid cross-section) ---
     runner = np.zeros_like(t)

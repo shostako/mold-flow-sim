@@ -1182,7 +1182,11 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     # farthest long-edge end.
     far_span = max(x_g - pad, (pad + Wp) - x_g, 1e-12)
     t_lower = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
-    base = np.full_like(t, r_depth)
+    # Default floor is the THIN 2nd-stage depth mid_b, not the deep-runner
+    # depth: cells beyond the 2nd-stage far point (t > t_lower) continue at
+    # mid_b. The deep runner (slanted edge only) is layered on top via
+    # max(base, runner) below — it must NOT bleed across the whole gate face.
+    base = np.full_like(t, d_b)
     base = np.where(t <= w_land, d_land, base)
     upper = (t > w_land) & (t <= t2_)
     base = np.where(upper, d_land + (d_a - d_land) * (t - w_land) / max(L1, 1e-12), base)

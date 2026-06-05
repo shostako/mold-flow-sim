@@ -295,12 +295,12 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Film gate 1 (台形)",
-            "Film gate 2 (肉厚調整ゲート)",
+            "Film gate 1 (左右対称)",
+            "Film gate 2 (ゲート位置可変)",
             "Direct gate (parametric)",
             "画像から生成 (PNG/JPG)",
         ],
-        index=0,
+        index=1,
     )
 
     if geom_source.startswith("Direct gate"):
@@ -408,6 +408,14 @@ with st.sidebar:
             step=5.0,
             help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
         )
+        gate_left_offset_f2 = st.slider(
+            "2段目の左端（製品左端からの距離）[mm]",
+            0.0,
+            float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0)),
+            0.0,
+            step=5.0,
+            help="2段目（下段テーパ）の左端。これより左は2段目が無く1段目だけ。0で全幅。",
+        )
         left_edge_f2 = st.slider(
             "左端の高さ [mm]",
             0.0,
@@ -424,14 +432,21 @@ with st.sidebar:
 
         st.markdown("**2段テーパ（底辺距離・段差可）**")
         taper1_len_f2 = st.slider("上段テーパ長 L1 [mm]", 1.0, 30.0, 8.0, step=0.5)
-        mid_a_f2 = st.slider("上段深端 [mm]", 0.2, 5.0, 1.5, step=0.1, help="上段テーパの深い端。")
-        mid_b_f2 = st.slider(
-            "下段浅端 [mm]",
+        mid_a_f2 = st.slider(
+            "1段目の深さ [mm]（製品長辺側・厚め）",
             0.2,
             5.0,
-            1.5,
+            2.0,
             step=0.1,
-            help="下段テーパの浅い端。上段深端と違う値にすると境界に段差ができる。",
+            help="製品長辺側（ゲートから遠い）の肉厚。流れやすくするため厚めにする。",
+        )
+        mid_b_f2 = st.slider(
+            "2段目の深さ [mm]（深ランナー寄り・薄め）",
+            0.2,
+            5.0,
+            1.0,
+            step=0.1,
+            help="深ランナー寄りの段の肉厚。1段目と違う値にすると境界に段差ができる。",
         )
         taper2_left_f2 = st.slider(
             "下段テーパ 端側の最遠点 [mm]",
@@ -862,6 +877,7 @@ def build_geometry() -> Geometry:
                 plate_thk_mm=plate_thk_f2,
                 gate_depth_mm=gate_depth_f2,
                 gate_position_mm=gate_position_f2,
+                gate_left_offset_mm=gate_left_offset_f2,
                 left_edge_mm=left_edge_f2,
                 land_width_mm=land_width_f2,
                 land_depth_mm=land_depth_f2,

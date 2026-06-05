@@ -19,8 +19,8 @@ def _default_cfg(**overrides) -> FilmGate2Config:
         land_width_mm=1.0,
         land_depth_mm=0.35,
         taper1_len_mm=8.0,
-        mid_depth_a_mm=1.5,
-        mid_depth_b_mm=1.5,
+        mid_depth_a_mm=2.0,
+        mid_depth_b_mm=1.0,
         taper2_left_mm=5.0,
         taper2_right_mm=10.0,
         runner_depth_mm=3.0,
@@ -114,6 +114,54 @@ def test_isosceles_silhouette_is_left_right_symmetric() -> None:
     assert diff <= 2 * m.shape[0], f"silhouette not symmetric (diff={diff})"
 
 
+def test_gate_left_offset_limits_second_stage() -> None:
+    """gate_left_offset は2段目(下段)の左端。左より左は2段目が無く、
+    1段目と深ランナーは全幅で残る。"""
+    cfg = _default_cfg(
+        gate_left_offset_mm=80.0,
+        gate_position_mm=0.0,
+        taper2_right_mm=18.0,
+        taper2_left_mm=12.0,
+        gate_depth_mm=40.0,
+        land_width_mm=1.0,
+        taper1_len_mm=4.0,
+    )
+    g = build_film_gate2_geometry(cfg)
+    yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
+    t = y_long - yy
+    thk = g.thickness_mm
+    t2 = cfg.land_width_mm + cfg.taper1_len_mm
+    # 1st stage spans the full width (gate present even left of x_2nd)
+    left_1st = g.mask & (xx < x_2nd - 5.0) & (t > cfg.land_width_mm + 0.5) & (t < t2)
+    assert left_1st.any()
+    # left of x_2nd, beyond t2: NO 2nd stage (mid_b); stays at 1st-stage floor
+    # judge just beyond t2 (well clear of the deep runner near the slanted edge)
+    left_2nd = (
+        g.mask
+        & (xx < x_2nd - 5.0)
+        & (np.abs(t - (t2 + 2.0)) < 1.0)
+        & (np.abs(thk - cfg.mid_depth_b_mm) < 0.1)
+    )
+    assert not left_2nd.any()
+    # right of x_2nd, just beyond t2: 2nd stage (mid_b) present
+    right_2nd = (
+        g.mask
+        & (xx > x_2nd + 5.0)
+        & (np.abs(t - (t2 + 2.0)) < 1.0)
+        & (np.abs(thk - cfg.mid_depth_b_mm) < 0.1)
+    )
+    assert right_2nd.any()
+
+
+def test_gate_left_offset_validation_rejects_past_valve() -> None:
+    """左端が注入点を越える設定は reject。"""
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(
+            _default_cfg(gate_position_mm=0.0, gate_left_offset_mm=130.0, plate_w_mm=120.0)
+        )
+
+
 # ------------------- depth profile (base distance) -----------
 
 
@@ -190,12 +238,14 @@ def test_lower_taper_far_point_is_trapezoid() -> None:
     t = y_long - yy
     thk = g.thickness_mm
 
+    t2 = cfg.land_width_mm + cfg.taper1_len_mm
+
     def far_point(x_target: float) -> float:
-        # right of the valve → no deep runner, isolate the lower taper band
+        # right of the valve; the 2nd stage is the constant mid_b band beyond t2
         col = g.mask & (np.abs(xx - x_target) < 0.6) & (yy < y_long) & (xx > x_g)
         ct, cthk = t[col], thk[col]
-        in_lower = (cthk > cfg.mid_depth_b_mm + 0.05) & (cthk < cfg.runner_depth_mm - 0.05)
-        return float(ct[in_lower].max()) if in_lower.any() else 0.0
+        in_2nd = (np.abs(cthk - cfg.mid_depth_b_mm) < 0.1) & (ct > t2)
+        return float(ct[in_2nd].max()) if in_2nd.any() else 0.0
 
     fp_valve = far_point(x_g + 5.0)
     fp_end = far_point(x_g + 50.0)
@@ -207,16 +257,20 @@ def test_lower_taper_present_at_far_end() -> None:
     (no sharp wedge tip)."""
     cfg = _default_cfg(
         taper2_left_mm=8.0,
+        taper2_right_mm=12.0,
         land_width_mm=1.0,
         taper1_len_mm=3.0,
         gate_position_mm=60.0,
     )
     g = build_film_gate2_geometry(cfg)
     yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    t = y_long - yy
+    t2 = cfg.land_width_mm + cfg.taper1_len_mm
     end_col = g.mask & (xx > cfg.pad_mm + cfg.plate_w_mm - 6.0) & (yy < y_long) & (xx > x_g)
     cthk = g.thickness_mm[end_col]
-    has_lower = ((cthk > cfg.mid_depth_b_mm + 0.05) & (cthk < cfg.runner_depth_mm - 0.05)).any()
-    assert has_lower
+    ct = t[end_col]
+    has_2nd = ((np.abs(cthk - cfg.mid_depth_b_mm) < 0.1) & (ct > t2)).any()
+    assert has_2nd
 
 
 # ----------------------- plate split -------------------------

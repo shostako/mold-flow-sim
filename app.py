@@ -408,11 +408,12 @@ with st.sidebar:
             step=5.0,
             help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
         )
+        _gate_left_offset_max_f2 = float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0))
         gate_left_offset_f2 = st.slider(
             "2段目の左端（製品左端からの距離）[mm]",
             0.0,
-            float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0)),
-            0.0,
+            _gate_left_offset_max_f2,
+            min(150.0, _gate_left_offset_max_f2),
             step=5.0,
             help="2段目（下段テーパ）の左端。これより左は2段目が無く1段目だけ。0で全幅。",
         )

@@ -85,6 +85,26 @@ def test_deep_runner_reaches_runner_depth() -> None:
     assert np.isclose(gate_max, cfg.runner_depth_mm, atol=1e-6)
 
 
+def test_deep_runner_stays_a_narrow_band_not_flooding_gate_face() -> None:
+    # Regression: a past bug defaulted the depth floor to runner_depth, so
+    # every gate cell beyond the 2nd-stage far point (t > t_lower) became the
+    # deepest value, flooding the whole gate face. The deep runner must stay a
+    # NARROW band along the slanted edge; the floor beyond the 2nd stage is the
+    # thin mid_b, never runner_depth. (Asserting only that the *max* reaches
+    # runner_depth — as test_deep_runner_reaches_runner_depth does — does NOT
+    # catch this, because the flooded case has the same max.)
+    cfg = _default_cfg()
+    g = build_film_gate2_geometry(cfg)
+    yy, _xx, y_long, _x_g = _grid(cfg, g.thickness_mm.shape)
+    gate = g.mask & (yy < y_long - 1e-9)
+    deepest = g.thickness_mm >= cfg.runner_depth_mm - 1e-6
+    frac = np.count_nonzero(gate & deepest) / np.count_nonzero(gate)
+    assert frac < 0.25, (
+        f"deep runner floods {frac:.0%} of the gate face; it must stay a narrow "
+        "band along the slanted edge"
+    )
+
+
 # ----------------------- silhouette --------------------------
 
 

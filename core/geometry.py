@@ -944,7 +944,7 @@ class FilmGate2Config:
 
         A top-left ──[product long edge = base, width Wp]── top-right
         | land (land_width_mm, land_depth_mm)
-        |left_edge     upper/lower taper (depth set by distance-from-base t)
+        |left_edge     2nd taper (thin, near land) / 1st taper (thick) / floor
         +----deep runner (along the slanted edge, trapezoid section)--* valve
           left height      slanted edge = farthest from the product
 
@@ -953,33 +953,37 @@ class FilmGate2Config:
     ``Wp`` → left end. The trapezoid depth (y) is ``gate_depth_mm`` at the
     valve side and ``left_edge_mm`` at both long-edge ends.
 
-    Depth profile f(t)  (t = distance from the product long edge)::
+    Depth profile f(t)  (t = distance from the product long edge, the land at
+    t=0; the profile runs land → toward the deep runner)::
 
-        t <= land_width                  : land_depth
-        land_width < t <= land_width+L1  : land_depth -> mid_depth_a  (1st stage, THICK)
-        land_width+L1 < t <= t_lower(x)  : mid_depth_b (2nd stage, THIN, constant)
-                                           — only where x >= the 2nd-stage left end
-        (left of that left end           : stays at mid_depth_a, the 1st-stage floor)
-        else (toward the slanted edge)   : runner_depth (deep runner)
+        t <= land_width                       : land_depth
+        land_width < t <= t_2nd_end(x)        : taper2_near -> mid_depth_b  (2nd taper, THIN)
+        t_2nd_end(x) < t <= t_2nd_end(x)+L1   : mid_depth_b -> mid_depth_a  (1st taper, THICK)
+        else (toward the slanted edge)        : mid_depth_a floor / runner_depth
 
-    The 1st stage (near the product long edge, i.e. far from the valve) is
-    the THICK floor ``mid_depth_a`` so resin flows easier there; the 2nd
-    stage (toward the deep runner) is the THIN constant ``mid_depth_b``.
-    ``mid_depth_a`` > ``mid_depth_b`` makes the design step at the boundary.
-    The 2nd-stage left end is set by ``gate_left_offset_mm`` (distance from
-    the product left edge); left of it the 2nd stage is absent (the 1st
-    stage and the deep runner stay full width).
+    The THIN 2nd taper sits right next to the land (long-edge side); the THICK
+    1st taper is sandwiched between the 2nd taper and the deep runner, and the
+    floor beyond it is ``mid_depth_a``. The 2nd taper exists only where
+    ``x >= x_2nd`` (``x_2nd = pad + gate_left_offset_mm``); left of it the 2nd
+    taper is absent and a single taper runs land → ``mid_depth_a`` (the 1st
+    taper and the deep runner stay full width).
+
+    The 2nd taper is a wedge in plan view: its width in t is ``taper2_right_mm``
+    at the valve side and ``taper2_left_mm`` at the far end (interpolated by
+    distance from the valve), so ``mid_depth_b`` is reached at a varying t. The
+    2nd↔1st taper boundary is a continuous slope (``mid_depth_b`` →
+    ``mid_depth_a``), NOT a step.
+
+    Land-boundary steps: the taper-start depths ``taper2_near_depth_mm`` (land↔
+    2nd taper, where the 2nd stage exists) and ``taper1_near_depth_mm`` (land↔
+    1st taper, where the 2nd stage is absent) default to ``land_depth_mm``
+    (continuous). Set either to a different value (≤ ``runner_depth_mm``) to
+    create a sharp step right after the land.
 
     The deep runner overrides the depth along the **left** slanted edge
     (valve -> left end) with a trapezoid cross-section (opening
     ``runner_top_mm`` / bottom ``runner_bottom_mm`` / depth
     ``runner_depth_mm``) keyed on the normal distance from that edge.
-
-    The lower taper (青テーパ) is a trapezoid in plan view: its far point
-    ``t_lower(x)`` (the deepest distance from the long edge) is
-    ``taper2_right_mm`` at the valve side and ``taper2_left_mm`` at the far
-    end, interpolated linearly by distance from the valve. This removes the
-    sharp wedge tip — both ends keep a finite lower-taper length.
 
     Optional plate split (gate-side / far-side two-zone thickness) works
     exactly like :class:`FilmGateConfig`: when ``plate_split_height_mm > 0``
@@ -1000,6 +1004,13 @@ class FilmGate2Config:
     taper1_len_mm: float = 8.0  # L1: upper taper y-length
     mid_depth_a_mm: float = 2.0  # 1st stage (long-edge side) floor — thick
     mid_depth_b_mm: float = 1.0  # 2nd stage (runner side) depth — thin
+    # Land-boundary (taper-start) depths. None => continuous with the land (no
+    # step); a value different from land_depth makes a sharp step at the
+    # land↔taper boundary. taper2_near = land↔2nd-taper boundary (where the 2nd
+    # stage exists, x >= x_2nd); taper1_near = land↔1st-taper boundary (where
+    # the 2nd stage is absent, x < x_2nd). Both fall back to land_depth_mm.
+    taper2_near_depth_mm: float | None = None
+    taper1_near_depth_mm: float | None = None
     taper2_left_mm: float = 5.0  # lower-taper far point (from long edge), end side
     taper2_right_mm: float = 10.0  # lower-taper far point (from long edge), valve side
     runner_depth_mm: float = 3.0  # deep runner z-depth
@@ -1033,6 +1044,28 @@ class FilmGate2Config:
             )
             return float(self.plate_split_height_mm), float(lower), float(upper)
         return 0.0, float(self.plate_thk_mm), float(self.plate_thk_mm)
+
+    def resolved_taper_near_depths(self) -> tuple[float, float]:
+        """Return ``(taper2_near, taper1_near)`` boundary (taper-start) depths.
+
+        Both default to ``land_depth_mm`` (continuous with the land, no step).
+        ``taper2_near`` is the land↔2nd-taper boundary depth (where the 2nd
+        stage exists); ``taper1_near`` is the land↔1st-taper boundary depth
+        (where the 2nd stage is absent). A value different from ``land_depth``
+        creates a sharp step at that boundary. The 2nd↔1st-taper boundary stays
+        a continuous slope (``mid_depth_b`` → ``mid_depth_a``).
+        """
+        d2 = (
+            self.taper2_near_depth_mm
+            if self.taper2_near_depth_mm is not None
+            else self.land_depth_mm
+        )
+        d1 = (
+            self.taper1_near_depth_mm
+            if self.taper1_near_depth_mm is not None
+            else self.land_depth_mm
+        )
+        return float(d2), float(d1)
 
     def validate(self) -> None:
         eps = 1e-6
@@ -1090,6 +1123,19 @@ class FilmGate2Config:
                 f"taper depth (max of land+taper1, taper2 far point = {depth_used}) "
                 f"must be <= gate_depth_mm ({self.gate_depth_mm})"
             )
+        for nm, val in (
+            ("taper2_near_depth_mm", self.taper2_near_depth_mm),
+            ("taper1_near_depth_mm", self.taper1_near_depth_mm),
+        ):
+            if val is None:
+                continue
+            if val <= 0:
+                raise ValueError(f"{nm} ({val}) must be > 0 when set")
+            if val > self.runner_depth_mm + eps:
+                raise ValueError(
+                    f"{nm} ({val}) must be <= runner_depth_mm "
+                    f"({self.runner_depth_mm}); the deep runner must stay deepest"
+                )
         # plate split validation (same constraints as FilmGateConfig)
         if self.plate_split_height_mm < 0:
             raise ValueError(f"plate_split_height_mm ({self.plate_split_height_mm}) must be >= 0")
@@ -1135,6 +1181,7 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     r_top = cfg.runner_top_mm
     r_bot = cfg.runner_bottom_mm
     split_h, h_lo, h_up = cfg.resolved_plate_zones()
+    d2_near, d1_near = cfg.resolved_taper_near_depths()
 
     y_long = pad + D  # product long edge (trapezoid base)
     y_plate_top = y_long + Hp
@@ -1174,32 +1221,39 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     mask = in_gate | in_plate
 
     # --- gate depth: distance-from-base taper profile f(t) ---
+    # Profile order from the product long edge (land) toward the valve point:
+    #   land -> 2nd taper (THIN mid_b) -> 1st taper (THICK mid_a) -> mid_a floor
+    # The thin 2nd stage sits right next to the land (long-edge side); the
+    # thick 1st stage is sandwiched between the 2nd stage and the deep runner.
+    # The deep runner (slanted edge only) is layered on top via max(base,
+    # runner) below — it must NOT bleed across the whole gate face.
     t = y_long - yy  # distance from the product long edge (>=0 inside gate)
-    t2_ = w_land + L1  # upper/lower taper boundary (distance from long edge)
-    # Lower-taper far point (青テーパの下端) varies along x: taper2_right at
-    # the valve side, taper2_left at the far end → the blue lower taper is a
-    # trapezoid, not a sharp wedge. dist_ratio is 0 at the valve, 1 at the
-    # farthest long-edge end.
     far_span = max(x_g - pad, (pad + Wp) - x_g, 1e-12)
-    t_lower = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
-    # Default floor is the THIN 2nd-stage depth mid_b, not the deep-runner
-    # depth: cells beyond the 2nd-stage far point (t > t_lower) continue at
-    # mid_b. The deep runner (slanted edge only) is layered on top via
-    # max(base, runner) below — it must NOT bleed across the whole gate face.
-    base = np.full_like(t, d_b)
-    base = np.where(t <= w_land, d_land, base)
-    upper = (t > w_land) & (t <= t2_)
-    base = np.where(upper, d_land + (d_a - d_land) * (t - w_land) / max(L1, 1e-12), base)
-    # 1st stage (long-edge side) is the THICK floor mid_a; the 2nd stage
-    # (runner side) is the THIN constant mid_b sitting beyond it — gate-far
-    # depth (mid_a) is larger so resin flows easier toward the long edge.
-    # The deep runner (slanted edge) is added separately and stays deepest.
-    # The 2nd stage exists only right of its left end x_2nd.
-    has_2nd = xx >= x_2nd
-    lower = (t > t2_) & (t <= t_lower) & has_2nd
-    base = np.where(lower, d_b, base)  # 2nd stage: thin, constant mid_b
-    no_2nd = (t > t2_) & (~has_2nd)
-    base = np.where(no_2nd, d_a, base)  # left of x_2nd: stay at 1st-stage floor
+    # 2nd-stage taper WIDTH in the t-direction (trapezoid, not a sharp wedge):
+    # wider at the valve side (taper2_right), narrower at the far long-edge end
+    # (taper2_left). dist_ratio is 0 at the valve, 1 at the farthest end.
+    width2 = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
+    has_2nd = xx >= x_2nd  # 2nd stage exists only right of its left end x_2nd
+    w2 = np.where(has_2nd, width2, 0.0)
+    t_2nd_end = w_land + w2  # far end of the thin 2nd taper (next to the land)
+    t_1st_end = t_2nd_end + L1  # far end of the thick 1st taper
+
+    base = np.full_like(t, d_a)  # floor beyond the 1st taper = thick mid_a
+    base = np.where(t <= w_land, d_land, base)  # land
+    # 2nd taper (thin, long-edge side): start depth d2_near -> mid_b. d2_near
+    # defaults to land_depth (continuous); a different value steps at the
+    # land↔2nd-taper boundary.
+    in2 = has_2nd & (t > w_land) & (t <= t_2nd_end)
+    base = np.where(in2, d2_near + (d_b - d2_near) * (t - w_land) / np.maximum(w2, 1e-12), base)
+    # 1st taper (thick): mid_b -> mid_a, sitting between the 2nd stage and the
+    # deep runner (the "1st-stage remnant"). Always continuous with the 2nd
+    # stage's far depth mid_b (the 2nd↔1st boundary is a slope, not a step).
+    in1 = has_2nd & (t > t_2nd_end) & (t <= t_1st_end)
+    base = np.where(in1, d_b + (d_a - d_b) * (t - t_2nd_end) / max(L1, 1e-12), base)
+    # left of x_2nd (no 2nd stage): a single taper d1_near -> mid_a. d1_near is
+    # the land↔1st-taper boundary depth (defaults to land_depth = continuous).
+    in_single = (~has_2nd) & (t > w_land) & (t <= w_land + L1)
+    base = np.where(in_single, d1_near + (d_a - d1_near) * (t - w_land) / max(L1, 1e-12), base)
 
     # --- deep runner along the LEFT slanted edge (trapezoid cross-section) ---
     runner = np.zeros_like(t)

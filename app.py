@@ -490,13 +490,17 @@ with st.sidebar:
                     help="2段目の製品長辺から一番離れた点。注入点側（台形の大きい辺）。",
                 )
             else:
-                # 単一テーパ: 薄い2段目を消す。mid_b=mid_a で深さ段差ゼロにし、
-                # 2段境界を右端ギリギリ（製品幅-1mm、validate 上限内）へ追いやって
-                # 2段領域を実質消す。残るのは右端 1mm の細片のみ（段差なし）。
-                gate_left_offset_f2 = max(plate_w_f2 - gate_position_f2 - 1.0, 0.0)
-                mid_b_f2 = float(mid_a_f2)
-                taper2_left_f2 = 5.0
-                taper2_right_f2 = 5.0
+                # 全幅で完全に同一の単一テーパにする（gate_position に依存しない）。
+                # gate_left_offset=0 で has_2nd を全幅 True にし、2段目の遠点を
+                # ランド端 (land_width) に潰す（far2=w_land 一定）と in2 は空になり、
+                # in1 が mid_b→mid_a を [w_land, w_land+L1] で描く。mid_b=land_depth に
+                # すると in1 は land_depth→mid_a の単一ランプ（長さ L1）になり、
+                # ランプ開始が land と連続。far2 一定なので左右で差が出ず、
+                # far_max=land_width なので validate の extent 膨張もない。
+                gate_left_offset_f2 = 0.0
+                mid_b_f2 = float(land_depth_f2)
+                taper2_left_f2 = float(land_width_f2)
+                taper2_right_f2 = float(land_width_f2)
 
             st.markdown("**深ランナー（左斜辺沿い・台形断面）**")
             runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)

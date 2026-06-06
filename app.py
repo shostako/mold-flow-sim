@@ -304,7 +304,7 @@ with st.sidebar:
     )
 
     if geom_source.startswith("Direct gate"):
-        with st.expander("製品・ゲート形状", expanded=True):
+        with st.expander("製品・ゲート形状", expanded=False):
             # Match Film gate defaults: plate 300×50, with the optional 2-zone
             # split (gate-side 0.35 / far-side 0.50, switching at 20 mm from
             # the gate-side edge).
@@ -371,7 +371,7 @@ with st.sidebar:
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     elif geom_source.startswith("Film gate 2"):
-        with st.expander("製品形状", expanded=True):
+        with st.expander("製品形状", expanded=False):
             plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
             plate_h_f2 = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
 
@@ -533,7 +533,7 @@ with st.sidebar:
             cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     elif geom_source.startswith("Film gate"):
-        with st.expander("製品・ゲート形状", expanded=True):
+        with st.expander("製品・ゲート形状", expanded=False):
             plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
             plate_h = st.slider("製品高さ Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
 
@@ -705,7 +705,7 @@ with st.sidebar:
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     else:
-        with st.expander("画像入力", expanded=True):
+        with st.expander("画像入力", expanded=False):
             upload = st.file_uploader(
                 "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
             )
@@ -714,7 +714,7 @@ with st.sidebar:
             invert = st.checkbox("白を内部として扱う（反転）", value=False)
             threshold = st.slider("二値化しきい値", 16, 240, 128)
 
-    with st.expander("材料", expanded=True):
+    with st.expander("材料", expanded=False):
         material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
         mat = db[material_key]
         st.caption(f"{mat.name}")
@@ -723,7 +723,7 @@ with st.sidebar:
             f"mold: {mat.T_mold_recommended[0] - 273.15:.0f}–{mat.T_mold_recommended[1] - 273.15:.0f} ℃"
         )
 
-    with st.expander("射出条件", expanded=True):
+    with st.expander("射出条件", expanded=False):
         _melt_min = int(mat.T_melt_recommended[0] - 273.15) - 20
         _melt_max = int(mat.T_melt_recommended[1] - 273.15) + 20
         melt_C = st.slider(

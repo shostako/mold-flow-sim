@@ -304,578 +304,612 @@ with st.sidebar:
     )
 
     if geom_source.startswith("Direct gate"):
-        # Match Film gate defaults: plate 300×50, with the optional 2-zone
-        # split (gate-side 0.35 / far-side 0.50, switching at 20 mm from
-        # the gate-side edge).
-        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
-        plate_h = st.slider("製品高 Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+        with st.expander("製品・ゲート形状", expanded=True):
+            # Match Film gate defaults: plate 300×50, with the optional 2-zone
+            # split (gate-side 0.35 / far-side 0.50, switching at 20 mm from
+            # the gate-side edge).
+            plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+            plate_h = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
 
-        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
-        plate_split_dg = st.slider(
-            "段差位置 [mm]",
-            0.0,
-            float(plate_h),
-            min(20.0, float(plate_h)),
-            step=1.0,
-            help="ゲート側辺（下辺）からの距離。0 で均一肉厚。",
-        )
-        if plate_split_dg > 0:
-            plate_lower_thk_dg = st.slider(
-                "ゲート側肉厚 [mm]",
-                0.2,
-                2.0,
-                0.35,
-                step=0.05,
+            st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
+            plate_split_dg = st.slider(
+                "段差位置 [mm]",
+                0.0,
+                float(plate_h),
+                min(20.0, float(plate_h)),
+                step=1.0,
+                help="ゲート側辺（下辺）からの距離。0 で均一肉厚。",
             )
-            plate_upper_thk_dg = st.slider(
-                "反ゲート側肉厚 [mm]",
-                0.2,
-                2.0,
-                0.50,
-                step=0.05,
-            )
-            plate_thk = float(plate_lower_thk_dg)
-        else:
-            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 0.4, step=0.1)
-            plate_lower_thk_dg = float(plate_thk)
-            plate_upper_thk_dg = float(plate_thk)
+            if plate_split_dg > 0:
+                plate_lower_thk_dg = st.slider(
+                    "ゲート側肉厚 [mm]",
+                    0.2,
+                    2.0,
+                    0.35,
+                    step=0.05,
+                )
+                plate_upper_thk_dg = st.slider(
+                    "反ゲート側肉厚 [mm]",
+                    0.2,
+                    2.0,
+                    0.50,
+                    step=0.05,
+                )
+                plate_thk = float(plate_lower_thk_dg)
+            else:
+                plate_thk = st.slider("製品肉厚 [mm]", 0.2, 4.0, 0.4, step=0.1)
+                plate_lower_thk_dg = float(plate_thk)
+                plate_upper_thk_dg = float(plate_thk)
 
-        st.markdown("**ダイレクトゲート**")
-        gate_diameter = st.slider(
-            "ゲート径 Φ [mm]",
-            1.0,
-            10.0,
-            3.0,
-            step=0.5,
-            help="製品内部に配置されるバルブゲート円の直径。",
-        )
-        # ゲートはプレート内部にあるので、offset の上限はプレート高さに
-        # 制約される（ゲート円が反対端を突き抜けない）。下限はゲート半径
-        # （ゲート円がゲート側辺を突き抜けない）。
-        _g_off_min = float(gate_diameter / 2.0)
-        _g_off_max = float(plate_h - gate_diameter / 2.0)
-        _g_off_default = max(_g_off_min, min(20.0, _g_off_max))
-        gate_offset = st.slider(
-            "ゲート位置（ゲート側辺から内側へ）[mm]",
-            _g_off_min,
-            _g_off_max,
-            _g_off_default,
-            step=1.0,
-            help=(
-                "プレートのゲート側辺（下辺）から内側へ何 mm の位置に"
-                "ゲート中心を置くか。ゲートはプレート内部に直接ある"
-                "（ランナーもスプルーもない、垂直に注入する）。"
-            ),
-        )
-        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
-        upload = None
-    elif geom_source.startswith("Film gate 2"):
-        plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
-        plate_h_f2 = st.slider("製品高 Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
-
-        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
-        plate_split_f2 = st.slider(
-            "段差位置 [mm]",
-            0.0,
-            float(plate_h_f2),
-            min(20.0, float(plate_h_f2)),
-            step=1.0,
-            help="製品長辺からの距離。0 で均一肉厚。",
-        )
-        if plate_split_f2 > 0:
-            plate_lower_f2 = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
-            plate_upper_f2 = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
-            plate_thk_f2 = float(plate_lower_f2)
-        else:
-            plate_thk_f2 = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
-            plate_lower_f2 = float(plate_thk_f2)
-            plate_upper_f2 = float(plate_thk_f2)
-
-        st.markdown("**ゲート台形（直角台形）**")
-        gate_depth_f2 = st.slider(
-            "ゲート高さ D [mm]（注入点側）",
-            10.0,
-            60.0,
-            20.0,
-            step=1.0,
-            help="製品長辺から注入点までの距離（台形の高さ）。",
-        )
-        gate_position_f2 = st.slider(
-            "ゲート位置 [mm]（0=右端 / Wp÷2=中央=二等辺）",
-            0.0,
-            float(plate_w_f2),
-            0.0,
-            step=5.0,
-            help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
-        )
-        _gate_left_offset_max_f2 = float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0))
-        gate_left_offset_f2 = st.slider(
-            "2段目の左端（製品左端からの距離）[mm]",
-            0.0,
-            _gate_left_offset_max_f2,
-            min(150.0, _gate_left_offset_max_f2),
-            step=5.0,
-            help="2段目（下段テーパ）の左端。これより左は2段目が無く1段目だけ。0で全幅。",
-        )
-        left_edge_f2 = st.slider(
-            "左端の高さ [mm]",
-            0.0,
-            min(15.0, float(gate_depth_f2)),
-            min(10.0, float(gate_depth_f2)),
-            step=1.0,
-            help="製品長辺端での台形高さ（台形化＝左端の尖り防止）。",
-        )
-        valve_f2 = st.slider("バルブゲート径 Φ [mm]", 1.0, 10.0, 3.0, step=0.5)
-
-        st.markdown("**ゲートランド（製品長辺接続部）**")
-        land_width_f2 = st.slider("ランド幅 [mm]", 1.0, 5.0, 1.0, step=0.5)
-        land_depth_f2 = st.slider("ランド深さ [mm]", 0.2, 2.0, 0.35, step=0.05)
-
-        st.markdown("**2段テーパ（底辺距離・段差可）**")
-        taper1_len_f2 = st.slider("上段テーパ長 L1 [mm]", 1.0, 30.0, 8.0, step=0.5)
-        mid_a_f2 = st.slider(
-            "1段目の深さ [mm]（深ランナー寄り・厚め）",
-            0.2,
-            5.0,
-            2.0,
-            step=0.1,
-            help="2段目の先（深ランナー寄り）の段の肉厚。厚め。",
-        )
-        mid_b_f2 = st.slider(
-            "2段目の深さ [mm]（製品長辺側・薄め）",
-            0.2,
-            5.0,
-            1.0,
-            step=0.1,
-            help="ランド直後（製品長辺側）の段の肉厚。薄め。1段目との境界はスロープで連続。",
-        )
-        taper2_left_f2 = st.slider(
-            "下段テーパ 端側の最遠点 [mm]",
-            1.0,
-            20.0,
-            5.0,
-            step=0.5,
-            help="青テーパ（下段）の製品長辺から一番離れた点。端（楔先端）側。",
-        )
-        taper2_right_f2 = st.slider(
-            "下段テーパ 注入点側の最遠点 [mm]",
-            1.0,
-            20.0,
-            10.0,
-            step=0.5,
-            help="青テーパ（下段）の製品長辺から一番離れた点。注入点側（台形の大きい辺）。",
-        )
-
-        st.markdown("**深ランナー（左斜辺沿い・台形断面）**")
-        runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)
-        runner_top_f2 = st.slider("上底（開口幅）[mm]", 2.0, 5.0, 4.0, step=0.5)
-        runner_bottom_f2 = st.slider("下底（底幅・抜き勾配）[mm]", 1.0, 3.0, 2.0, step=0.5)
-
-        st.markdown("**ランド境界の段差（任意）**")
-        land_step_f2 = st.checkbox(
-            "ランド↔テーパ境界に段差をつける",
-            value=False,
-            help="ランド直後のテーパ始端深さを独立指定して段差を作る。OFFで連続（段差なし）。",
-        )
-        if land_step_f2:
-            taper2_near_f2 = st.slider(
-                "ランド↔2段目テーパ 境界深さ [mm]（2段目がある領域）",
-                0.2,
-                float(runner_depth_f2),
-                min(float(land_depth_f2), float(runner_depth_f2)),
-                step=0.05,
-                help="2段目テーパのランド側始端の深さ。ランド深さと変えると段差。上限は深ランナー深さ。",
-            )
-            taper1_near_f2 = st.slider(
-                "ランド↔1段目テーパ 境界深さ [mm]（2段目が無い領域）",
-                0.2,
-                float(runner_depth_f2),
-                min(float(land_depth_f2), float(runner_depth_f2)),
-                step=0.05,
-                help="2段目が無い左側で、1段目テーパのランド側始端の深さ。上限は深ランナー深さ。",
-            )
-        else:
-            taper2_near_f2 = None
-            taper1_near_f2 = None
-
-        cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
-        upload = None
-    elif geom_source.startswith("Film gate"):
-        plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
-        plate_h = st.slider("製品高 Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
-
-        st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
-        plate_split = st.slider(
-            "段差位置 [mm]",
-            0.0,
-            float(plate_h),
-            min(20.0, float(plate_h)),
-            step=1.0,
-            help="ゲート側長辺からの距離。0 で均一肉厚（旧挙動）",
-        )
-        if plate_split > 0:
-            plate_lower_thk = st.slider(
-                "ゲート側肉厚 [mm]",
-                0.2,
-                2.0,
-                0.35,
-                step=0.05,
-            )
-            plate_upper_thk = st.slider(
-                "反ゲート側肉厚 [mm]",
-                0.2,
-                2.0,
-                0.50,
-                step=0.05,
-            )
-            plate_thk = float(plate_lower_thk)
-        else:
-            plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
-            plate_lower_thk = float(plate_thk)
-            plate_upper_thk = float(plate_thk)
-
-        st.markdown("**ランナー上面投影**")
-        runner_long = st.slider(
-            "長辺 L_long [mm] (≤ 製品幅)",
-            min_value=10.0,
-            max_value=float(plate_w),
-            value=float(plate_w),
-            step=1.0,
-        )
-        runner_short_d = st.slider(
-            "短辺直径 d [mm] (≤ 長辺)",
-            min_value=4.0,
-            max_value=float(runner_long),
-            value=float(min(10.0, runner_long)),
-            step=0.5,
-        )
-        runner_depth = st.slider(
-            "ランナー高さ D [mm] (長辺〜短辺直径線距離)",
-            5.0,
-            60.0,
-            20.0,
-            step=1.0,
-        )
-
-        st.markdown("**ランナー肉厚**")
-        runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 2.5, step=0.1)
-        flat_ratio = st.slider(
-            "厚肉部の比率 D_flat / D",
-            0.0,
-            1.0,
-            0.35,
-            step=0.05,
-            help="0で全スロープ（製品まで連続変化）、1で全フラット（製品との段差大）",
-        )
-
-        st.markdown("**バルブゲート**")
-        valve_d = st.slider(
-            "バルブゲート径 [mm] (≤ d)",
-            min_value=1.0,
-            max_value=float(runner_short_d),
-            value=float(min(3.0, runner_short_d)),
-            step=0.5,
-        )
-
-        # 製品の長辺とランナー長辺は直接接続（くびれ＝ゲート土手なし）
-        gate_w = runner_long
-
-        st.markdown("**フローバランサー（中央肉盗み）**")
-        balancer_on = st.checkbox(
-            "肉盗み（▽）を有効化",
-            value=True,
-            help=(
-                "ランナー中央軸に逆三角形の薄領域を作り、中央への流れを"
-                "意図的に阻害して長辺全体から均一に充填させるLGP系の手法。"
-            ),
-        )
-        if balancer_on:
-            bal_offset_ratio = st.slider(
-                "底辺位置 / D（ゲートからの距離 ÷ ランナー深さ）",
-                0.5,
+            st.markdown("**ダイレクトゲート**")
+            gate_diameter = st.slider(
+                "ゲート径 Φ [mm]",
                 1.0,
-                1.0,
-                step=0.05,
-                help="1.0で底辺が長辺と一致（製品まで肉盗みが届く）",
+                10.0,
+                3.0,
+                step=0.5,
+                help="製品内部に配置されるバルブゲート円の直径。",
             )
-            bal_height_ratio = st.slider(
-                "▽の高さ H_bal / D",
-                0.1,
-                0.95,
-                0.70,
-                step=0.05,
-            )
-
-            bal_stage_count = st.slider(
-                "肉盗み段数",
-                1,
-                5,
-                2,
-                step=1,
+            # ゲートはプレート内部にあるので、offset の上限はプレート高さに
+            # 制約される（ゲート円が反対端を突き抜けない）。下限はゲート半径
+            # （ゲート円がゲート側辺を突き抜けない）。
+            _g_off_min = float(gate_diameter / 2.0)
+            _g_off_max = float(plate_h - gate_diameter / 2.0)
+            _g_off_default = max(_g_off_min, min(20.0, _g_off_max))
+            gate_offset = st.slider(
+                "ゲート位置（ゲート側辺から内側へ）[mm]",
+                _g_off_min,
+                _g_off_max,
+                _g_off_default,
+                step=1.0,
                 help=(
-                    "ネスト数。1=単一▽（旧挙動）、2以上で中央＋外側の階段状肉盗み。"
-                    "番号 1 が中央（最薄・最大抵抗）、番号 N が外側。"
+                    "プレートのゲート側辺（下辺）から内側へ何 mm の位置に"
+                    "ゲート中心を置くか。ゲートはプレート内部に直接ある"
+                    "（ランナーもスプルーもない、垂直に注入する）。"
                 ),
             )
-            # default presets: width as a ratio of L_long, thickness as
-            # absolute mm values (clamped to ≤ plate_lower_thk).
-            _w_defaults = {
-                1: [0.60],
-                2: [0.30, 0.60],
-                3: [0.20, 0.45, 0.70],
-                4: [0.15, 0.35, 0.55, 0.80],
-                5: [0.10, 0.30, 0.50, 0.70, 0.95],
-            }
-            _h_defaults_abs = {
-                1: [0.30],
-                2: [0.25, 0.30],
-                3: [0.20, 0.25, 0.30],
-                4: [0.15, 0.20, 0.25, 0.30],
-                5: [0.10, 0.15, 0.20, 0.25, 0.30],
-            }
-            bal_widths_mm: list[float] = []
-            bal_thks: list[float] = []
-            for _k in range(1, bal_stage_count + 1):
-                _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
-                _label_suffix = f"（{_label}）" if _label else ""
-                _w_default = _w_defaults[bal_stage_count][_k - 1]
-                _h_default = max(0.05, _h_defaults_abs[bal_stage_count][_k - 1])
-                _w_ratio = st.slider(
-                    f"底辺幅{_k} / L_long{_label_suffix}",
-                    0.05,
+            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+        upload = None
+    elif geom_source.startswith("Film gate 2"):
+        with st.expander("製品形状", expanded=True):
+            plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+            plate_h_f2 = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+
+            plate_2layer_f2 = st.checkbox(
+                "製品肉厚を2層化する（ゲート側／反ゲート側）",
+                value=True,
+                help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
+            )
+            if plate_2layer_f2:
+                plate_split_f2 = st.slider(
+                    "段差位置（製品長辺から）[mm]",
                     1.0,
-                    _w_default,
-                    step=0.05,
-                    key=f"bal_w_{_k}",
+                    float(plate_h_f2),
+                    min(20.0, float(plate_h_f2)),
+                    step=1.0,
+                    help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
                 )
-                _h_val = st.slider(
-                    f"残り肉厚{_k} [mm]{_label_suffix}",
-                    0.05,
+                plate_lower_f2 = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+                plate_upper_f2 = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
+                plate_thk_f2 = float(plate_lower_f2)
+            else:
+                plate_thk_f2 = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+                plate_split_f2 = 0.0
+                plate_lower_f2 = float(plate_thk_f2)
+                plate_upper_f2 = float(plate_thk_f2)
+
+        with st.expander("ゲート形状", expanded=False):
+            st.markdown("**ゲート台形（直角台形）**")
+            gate_depth_f2 = st.slider(
+                "ゲート高さ D [mm]（注入点側）",
+                10.0,
+                60.0,
+                20.0,
+                step=1.0,
+                help="製品長辺から注入点までの距離（台形の高さ）。",
+            )
+            gate_position_f2 = st.slider(
+                "ゲート位置 [mm]（0=右端 / Wp÷2=中央=二等辺）",
+                0.0,
+                float(plate_w_f2),
+                0.0,
+                step=5.0,
+                help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
+            )
+            left_edge_f2 = st.slider(
+                "左端の高さ [mm]",
+                0.0,
+                min(15.0, float(gate_depth_f2)),
+                min(10.0, float(gate_depth_f2)),
+                step=1.0,
+                help="製品長辺端での台形高さ（台形化＝左端の尖り防止）。",
+            )
+            valve_f2 = st.slider("バルブゲート径 Φ [mm]", 1.0, 10.0, 3.0, step=0.5)
+            _gate_left_offset_max_f2 = float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0))
+
+            st.markdown("**ゲートランド（製品長辺接続部）**")
+            land_width_f2 = st.slider("ランド幅 [mm]", 1.0, 5.0, 1.0, step=0.5)
+            land_depth_f2 = st.slider("ランド深さ [mm]", 0.2, 2.0, 0.35, step=0.05)
+
+            st.markdown("**テーパ面形状**")
+            mid_a_f2 = st.slider(
+                "1段目の深さ [mm]（厚・深ランナー寄り）",
+                0.2,
+                5.0,
+                2.0,
+                step=0.1,
+                help="テーパ面の基本段（深ランナー寄り・厚め）の肉厚。",
+            )
+            taper1_len_f2 = st.slider(
+                "上段テーパ長 L1 [mm]",
+                1.0,
+                30.0,
+                8.0,
+                step=0.5,
+                help="ランドから1段目深さに達するまでの底辺距離。",
+            )
+            taper_2stage_f2 = st.checkbox(
+                "テーパ面を左右で段化する（右側に薄い2段目を追加）",
+                value=True,
+                help=(
+                    "ONで製品幅方向に左右分割。左=1段テーパのみ、"
+                    "右=薄い2段目を足した2段テーパ。OFFで全幅が単一テーパ。"
+                ),
+            )
+            if taper_2stage_f2:
+                gate_left_offset_f2 = st.slider(
+                    "2段境界の位置（製品左端から）[mm]",
+                    0.0,
+                    _gate_left_offset_max_f2,
+                    min(150.0, _gate_left_offset_max_f2),
+                    step=5.0,
+                    help="この位置より右に薄い2段目が入る。左は1段テーパのみ。",
+                )
+                mid_b_f2 = st.slider(
+                    "2段目の深さ [mm]（薄・製品長辺側）",
+                    0.2,
+                    5.0,
                     1.0,
-                    float(_h_default),
+                    step=0.1,
+                    help="ランド直後（製品長辺側）の薄い段の肉厚。1段目との境界はスロープで連続。",
+                )
+                taper2_left_f2 = st.slider(
+                    "2段目テーパ 端側の最遠点 [mm]",
+                    1.0,
+                    20.0,
+                    5.0,
+                    step=0.5,
+                    help="2段目の製品長辺から一番離れた点。端（楔先端）側。",
+                )
+                taper2_right_f2 = st.slider(
+                    "2段目テーパ 注入点側の最遠点 [mm]",
+                    1.0,
+                    20.0,
+                    10.0,
+                    step=0.5,
+                    help="2段目の製品長辺から一番離れた点。注入点側（台形の大きい辺）。",
+                )
+            else:
+                # 単一テーパ: 薄い2段目を消す。mid_b=mid_a で深さ段差ゼロにし、
+                # 2段境界を右端ギリギリ（製品幅-1mm、validate 上限内）へ追いやって
+                # 2段領域を実質消す。残るのは右端 1mm の細片のみ（段差なし）。
+                gate_left_offset_f2 = max(plate_w_f2 - gate_position_f2 - 1.0, 0.0)
+                mid_b_f2 = float(mid_a_f2)
+                taper2_left_f2 = 5.0
+                taper2_right_f2 = 5.0
+
+            st.markdown("**深ランナー（左斜辺沿い・台形断面）**")
+            runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)
+            runner_top_f2 = st.slider("上底（開口幅）[mm]", 2.0, 5.0, 4.0, step=0.5)
+            runner_bottom_f2 = st.slider("下底（底幅・抜き勾配）[mm]", 1.0, 3.0, 2.0, step=0.5)
+
+            land_step_f2 = st.checkbox(
+                "ランド↔テーパ境界に段差をつける",
+                value=False,
+                help="ランド直後のテーパ始端深さを独立指定して段差を作る。OFFで連続（段差なし）。",
+            )
+            if land_step_f2:
+                taper2_near_f2 = st.slider(
+                    "ランド↔2段目テーパ 境界深さ [mm]（2段目がある領域）",
+                    0.2,
+                    float(runner_depth_f2),
+                    min(float(land_depth_f2), float(runner_depth_f2)),
                     step=0.05,
-                    key=f"bal_h_{_k}",
+                    help="2段目テーパのランド側始端の深さ。ランド深さと変えると段差。上限は深ランナー深さ。",
+                )
+                taper1_near_f2 = st.slider(
+                    "ランド↔1段目テーパ 境界深さ [mm]（2段目が無い領域）",
+                    0.2,
+                    float(runner_depth_f2),
+                    min(float(land_depth_f2), float(runner_depth_f2)),
+                    step=0.05,
+                    help="2段目が無い左側で、1段目テーパのランド側始端の深さ。上限は深ランナー深さ。",
+                )
+            else:
+                taper2_near_f2 = None
+                taper1_near_f2 = None
+
+        with st.expander("メッシュ", expanded=False):
+            cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+        upload = None
+    elif geom_source.startswith("Film gate"):
+        with st.expander("製品・ゲート形状", expanded=True):
+            plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
+            plate_h = st.slider("製品高さ Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
+
+            st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
+            plate_split = st.slider(
+                "段差位置 [mm]",
+                0.0,
+                float(plate_h),
+                min(20.0, float(plate_h)),
+                step=1.0,
+                help="ゲート側長辺からの距離。0 で均一肉厚（旧挙動）",
+            )
+            if plate_split > 0:
+                plate_lower_thk = st.slider(
+                    "ゲート側肉厚 [mm]",
+                    0.2,
+                    2.0,
+                    0.35,
+                    step=0.05,
+                )
+                plate_upper_thk = st.slider(
+                    "反ゲート側肉厚 [mm]",
+                    0.2,
+                    2.0,
+                    0.50,
+                    step=0.05,
+                )
+                plate_thk = float(plate_lower_thk)
+            else:
+                plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+                plate_lower_thk = float(plate_thk)
+                plate_upper_thk = float(plate_thk)
+
+            st.markdown("**ランナー上面投影**")
+            runner_long = st.slider(
+                "長辺 L_long [mm] (≤ 製品幅)",
+                min_value=10.0,
+                max_value=float(plate_w),
+                value=float(plate_w),
+                step=1.0,
+            )
+            runner_short_d = st.slider(
+                "短辺直径 d [mm] (≤ 長辺)",
+                min_value=4.0,
+                max_value=float(runner_long),
+                value=float(min(10.0, runner_long)),
+                step=0.5,
+            )
+            runner_depth = st.slider(
+                "ランナー高さ D [mm] (長辺〜短辺直径線距離)",
+                5.0,
+                60.0,
+                20.0,
+                step=1.0,
+            )
+
+            st.markdown("**ランナー肉厚**")
+            runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 2.5, step=0.1)
+            flat_ratio = st.slider(
+                "厚肉部の比率 D_flat / D",
+                0.0,
+                1.0,
+                0.35,
+                step=0.05,
+                help="0で全スロープ（製品まで連続変化）、1で全フラット（製品との段差大）",
+            )
+
+            st.markdown("**バルブゲート**")
+            valve_d = st.slider(
+                "バルブゲート径 [mm] (≤ d)",
+                min_value=1.0,
+                max_value=float(runner_short_d),
+                value=float(min(3.0, runner_short_d)),
+                step=0.5,
+            )
+
+            # 製品の長辺とランナー長辺は直接接続（くびれ＝ゲート土手なし）
+            gate_w = runner_long
+
+            st.markdown("**フローバランサー（中央肉盗み）**")
+            balancer_on = st.checkbox(
+                "肉盗み（▽）を有効化",
+                value=True,
+                help=(
+                    "ランナー中央軸に逆三角形の薄領域を作り、中央への流れを"
+                    "意図的に阻害して長辺全体から均一に充填させるLGP系の手法。"
+                ),
+            )
+            if balancer_on:
+                bal_offset_ratio = st.slider(
+                    "底辺位置 / D（ゲートからの距離 ÷ ランナー深さ）",
+                    0.5,
+                    1.0,
+                    1.0,
+                    step=0.05,
+                    help="1.0で底辺が長辺と一致（製品まで肉盗みが届く）",
+                )
+                bal_height_ratio = st.slider(
+                    "▽の高さ H_bal / D",
+                    0.1,
+                    0.95,
+                    0.70,
+                    step=0.05,
+                )
+
+                bal_stage_count = st.slider(
+                    "肉盗み段数",
+                    1,
+                    5,
+                    2,
+                    step=1,
                     help=(
-                        "肉盗み(▽)内の残り肉厚。プレート側肉厚 "
-                        "(plate_lower_thk) より大きく取ると、その段は"
-                        "「肉盛り凸部」になる（流路を逆に広げる用途）。"
+                        "ネスト数。1=単一▽（旧挙動）、2以上で中央＋外側の階段状肉盗み。"
+                        "番号 1 が中央（最薄・最大抵抗）、番号 N が外側。"
                     ),
                 )
-                bal_widths_mm.append(_w_ratio * runner_long)
-                bal_thks.append(float(_h_val))
-        else:
-            bal_offset_ratio = 1.0
-            bal_height_ratio = 0.7
-            bal_widths_mm = []
-            bal_thks = []
+                # default presets: width as a ratio of L_long, thickness as
+                # absolute mm values (clamped to ≤ plate_lower_thk).
+                _w_defaults = {
+                    1: [0.60],
+                    2: [0.30, 0.60],
+                    3: [0.20, 0.45, 0.70],
+                    4: [0.15, 0.35, 0.55, 0.80],
+                    5: [0.10, 0.30, 0.50, 0.70, 0.95],
+                }
+                _h_defaults_abs = {
+                    1: [0.30],
+                    2: [0.25, 0.30],
+                    3: [0.20, 0.25, 0.30],
+                    4: [0.15, 0.20, 0.25, 0.30],
+                    5: [0.10, 0.15, 0.20, 0.25, 0.30],
+                }
+                bal_widths_mm: list[float] = []
+                bal_thks: list[float] = []
+                for _k in range(1, bal_stage_count + 1):
+                    _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
+                    _label_suffix = f"（{_label}）" if _label else ""
+                    _w_default = _w_defaults[bal_stage_count][_k - 1]
+                    _h_default = max(0.05, _h_defaults_abs[bal_stage_count][_k - 1])
+                    _w_ratio = st.slider(
+                        f"底辺幅{_k} / L_long{_label_suffix}",
+                        0.05,
+                        1.0,
+                        _w_default,
+                        step=0.05,
+                        key=f"bal_w_{_k}",
+                    )
+                    _h_val = st.slider(
+                        f"残り肉厚{_k} [mm]{_label_suffix}",
+                        0.05,
+                        1.0,
+                        float(_h_default),
+                        step=0.05,
+                        key=f"bal_h_{_k}",
+                        help=(
+                            "肉盗み(▽)内の残り肉厚。プレート側肉厚 "
+                            "(plate_lower_thk) より大きく取ると、その段は"
+                            "「肉盛り凸部」になる（流路を逆に広げる用途）。"
+                        ),
+                    )
+                    bal_widths_mm.append(_w_ratio * runner_long)
+                    bal_thks.append(float(_h_val))
+            else:
+                bal_offset_ratio = 1.0
+                bal_height_ratio = 0.7
+                bal_widths_mm = []
+                bal_thks = []
 
-        cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
     else:
-        upload = st.file_uploader(
-            "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
+        with st.expander("画像入力", expanded=True):
+            upload = st.file_uploader(
+                "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
+            )
+            plate_thk = st.slider("均一肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
+            cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+            invert = st.checkbox("白を内部として扱う（反転）", value=False)
+            threshold = st.slider("二値化しきい値", 16, 240, 128)
+
+    with st.expander("材料", expanded=True):
+        material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
+        mat = db[material_key]
+        st.caption(f"{mat.name}")
+        st.caption(
+            f"推奨 melt: {mat.T_melt_recommended[0] - 273.15:.0f}–{mat.T_melt_recommended[1] - 273.15:.0f} ℃, "
+            f"mold: {mat.T_mold_recommended[0] - 273.15:.0f}–{mat.T_mold_recommended[1] - 273.15:.0f} ℃"
         )
-        plate_thk = st.slider("均一肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
-        cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
-        invert = st.checkbox("白を内部として扱う（反転）", value=False)
-        threshold = st.slider("二値化しきい値", 16, 240, 128)
 
-    st.header("材料")
-    material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
-    mat = db[material_key]
-    st.caption(f"{mat.name}")
-    st.caption(
-        f"推奨 melt: {mat.T_melt_recommended[0] - 273.15:.0f}–{mat.T_melt_recommended[1] - 273.15:.0f} ℃, "
-        f"mold: {mat.T_mold_recommended[0] - 273.15:.0f}–{mat.T_mold_recommended[1] - 273.15:.0f} ℃"
-    )
-
-    st.header("射出条件")
-    _melt_min = int(mat.T_melt_recommended[0] - 273.15) - 20
-    _melt_max = int(mat.T_melt_recommended[1] - 273.15) + 20
-    melt_C = st.slider(
-        "樹脂温度 [℃]",
-        _melt_min,
-        _melt_max,
-        max(_melt_min, min(260, _melt_max)),
-    )
-    _mold_min = int(mat.T_mold_recommended[0] - 273.15) - 10
-    _mold_max = int(mat.T_mold_recommended[1] - 273.15) + 30
-    mold_C = st.slider(
-        "金型温度 [℃]",
-        _mold_min,
-        _mold_max,
-        max(_mold_min, min(50, _mold_max)),
-    )
-    inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
-    inj_Q = st.slider(
-        "射出率 [cm³/s]",
-        1.0,
-        800.0,
-        589.0,
-        step=1.0,
-        help="ソディック等の成形機取説の射出率に対応。",
-    )
-
-    st.header("壁面冷却モデル")
-    wall_model = st.radio(
-        "壁面冷却の表現",
-        options=("none", "skin", "multilayer"),
-        index=2,
-        format_func=lambda m: {
-            "none": "なし（等温・代表粘度のみ）",
-            "skin": "スキン層 (1層 + Stefan/Neumann)",
-            "multilayer": "層別 (N 層離散化 + Cross-WLF 結合)",
-        }[m],
-        help=(
-            "なし: 既存 HeleShawSolver 相当、温度結合なし。\n"
-            "スキン層: 壁面で固化するスキン層を s(t)=c_skin·√(αt) で取り込み、"
-            "コア層 h_core=h-2s だけが流れる。短ショットも検出。\n"
-            "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
-            "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
-            "極薄プレート (t<0.5mm) では層別を推奨。"
-        ),
-    )
-
-    # default container (so downstream `solver = HeleShawSolver(...)` /
-    # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-    # 極薄プレート (t0.35〜0.50 想定) 向けに既定値を調整:
-    #   モード: 層別 (index=2)
-    #   層数 N: 7 (壁勾配が急なので N=5 から増量)
-    #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
-    skin_on = wall_model == "skin"
-    c_skin = 0.0
-    skin_max_iter = 5
-    skin_tol = 1e-3
-    multilayer_on = wall_model == "multilayer"
-    num_layers = 7
-    layer_distribution = "wall_refined"
-    multilayer_max_iter = 12
-    multilayer_tol = 1e-3
-    solid_fraction = 0.3
-
-    if wall_model == "skin":
-        c_skin = st.slider(
-            "スキン層成長定数 c_skin",
-            0.0,
-            2.0,
+    with st.expander("射出条件", expanded=True):
+        _melt_min = int(mat.T_melt_recommended[0] - 273.15) - 20
+        _melt_max = int(mat.T_melt_recommended[1] - 273.15) + 20
+        melt_C = st.slider(
+            "樹脂温度 [℃]",
+            _melt_min,
+            _melt_max,
+            max(_melt_min, min(260, _melt_max)),
+        )
+        _mold_min = int(mat.T_mold_recommended[0] - 273.15) - 10
+        _mold_max = int(mat.T_mold_recommended[1] - 273.15) + 30
+        mold_C = st.slider(
+            "金型温度 [℃]",
+            _mold_min,
+            _mold_max,
+            max(_mold_min, min(50, _mold_max)),
+        )
+        inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
+        inj_Q = st.slider(
+            "射出率 [cm³/s]",
             1.0,
-            step=0.05,
-            help="0で OFF と同等。1.0 付近が物理的代表値。薄肉ほど効果大。",
+            800.0,
+            589.0,
+            step=1.0,
+            help="ソディック等の成形機取説の射出率に対応。",
         )
-        skin_max_iter = st.slider(
-            "fixed-point 反復上限",
-            1,
-            10,
-            5,
-            help="τ ↔ h_core 結合の反復回数。3〜5で十分なケースが多い。",
-        )
-        skin_tol_log10 = st.slider(
-            "収束判定 log10(tol)",
-            -5,
-            -1,
-            -3,
-            help="τ場の相対L2変化が 10^tol を下回ったら収束。",
-        )
-        skin_tol = 10.0 ** float(skin_tol_log10)
-    elif wall_model == "multilayer":
-        num_layers = st.slider(
-            "層数 N",
-            3,
-            9,
-            7,
-            help=(
-                "厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。"
-                "極薄プレートでは壁勾配が急なので N=7 を推奨。"
-            ),
-        )
-        layer_distribution = st.radio(
-            "層分布",
-            options=("wall_refined", "uniform"),
-            index=0,
+
+    with st.expander("壁面冷却モデル", expanded=False):
+        wall_model = st.radio(
+            "壁面冷却の表現",
+            options=("none", "skin", "multilayer"),
+            index=2,
             format_func=lambda m: {
-                "wall_refined": "壁近傍密 (Chebyshev-Lobatto)",
-                "uniform": "等間隔",
+                "none": "なし（等温・代表粘度のみ）",
+                "skin": "スキン層 (1層 + Stefan/Neumann)",
+                "multilayer": "層別 (N 層離散化 + Cross-WLF 結合)",
             }[m],
             help=(
-                "wall_refined: ζ_k = 0.5·(1 - cos(πk/N))。Neumann 勾配の急な"
-                "壁面で解像度を稼ぐ。layer 数が同じなら推奨。\n"
-                "uniform: 等間隔。デバッグ・解析比較用。"
+                "なし: 既存 HeleShawSolver 相当、温度結合なし。\n"
+                "スキン層: 壁面で固化するスキン層を s(t)=c_skin·√(αt) で取り込み、"
+                "コア層 h_core=h-2s だけが流れる。短ショットも検出。\n"
+                "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
+                "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
+                "極薄プレート (t<0.5mm) では層別を推奨。"
             ),
         )
-        multilayer_max_iter = st.slider(
-            "fixed-point 反復上限",
-            1,
-            20,
-            12,
-            help=(
-                "τ ↔ T_k ↔ η_k 結合の反復回数。極薄プレートでは収束が遅くなりがちなので 12 を推奨。"
-            ),
-        )
-        multilayer_tol_log10 = st.slider(
-            "収束判定 log10(tol)",
-            -5,
-            -1,
-            -3,
-            help="τ場の相対L2変化が 10^tol を下回ったら収束。",
-        )
-        multilayer_tol = 10.0 ** float(multilayer_tol_log10)
-        solid_fraction = st.slider(
-            "固化判定 fraction",
-            0.0,
-            0.9,
-            0.3,
-            step=0.05,
-            help=(
-                "中央層温度が T_mold + fraction·(T_melt - T_mold) を下回るセルを"
-                " short shot にマーク。PP は 0.3 が目安。"
-            ),
-        )
-        shear_heating_enabled = st.checkbox(
-            "剪断発熱補正 (viscous dissipation, 段階1)",
-            value=True,
-            help=(
-                "ON で Neumann 温度に剪断発熱補正項 ΔT_k = (η_k·γ̇_k²)·min(t_arr, τ_thermal)/(ρ·cp) を加算。"
-                "τ_thermal = h²/(π²·α) で頭打ち。"
-                "極薄プレート (t<0.5mm) では Brinkman 数 Br ≫ 1 になりがちなので推奨。"
-                "OFF でも Br 数は結果ペインに表示されるので、必要性を事前判定できる。"
-            ),
-        )
-    else:
-        shear_heating_enabled = False
 
-    st.header("射出圧縮成形 (ICM)")
-    icm = st.checkbox("圧縮成形ON", value=True)
-    if icm:
-        # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
-        # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
-        # 旧倍率モードは solver / CLI には後方互換で残しているが UI には出さない。
-        comp_stroke = st.slider(
-            "圧縮ストローク [mm]",
-            0.0,
-            2.0,
-            0.70,
-            step=0.05,
-            help=(
-                "金型シム量。圧縮 mask セル全てに加算される絶対量。"
-                "段差プレートでも段差が圧縮位相中も保存される (実機の挙動と整合)。"
-            ),
-        )
-        comp_factor = 1.0  # unused, kept for solver kwargs symmetry
-        comp_frac = st.slider(
-            "圧縮位相の充填占有率",
-            0.1,
-            1.0,
-            0.60,
-            step=0.05,
-            help="充填全体に対し、圧縮位相 (型開き状態) で占める時間比率。",
-        )
-    else:
-        comp_factor = 1.0
-        comp_stroke = None
-        comp_frac = 0.0
+        # default container (so downstream `solver = HeleShawSolver(...)` /
+        # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
+        # 極薄プレート (t0.35〜0.50 想定) 向けに既定値を調整:
+        #   モード: 層別 (index=2)
+        #   層数 N: 7 (壁勾配が急なので N=5 から増量)
+        #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
+        skin_on = wall_model == "skin"
+        c_skin = 0.0
+        skin_max_iter = 5
+        skin_tol = 1e-3
+        multilayer_on = wall_model == "multilayer"
+        num_layers = 7
+        layer_distribution = "wall_refined"
+        multilayer_max_iter = 12
+        multilayer_tol = 1e-3
+        solid_fraction = 0.3
 
-    st.header("出力")
-    num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
+        if wall_model == "skin":
+            c_skin = st.slider(
+                "スキン層成長定数 c_skin",
+                0.0,
+                2.0,
+                1.0,
+                step=0.05,
+                help="0で OFF と同等。1.0 付近が物理的代表値。薄肉ほど効果大。",
+            )
+            skin_max_iter = st.slider(
+                "fixed-point 反復上限",
+                1,
+                10,
+                5,
+                help="τ ↔ h_core 結合の反復回数。3〜5で十分なケースが多い。",
+            )
+            skin_tol_log10 = st.slider(
+                "収束判定 log10(tol)",
+                -5,
+                -1,
+                -3,
+                help="τ場の相対L2変化が 10^tol を下回ったら収束。",
+            )
+            skin_tol = 10.0 ** float(skin_tol_log10)
+        elif wall_model == "multilayer":
+            num_layers = st.slider(
+                "層数 N",
+                3,
+                9,
+                7,
+                help=(
+                    "厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。"
+                    "極薄プレートでは壁勾配が急なので N=7 を推奨。"
+                ),
+            )
+            layer_distribution = st.radio(
+                "層分布",
+                options=("wall_refined", "uniform"),
+                index=0,
+                format_func=lambda m: {
+                    "wall_refined": "壁近傍密 (Chebyshev-Lobatto)",
+                    "uniform": "等間隔",
+                }[m],
+                help=(
+                    "wall_refined: ζ_k = 0.5·(1 - cos(πk/N))。Neumann 勾配の急な"
+                    "壁面で解像度を稼ぐ。layer 数が同じなら推奨。\n"
+                    "uniform: 等間隔。デバッグ・解析比較用。"
+                ),
+            )
+            multilayer_max_iter = st.slider(
+                "fixed-point 反復上限",
+                1,
+                20,
+                12,
+                help=(
+                    "τ ↔ T_k ↔ η_k 結合の反復回数。極薄プレートでは収束が遅くなりがちなので 12 を推奨。"
+                ),
+            )
+            multilayer_tol_log10 = st.slider(
+                "収束判定 log10(tol)",
+                -5,
+                -1,
+                -3,
+                help="τ場の相対L2変化が 10^tol を下回ったら収束。",
+            )
+            multilayer_tol = 10.0 ** float(multilayer_tol_log10)
+            solid_fraction = st.slider(
+                "固化判定 fraction",
+                0.0,
+                0.9,
+                0.3,
+                step=0.05,
+                help=(
+                    "中央層温度が T_mold + fraction·(T_melt - T_mold) を下回るセルを"
+                    " short shot にマーク。PP は 0.3 が目安。"
+                ),
+            )
+            shear_heating_enabled = st.checkbox(
+                "剪断発熱補正 (viscous dissipation, 段階1)",
+                value=True,
+                help=(
+                    "ON で Neumann 温度に剪断発熱補正項 ΔT_k = (η_k·γ̇_k²)·min(t_arr, τ_thermal)/(ρ·cp) を加算。"
+                    "τ_thermal = h²/(π²·α) で頭打ち。"
+                    "極薄プレート (t<0.5mm) では Brinkman 数 Br ≫ 1 になりがちなので推奨。"
+                    "OFF でも Br 数は結果ペインに表示されるので、必要性を事前判定できる。"
+                ),
+            )
+        else:
+            shear_heating_enabled = False
+
+    with st.expander("射出圧縮成形 (ICM)", expanded=False):
+        icm = st.checkbox("圧縮成形ON", value=True)
+        if icm:
+            # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
+            # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
+            # 旧倍率モードは solver / CLI には後方互換で残しているが UI には出さない。
+            comp_stroke = st.slider(
+                "圧縮ストローク [mm]",
+                0.0,
+                2.0,
+                0.70,
+                step=0.05,
+                help=(
+                    "金型シム量。圧縮 mask セル全てに加算される絶対量。"
+                    "段差プレートでも段差が圧縮位相中も保存される (実機の挙動と整合)。"
+                ),
+            )
+            comp_factor = 1.0  # unused, kept for solver kwargs symmetry
+            comp_frac = st.slider(
+                "圧縮位相の充填占有率",
+                0.1,
+                1.0,
+                0.60,
+                step=0.05,
+                help="充填全体に対し、圧縮位相 (型開き状態) で占める時間比率。",
+            )
+        else:
+            comp_factor = 1.0
+            comp_stroke = None
+            comp_frac = 0.0
+
+    with st.expander("出力", expanded=False):
+        num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
 
 
 # ----------------------- main panel -----------------------

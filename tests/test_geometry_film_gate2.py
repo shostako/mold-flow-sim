@@ -135,8 +135,9 @@ def test_isosceles_silhouette_is_left_right_symmetric() -> None:
 
 
 def test_gate_left_offset_limits_second_stage() -> None:
-    """gate_left_offset は2段目(下段)の左端。左より左は2段目が無く、
-    1段目と深ランナーは全幅で残る。"""
+    """gate_left_offset は2段目テーパの左端。右(x>=x_2nd)はランド直後に薄い
+    2段目テーパ、左(x<x_2nd)は2段目が無くランドから1段目テーパ(厚)へ直行する。
+    同じ t 帯で左の深さ > 右の深さ になる。"""
     cfg = _default_cfg(
         gate_left_offset_mm=80.0,
         gate_position_mm=0.0,
@@ -151,27 +152,18 @@ def test_gate_left_offset_limits_second_stage() -> None:
     x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
     t = y_long - yy
     thk = g.thickness_mm
-    t2 = cfg.land_width_mm + cfg.taper1_len_mm
-    # 1st stage spans the full width (gate present even left of x_2nd)
-    left_1st = g.mask & (xx < x_2nd - 5.0) & (t > cfg.land_width_mm + 0.5) & (t < t2)
-    assert left_1st.any()
-    # left of x_2nd, beyond t2: NO 2nd stage (mid_b); stays at 1st-stage floor
-    # judge just beyond t2 (well clear of the deep runner near the slanted edge)
-    left_2nd = (
-        g.mask
-        & (xx < x_2nd - 5.0)
-        & (np.abs(t - (t2 + 2.0)) < 1.0)
-        & (np.abs(thk - cfg.mid_depth_b_mm) < 0.1)
-    )
-    assert not left_2nd.any()
-    # right of x_2nd, just beyond t2: 2nd stage (mid_b) present
-    right_2nd = (
-        g.mask
-        & (xx > x_2nd + 5.0)
-        & (np.abs(t - (t2 + 2.0)) < 1.0)
-        & (np.abs(thk - cfg.mid_depth_b_mm) < 0.1)
-    )
-    assert right_2nd.any()
+    # t band near the end of the single 1st taper (left side ~mid_a) while the
+    # right side is still in the thin 2nd taper.
+    t_band = cfg.land_width_mm + cfg.taper1_len_mm - 0.5
+    band = np.abs(t - t_band) < 0.4
+    left = g.mask & band & (xx < x_2nd - 5.0) & (thk < cfg.runner_depth_mm - 0.5)
+    right = g.mask & band & (xx > x_2nd + 5.0) & (thk < cfg.runner_depth_mm - 0.5)
+    assert left.any() and right.any()
+    left_mean = float(thk[left].mean())
+    right_mean = float(thk[right].mean())
+    assert left_mean > right_mean + 0.5  # left=1st taper(thick), right=2nd taper(thin)
+    assert left_mean > 1.3  # heading to mid_a (2.0)
+    assert right_mean < 1.0  # still thin (toward mid_b)
 
 
 def test_gate_left_offset_validation_rejects_past_valve() -> None:
@@ -186,38 +178,60 @@ def test_gate_left_offset_validation_rejects_past_valve() -> None:
 
 
 def test_taper_depth_is_x_independent_off_runner() -> None:
-    """Base-distance method: at a fixed t (off the deep-runner band) the depth
-    is independent of x → constant-angle taper (a plane, not a curved surface)."""
-    cfg = _default_cfg(gate_position_mm=60.0)  # x_g at center, right side = taper only
+    """Base-distance method: in the single-taper region (no 2nd stage, left of
+    x_2nd) at a fixed t the depth is independent of x → constant-angle taper (a
+    plane). With a 2nd stage the lower taper is a wedge whose width varies with
+    x, so x-independence holds only in the single-taper region."""
+    cfg = _default_cfg(gate_position_mm=0.0, gate_left_offset_mm=60.0)
     g = build_film_gate2_geometry(cfg)
     yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
     t = y_long - yy
-    # pick one row (= one fixed t) inside the upper-taper band
+    # pick one row (= one fixed t) inside the single 1st-taper band
     upper = (t > cfg.land_width_mm + 1.0) & (t < cfg.land_width_mm + cfg.taper1_len_mm - 1.0)
     rows = np.where((g.mask & upper).any(axis=1))[0]
     assert rows.size > 0
     iy_sel = int(rows[rows.size // 2])
-    # right of the valve → deep runner (left edge only) is absent here
-    row = g.mask[iy_sel] & (xx[iy_sel] > x_g + 10.0) & (yy[iy_sel] < y_long)
+    # left of x_2nd (single taper) and off the deep-runner band
+    row = (
+        g.mask[iy_sel]
+        & (xx[iy_sel] > cfg.pad_mm + 8.0)
+        & (xx[iy_sel] < x_2nd - 5.0)
+        & (g.thickness_mm[iy_sel] < cfg.runner_depth_mm - 0.5)
+        & (yy[iy_sel] < y_long)
+    )
     vals = g.thickness_mm[iy_sel][row]
     assert vals.size >= 2
     assert np.ptp(vals) < 1e-6  # constant depth along x → constant-angle plane
 
 
-def test_depth_step_between_tapers() -> None:
-    """mid_depth_a != mid_depth_b creates a depth step at t = land+L1."""
-    cfg = _default_cfg(mid_depth_a_mm=1.0, mid_depth_b_mm=2.2, gate_position_mm=60.0)
+def test_2nd_to_1st_boundary_continuous_even_with_diff_mid() -> None:
+    """The 2nd↔1st taper boundary is a continuous slope (mid_b → mid_a) even
+    when mid_depth_a != mid_depth_b: there is NO step between the two tapers.
+    Steps are instead made at the land boundary via taper2_near / taper1_near.
+    """
+    cfg = _default_cfg(
+        mid_depth_a_mm=2.2,
+        mid_depth_b_mm=1.0,
+        gate_position_mm=60.0,
+        taper2_left_mm=12.0,
+        taper2_right_mm=16.0,
+        gate_depth_mm=40.0,
+    )
     g = build_film_gate2_geometry(cfg)
     yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
     t = y_long - yy
-    tb = cfg.land_width_mm + cfg.taper1_len_mm
-    col = g.mask & (xx > x_g + 10.0) & (yy < y_long)
-    just_below = col & (t > tb - cfg.cell_size_mm) & (t <= tb)  # upper taper end
-    just_above = col & (t > tb) & (t < tb + cfg.cell_size_mm)  # lower taper start
-    assert just_below.any() and just_above.any()
-    v_below = float(g.thickness_mm[just_below].mean())  # ~ mid_depth_a
-    v_above = float(g.thickness_mm[just_above].mean())  # ~ mid_depth_b
-    assert v_above - v_below > 0.5
+    thk = g.thickness_mm
+    # fixed x right of the valve (no deep runner there); walk the profile in t
+    col = g.mask & (np.abs(xx - (x_g + 15.0)) < cfg.cell_size_mm * 0.6) & (yy < y_long)
+    ts, ds = t[col], thk[col]
+    order = np.argsort(ts)
+    ds_sorted = ds[order]
+    keep = ds_sorted < cfg.runner_depth_mm - 0.5  # exclude any deep-runner cell
+    ds_k = ds_sorted[keep]
+    assert ds_k.size > 5
+    diffs = np.abs(np.diff(ds_k))
+    assert diffs.max() < 0.4, f"unexpected step between adjacent rows: {diffs.max():.3f}"
 
 
 def test_continuous_mid_depth_has_no_step() -> None:
@@ -291,6 +305,95 @@ def test_lower_taper_present_at_far_end() -> None:
     ct = t[end_col]
     has_2nd = ((np.abs(cthk - cfg.mid_depth_b_mm) < 0.1) & (ct > t2)).any()
     assert has_2nd
+
+
+# ------------- land-boundary step (taper near depths) --------
+
+
+def test_resolved_taper_near_depths_fallback() -> None:
+    """None falls back to land_depth (both land boundaries continuous); explicit
+    values are returned as-is."""
+    cfg = _default_cfg(land_depth_mm=0.4, mid_depth_b_mm=1.1)
+    d2, d1 = cfg.resolved_taper_near_depths()
+    assert d2 == cfg.land_depth_mm
+    assert d1 == cfg.land_depth_mm
+    cfg2 = _default_cfg(taper2_near_depth_mm=0.7, taper1_near_depth_mm=0.5)
+    d2b, d1b = cfg2.resolved_taper_near_depths()
+    assert d2b == 0.7
+    assert d1b == 0.5
+
+
+def test_taper_near_none_is_continuous_with_land() -> None:
+    """taper2_near = taper1_near = None → the taper starts at land_depth, so
+    there is no step right after the land (single-taper region)."""
+    cfg = _default_cfg(gate_position_mm=0.0, gate_left_offset_mm=60.0)
+    g = build_film_gate2_geometry(cfg)
+    yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
+    t = y_long - yy
+    thk = g.thickness_mm
+    band = g.mask & (t > cfg.land_width_mm) & (t < cfg.land_width_mm + 1.0)
+    sel = band & (xx > cfg.pad_mm + 8.0) & (xx < x_2nd - 5.0) & (thk < cfg.runner_depth_mm - 0.5)
+    assert sel.any()
+    assert float(thk[sel].min()) < cfg.land_depth_mm + 0.25  # no big jump from land
+
+
+def test_taper1_near_makes_land_step_in_single_region() -> None:
+    """taper1_near > land_depth steps up right after the land in the
+    single-taper (no 2nd stage) region (x < x_2nd)."""
+    cfg = _default_cfg(
+        gate_position_mm=0.0,
+        gate_left_offset_mm=60.0,
+        land_depth_mm=0.35,
+        taper1_near_depth_mm=1.2,
+    )
+    g = build_film_gate2_geometry(cfg)
+    yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
+    t = y_long - yy
+    thk = g.thickness_mm
+    band = g.mask & (t > cfg.land_width_mm) & (t < cfg.land_width_mm + 1.0)
+    sel = band & (xx > cfg.pad_mm + 8.0) & (xx < x_2nd - 5.0) & (thk < cfg.runner_depth_mm - 0.5)
+    assert sel.any()
+    # the 1st taper now starts near 1.2, a clear step above land_depth 0.35
+    assert float(thk[sel].min()) > cfg.land_depth_mm + 0.5
+
+
+def test_taper2_near_makes_land_step_in_second_stage_region() -> None:
+    """taper2_near > land_depth steps up right after the land in the 2nd-stage
+    region (x >= x_2nd)."""
+    cfg = _default_cfg(
+        gate_position_mm=0.0,
+        gate_left_offset_mm=40.0,
+        land_depth_mm=0.35,
+        taper2_near_depth_mm=0.9,
+        taper2_right_mm=14.0,
+        taper2_left_mm=10.0,
+        gate_depth_mm=40.0,
+    )
+    g = build_film_gate2_geometry(cfg)
+    yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    x_2nd = cfg.pad_mm + cfg.gate_left_offset_mm
+    t = y_long - yy
+    thk = g.thickness_mm
+    band = g.mask & (t > cfg.land_width_mm) & (t < cfg.land_width_mm + 1.0)
+    sel = band & (xx > x_2nd + 8.0) & (xx < x_g - 5.0) & (thk < cfg.runner_depth_mm - 0.5)
+    assert sel.any()
+    assert float(thk[sel].min()) > cfg.land_depth_mm + 0.4  # step up to ~0.9
+
+
+def test_validation_rejects_taper_near_exceeding_runner_depth() -> None:
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(taper2_near_depth_mm=5.0, runner_depth_mm=3.0))
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(taper1_near_depth_mm=5.0, runner_depth_mm=3.0))
+
+
+def test_validation_rejects_nonpositive_taper_near() -> None:
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(taper2_near_depth_mm=-0.1))
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(taper1_near_depth_mm=0.0))
 
 
 # ----------------------- plate split -------------------------

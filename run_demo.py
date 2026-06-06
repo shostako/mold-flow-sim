@@ -559,20 +559,26 @@ def _film_gate2_cfg_isosceles() -> FilmGate2Config:
 
 
 def _film_gate2_cfg_stepped() -> FilmGate2Config:
-    """Right trapezoid with a depth step between the two taper stages
-    (mid_depth_a != mid_depth_b)."""
+    """Right trapezoid with land-boundary depth steps: the taper-start depths
+    (taper2_near / taper1_near) sit above land_depth, so a sharp step forms
+    right after the land in both the 2nd-stage (right of x_2nd) and the
+    single-taper (left of x_2nd) regions. The 2nd↔1st taper boundary stays a
+    continuous slope (mid_depth_b -> mid_depth_a)."""
     return FilmGate2Config(
         plate_w_mm=300.0,
         plate_h_mm=50.0,
         plate_thk_mm=0.35,
         gate_depth_mm=30.0,
         gate_position_mm=0.0,
+        gate_left_offset_mm=150.0,
         left_edge_mm=10.0,
         land_width_mm=1.0,
         land_depth_mm=0.35,
         taper1_len_mm=8.0,
-        mid_depth_a_mm=2.5,
+        mid_depth_a_mm=2.0,
         mid_depth_b_mm=1.0,
+        taper2_near_depth_mm=0.8,
+        taper1_near_depth_mm=0.6,
         taper2_left_mm=5.0,
         taper2_right_mm=10.0,
         runner_depth_mm=3.0,

@@ -396,7 +396,7 @@ with st.sidebar:
             "ゲート高さ D [mm]（注入点側）",
             10.0,
             60.0,
-            30.0,
+            20.0,
             step=1.0,
             help="製品長辺から注入点までの距離（台形の高さ）。",
         )
@@ -434,20 +434,20 @@ with st.sidebar:
         st.markdown("**2段テーパ（底辺距離・段差可）**")
         taper1_len_f2 = st.slider("上段テーパ長 L1 [mm]", 1.0, 30.0, 8.0, step=0.5)
         mid_a_f2 = st.slider(
-            "1段目の深さ [mm]（製品長辺側・厚め）",
+            "1段目の深さ [mm]（深ランナー寄り・厚め）",
             0.2,
             5.0,
             2.0,
             step=0.1,
-            help="製品長辺側（ゲートから遠い）の肉厚。流れやすくするため厚めにする。",
+            help="2段目の先（深ランナー寄り）の段の肉厚。厚め。",
         )
         mid_b_f2 = st.slider(
-            "2段目の深さ [mm]（深ランナー寄り・薄め）",
+            "2段目の深さ [mm]（製品長辺側・薄め）",
             0.2,
             5.0,
             1.0,
             step=0.1,
-            help="深ランナー寄りの段の肉厚。1段目と違う値にすると境界に段差ができる。",
+            help="ランド直後（製品長辺側）の段の肉厚。薄め。1段目との境界はスロープで連続。",
         )
         taper2_left_f2 = st.slider(
             "下段テーパ 端側の最遠点 [mm]",
@@ -470,6 +470,33 @@ with st.sidebar:
         runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)
         runner_top_f2 = st.slider("上底（開口幅）[mm]", 2.0, 5.0, 4.0, step=0.5)
         runner_bottom_f2 = st.slider("下底（底幅・抜き勾配）[mm]", 1.0, 3.0, 2.0, step=0.5)
+
+        st.markdown("**ランド境界の段差（任意）**")
+        land_step_f2 = st.checkbox(
+            "ランド↔テーパ境界に段差をつける",
+            value=False,
+            help="ランド直後のテーパ始端深さを独立指定して段差を作る。OFFで連続（段差なし）。",
+        )
+        if land_step_f2:
+            taper2_near_f2 = st.slider(
+                "ランド↔2段目テーパ 境界深さ [mm]（2段目がある領域）",
+                0.2,
+                float(runner_depth_f2),
+                min(float(land_depth_f2), float(runner_depth_f2)),
+                step=0.05,
+                help="2段目テーパのランド側始端の深さ。ランド深さと変えると段差。上限は深ランナー深さ。",
+            )
+            taper1_near_f2 = st.slider(
+                "ランド↔1段目テーパ 境界深さ [mm]（2段目が無い領域）",
+                0.2,
+                float(runner_depth_f2),
+                min(float(land_depth_f2), float(runner_depth_f2)),
+                step=0.05,
+                help="2段目が無い左側で、1段目テーパのランド側始端の深さ。上限は深ランナー深さ。",
+            )
+        else:
+            taper2_near_f2 = None
+            taper1_near_f2 = None
 
         cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
         upload = None
@@ -885,6 +912,8 @@ def build_geometry() -> Geometry:
                 taper1_len_mm=taper1_len_f2,
                 mid_depth_a_mm=mid_a_f2,
                 mid_depth_b_mm=mid_b_f2,
+                taper2_near_depth_mm=taper2_near_f2,
+                taper1_near_depth_mm=taper1_near_f2,
                 taper2_left_mm=taper2_left_f2,
                 taper2_right_mm=taper2_right_f2,
                 runner_depth_mm=runner_depth_f2,

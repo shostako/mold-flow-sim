@@ -968,11 +968,11 @@ class FilmGate2Config:
     taper is absent and a single taper runs land → ``mid_depth_a`` (the 1st
     taper and the deep runner stay full width).
 
-    The 2nd taper is a wedge in plan view: its width in t is ``taper2_right_mm``
-    at the valve side and ``taper2_left_mm`` at the far end (interpolated by
-    distance from the valve), so ``mid_depth_b`` is reached at a varying t. The
-    2nd↔1st taper boundary is a continuous slope (``mid_depth_b`` →
-    ``mid_depth_a``), NOT a step.
+    The 2nd taper is a wedge in plan view: its far point (the distance from the
+    long edge at which ``mid_depth_b`` is reached) is ``taper2_right_mm`` at the
+    valve side and ``taper2_left_mm`` at the far end (interpolated by distance
+    from the valve). The 2nd↔1st taper boundary is a continuous slope
+    (``mid_depth_b`` → ``mid_depth_a``), NOT a step.
 
     Land-boundary steps: the taper-start depths ``taper2_near_depth_mm`` (land↔
     2nd taper, where the 2nd stage exists) and ``taper1_near_depth_mm`` (land↔
@@ -1117,12 +1117,30 @@ class FilmGate2Config:
                 f"runner_top_mm ({self.runner_top_mm})"
             )
         far_max = max(self.taper2_left_mm, self.taper2_right_mm)
-        depth_used = max(self.land_width_mm + self.taper1_len_mm, far_max)
-        if depth_used > self.gate_depth_mm + eps:
+        # The 1st taper now sits AFTER the 2nd taper, so its far endpoint is the
+        # 2nd taper far point plus L1. Both the single-taper region (land+L1) and
+        # the combined extent (far_max+L1) must fit inside the gate depth.
+        extent = max(
+            self.land_width_mm + self.taper1_len_mm,
+            far_max + self.taper1_len_mm,
+        )
+        if extent > self.gate_depth_mm + eps:
             raise ValueError(
-                f"taper depth (max of land+taper1, taper2 far point = {depth_used}) "
+                f"taper extent (max of land+taper1, taper2_far+taper1 = {extent}) "
                 f"must be <= gate_depth_mm ({self.gate_depth_mm})"
             )
+        # The deep runner must stay the deepest channel: the taper floors mid_a
+        # and mid_b must not exceed runner_depth, otherwise the post-taper floor
+        # would overwrite the runner via max(floor, runner).
+        for nm, val in (
+            ("mid_depth_a_mm", self.mid_depth_a_mm),
+            ("mid_depth_b_mm", self.mid_depth_b_mm),
+        ):
+            if val > self.runner_depth_mm + eps:
+                raise ValueError(
+                    f"{nm} ({val}) must be <= runner_depth_mm "
+                    f"({self.runner_depth_mm}); the deep runner must stay deepest"
+                )
         for nm, val in (
             ("taper2_near_depth_mm", self.taper2_near_depth_mm),
             ("taper1_near_depth_mm", self.taper1_near_depth_mm),
@@ -1232,11 +1250,14 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     # 2nd-stage taper WIDTH in the t-direction (trapezoid, not a sharp wedge):
     # wider at the valve side (taper2_right), narrower at the far long-edge end
     # (taper2_left). dist_ratio is 0 at the valve, 1 at the farthest end.
-    width2 = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
+    # 2nd taper FAR POINT: an absolute distance from the product long edge
+    # (taper2_right at the valve side, taper2_left at the far long-edge end),
+    # matching the legacy taper2_left/right parameter and UI semantics. The thin
+    # 2nd taper spans the land boundary (w_land) up to this far point.
+    far2 = taper2_right - (taper2_right - taper2_left) * (np.abs(xx - x_g) / far_span)
     has_2nd = xx >= x_2nd  # 2nd stage exists only right of its left end x_2nd
-    w2 = np.where(has_2nd, width2, 0.0)
-    t_2nd_end = w_land + w2  # far end of the thin 2nd taper (next to the land)
-    t_1st_end = t_2nd_end + L1  # far end of the thick 1st taper
+    t_2nd_end = np.where(has_2nd, far2, w_land)  # 2nd taper far point (distance)
+    t_1st_end = t_2nd_end + L1  # 1st taper ends L1 beyond the 2nd far point
 
     base = np.full_like(t, d_a)  # floor beyond the 1st taper = thick mid_a
     base = np.where(t <= w_land, d_land, base)  # land
@@ -1244,7 +1265,11 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     # defaults to land_depth (continuous); a different value steps at the
     # land↔2nd-taper boundary.
     in2 = has_2nd & (t > w_land) & (t <= t_2nd_end)
-    base = np.where(in2, d2_near + (d_b - d2_near) * (t - w_land) / np.maximum(w2, 1e-12), base)
+    base = np.where(
+        in2,
+        d2_near + (d_b - d2_near) * (t - w_land) / np.maximum(t_2nd_end - w_land, 1e-12),
+        base,
+    )
     # 1st taper (thick): mid_b -> mid_a, sitting between the 2nd stage and the
     # deep runner (the "1st-stage remnant"). Always continuous with the 2nd
     # stage's far depth mid_b (the 2nd↔1st boundary is a slope, not a step).

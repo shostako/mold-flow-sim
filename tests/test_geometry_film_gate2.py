@@ -307,6 +307,37 @@ def test_lower_taper_present_at_far_end() -> None:
     assert has_2nd
 
 
+def test_second_taper_far_point_is_absolute_distance() -> None:
+    """taper2_left/right are distances from the product long edge (legacy
+    semantics), NOT widths after the land: the 2nd taper reaches mid_b at
+    t ≈ taper2_far, so the depth at t = taper2_right is ~mid_b (it would be
+    < mid_b if land_width were silently added to the far point)."""
+    cfg = _default_cfg(
+        gate_position_mm=0.0,
+        gate_left_offset_mm=0.0,
+        taper2_left_mm=10.0,
+        taper2_right_mm=10.0,
+        land_width_mm=1.0,
+        taper1_len_mm=8.0,
+        gate_depth_mm=30.0,
+        cell_size_mm=0.5,
+    )
+    g = build_film_gate2_geometry(cfg)
+    yy, xx, y_long, x_g = _grid(cfg, g.mask.shape)
+    t = y_long - yy
+    thk = g.thickness_mm
+    col = (
+        g.mask
+        & (xx > x_g - 30.0)
+        & (xx < x_g - 5.0)
+        & (yy < y_long)
+        & (thk < cfg.runner_depth_mm - 0.5)
+    )
+    at_far = col & (np.abs(t - cfg.taper2_right_mm) < cfg.cell_size_mm * 0.6)
+    assert at_far.any()
+    assert abs(float(thk[at_far].mean()) - cfg.mid_depth_b_mm) < 0.05
+
+
 # ------------- land-boundary step (taper near depths) --------
 
 
@@ -455,6 +486,26 @@ def test_validation_rejects_nonpositive_runner_depth() -> None:
 def test_validation_rejects_split_above_plate_height() -> None:
     with pytest.raises(ValueError):
         build_film_gate2_geometry(_default_cfg(plate_split_height_mm=200.0, plate_h_mm=80.0))
+
+
+def test_validation_rejects_combined_taper_extent_exceeding_depth() -> None:
+    """The 1st taper sits after the 2nd taper, so its far endpoint is
+    taper2_far + L1. gate_depth=10 with taper2_right=10 and taper1_len=8 gives
+    extent 18 > 10 and must be rejected (else the 1st taper is clipped by the
+    silhouette and never reaches mid_a)."""
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(
+            _default_cfg(gate_depth_mm=10.0, taper2_right_mm=10.0, taper1_len_mm=8.0)
+        )
+
+
+def test_validation_rejects_mid_depth_exceeding_runner_depth() -> None:
+    """The deep runner must stay the deepest channel: mid_a (or mid_b) above
+    runner_depth would let the post-taper floor overwrite the runner."""
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(mid_depth_a_mm=5.0, runner_depth_mm=2.0))
+    with pytest.raises(ValueError):
+        build_film_gate2_geometry(_default_cfg(mid_depth_b_mm=4.0, runner_depth_mm=2.0))
 
 
 # ----------------------- solver integration ------------------

@@ -283,6 +283,31 @@ def test_supersample_no_bleed_between_disconnected_cavities():
     assert np.allclose(b_cells, 5.0)  # no downward bleed from A(=1)
 
 
+def test_supersample_no_bleed_across_intracomponent_gap():
+    """A single *connected* U-shaped cavity whose two arms are separated locally
+    by a one-cell background slot must not blend one arm's value into the other
+    across the slot. Normalized-convolution upsampling gives background zero
+    weight, so the gap is never crossed regardless of connectivity (per-component
+    filling alone could not prevent this)."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, k = 1.0, 2
+    # rows: top [A . B], bottom [A A B] -> all True cells are 4-connected (one
+    # component) but the two top arms are split by the col-1 slot.
+    mask = np.array([[True, False, True], [True, True, True]])
+    thk = np.array([[1.0, 0.0, 5.0], [1.0, 1.0, 5.0]])  # left arm=1, right arm=5
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cs, gates=[])
+    res, _c = _supersample_for_render(SimpleNamespace(geometry=geom), thk, k)
+    z = np.asarray(res.geometry.thickness_mm)
+    mf = np.asarray(res.geometry.mask)
+    # top-left arm fine block (native (0,0)) must never pick up the 5-arm value
+    tl = z[:k, :k][mf[:k, :k]]
+    assert tl.size and np.all(tl <= 1.0 + 1e-9)
+
+
 def test_supersample_many_disconnected_components_preserved():
     """Many isolated cavity cells (speckles) each refine to their own value
     block — the bbox-bounded per-component loop keeps them correct (and cheap)."""

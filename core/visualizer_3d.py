@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
+from scipy.ndimage import distance_transform_edt, zoom
 
+from .geometry import Geometry
 from .solver import FlowResult
 
 # ----------------------------------------------------------------------
@@ -68,6 +70,76 @@ def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     out = arr.astype(float).copy()
     out[~mask] = np.nan
     return out
+
+
+# ----------------------------------------------------------------------
+# Display-only supersampling
+# ----------------------------------------------------------------------
+
+
+class _RenderResult:
+    """Lightweight stand-in exposing only ``.geometry``.
+
+    The trace builders (`_floor_trace`, `_walls_trace`, `_ceiling_trace`,
+    `_build_side_walls`, `_gate_centered_axes`, `_surface_height`) read
+    nothing off the result except ``.geometry``. When a renderer wants to
+    draw a display-supersampled copy of the cavity, it wraps the refined
+    geometry in this and reuses the existing builders unchanged.
+    """
+
+    __slots__ = ("geometry",)
+
+    def __init__(self, geometry: Geometry) -> None:
+        self.geometry = geometry
+
+
+def _supersample_for_render(
+    result: FlowResult, color_field: np.ndarray, factor: int
+) -> tuple[FlowResult | _RenderResult, np.ndarray]:
+    """Refine the cavity ``factor``x for display only and return a
+    ``(result_like, color_field)`` pair.
+
+    Display-only: the solver and the stored geometry are untouched. The
+    cavity mask, the thickness map (Z heights) and the per-cell ``color_field``
+    are bilinearly upsampled by ``factor`` so the ceiling Surface boundary and
+    the side-wall Mesh3d read with ``factor``x finer steps — the grid-aligned
+    staircase on slanted/curved silhouette edges shrinks by ``1/factor``.
+
+    Out-of-cavity cells are filled with the nearest in-cavity value *before*
+    interpolation so the surface does not bleed toward zero across the cavity
+    boundary; the refined mask (the ``>= 0.5`` contour of the upsampled binary
+    mask) then re-applies the silhouette. ``factor <= 1`` is a no-op and
+    returns the original result and color field unchanged (so the default
+    render path and its tests are bit-for-bit identical).
+    """
+    k = max(1, int(factor))
+    if k == 1:
+        return result, color_field
+    g = result.geometry
+    mask = g.mask
+    if mask.any() and not mask.all():
+        idx = distance_transform_edt(~mask, return_distances=False, return_indices=True)
+
+        def _fill(a: np.ndarray) -> np.ndarray:
+            return np.asarray(a, dtype=float)[tuple(idx)]
+    else:
+
+        def _fill(a: np.ndarray) -> np.ndarray:
+            return np.asarray(a, dtype=float)
+
+    thk_f = zoom(_fill(g.thickness_mm), k, order=1)
+    color_f = zoom(_fill(color_field), k, order=1)
+    mask_f = zoom(mask.astype(float), k, order=1) >= 0.5
+    off = (k - 1) // 2
+    gates_f = [(iy * k + off, ix * k + off) for iy, ix in g.gates]
+    fine = Geometry(
+        mask=mask_f,
+        thickness_mm=thk_f,
+        cell_size_mm=g.cell_size_mm / k,
+        gates=gates_f,
+        label=g.label,
+    )
+    return _RenderResult(fine), color_f
 
 
 # ----------------------------------------------------------------------
@@ -314,11 +386,17 @@ def _apply_camera_and_layout(
 # ----------------------------------------------------------------------
 
 
-def render_3d_thickness_map(result: FlowResult) -> go.Figure:
-    """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness."""
-    g = result.geometry
-    color = _scalar_with_mask(g.thickness_mm, g.mask)
-    fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
+def render_3d_thickness_map(result: FlowResult, *, supersample: int = 1) -> go.Figure:
+    """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness.
+
+    ``supersample`` (>= 1) refines the mesh for display only (see
+    :func:`_supersample_for_render`); 1 keeps the native solver resolution.
+    """
+    res, color = _supersample_for_render(
+        result, result.geometry.thickness_mm.astype(float), supersample
+    )
+    color = _scalar_with_mask(color, res.geometry.mask)
+    fig = _figure_with_pl_extrusion(res, color, colorscale="Viridis")
     return _apply_camera_and_layout(
         fig,
         title="Cavity thickness h(x, y) [mm] — solid view from PL",
@@ -326,11 +404,16 @@ def render_3d_thickness_map(result: FlowResult) -> go.Figure:
     )
 
 
-def render_3d_fill_time(result: FlowResult) -> go.Figure:
-    """3D solid extrusion with the ceiling colored by fill-time."""
-    g = result.geometry
-    color = _scalar_with_mask(result.fill_time_s, g.mask)
-    fig = _figure_with_pl_extrusion(result, color, colorscale="Plasma")
+def render_3d_fill_time(result: FlowResult, *, supersample: int = 1) -> go.Figure:
+    """3D solid extrusion with the ceiling colored by fill-time.
+
+    ``supersample`` (>= 1) refines the mesh for display only.
+    """
+    res, color = _supersample_for_render(
+        result, np.asarray(result.fill_time_s, dtype=float), supersample
+    )
+    color = _scalar_with_mask(color, res.geometry.mask)
+    fig = _figure_with_pl_extrusion(res, color, colorscale="Plasma")
     return _apply_camera_and_layout(
         fig,
         title=f"Fill time on cavity ceiling — T_fill = {result.total_fill_time_s:.3f} s",
@@ -338,11 +421,16 @@ def render_3d_fill_time(result: FlowResult) -> go.Figure:
     )
 
 
-def render_3d_pressure(result: FlowResult) -> go.Figure:
-    """3D solid extrusion with the ceiling colored by normalized pressure."""
-    g = result.geometry
-    color = _scalar_with_mask(result.pressure_norm, g.mask)
-    fig = _figure_with_pl_extrusion(result, color, colorscale="Turbo")
+def render_3d_pressure(result: FlowResult, *, supersample: int = 1) -> go.Figure:
+    """3D solid extrusion with the ceiling colored by normalized pressure.
+
+    ``supersample`` (>= 1) refines the mesh for display only.
+    """
+    res, color = _supersample_for_render(
+        result, np.asarray(result.pressure_norm, dtype=float), supersample
+    )
+    color = _scalar_with_mask(color, res.geometry.mask)
+    fig = _figure_with_pl_extrusion(res, color, colorscale="Turbo")
     return _apply_camera_and_layout(
         fig,
         title="Normalized pressure on cavity ceiling (1 at gate, 0 at last fill)",

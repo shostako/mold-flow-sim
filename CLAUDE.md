@@ -51,7 +51,7 @@ python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 - **`multilayer_solver.py`** — `MultilayerHeleShawSolver` と継承結果 `MultilayerFlowResult`。厚み方向を `N` 層に離散化して **層別温度・粘度** の coupling を fixed-point で解く新ソルバー。既存 `HeleShawSolver` を内部に保持して helper メソッド (`_effective_viscosity` / `_open_thickness_field` / `_solve_tau_field` / weld・airtrap) を委譲で再利用、線形代数の重複なし。詳細は後述「層別 Hele-Shaw ソルバー」セクション。
 - **`multilayer_thermal.py`** — 純関数 `neumann_layer_temperatures()` と `poiseuille_shear_rates()`。前者は両壁から育つ Neumann 半無限解の重ね合わせ `T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(αt))) - 1]` (長時間極限で `T_mold` 以下に落ちるので clamp)、後者は Poiseuille 解析微分 `γ̇_k = (6V/h) · |2ζ - 1|` (中央発散回避の floor 付き)。両方とも shape `(N, ny, nx)` を返す。
 - **`visualizer.py`** — `render_fill_animation`（GIF）、`render_pressure_map`、`render_weldlines`、`render_skin_layer_map` / `render_core_layer_map`（スキン層 ON 時のみ意味あり）、`render_layer_map` / `render_layer_grid` / `render_short_shot_map`（層別ソルバーの結果用、後述）、`export_frames`（PNG連番）。matplotlib で `Agg` バックエンド固定。**画像書き出し系**（PNG/GIF）はここ。
-- **`visualizer_3d.py`** — `render_3d_thickness_map` / `render_3d_fill_time` / `render_3d_pressure`。**インタラクティブな3D表示**用。Plotly の `go.Figure` を返し、Streamlit の `st.plotly_chart` で埋め込む想定。各図は **PL（Z=0）= 半透明の薄グレー床 + 側壁 Mesh3d（天面と同じ物理量カラーマップで着色、`coloraxis="coloraxis"` 共有）+ 天面 Surface** の3トレース構成。1本のカラーバーで天面・側壁を一気に読む設計。**`aspectmode="data"`** で x/y/z すべて mm 等倍（誇張なし）。プレートが薄板に見えるのは実物比率そのもの。物理は 2D Hele-Shaw のまま、表現上の3D化のみ。
+- **`visualizer_3d.py`** — `render_3d_thickness_map` / `render_3d_fill_time` / `render_3d_pressure`。**インタラクティブな3D表示**用。Plotly の `go.Figure` を返し、Streamlit の `st.plotly_chart` で埋め込む想定。各図は **PL（Z=0）= 半透明の薄グレー床 + 側壁 Mesh3d（天面と同じ物理量カラーマップで着色、`coloraxis="coloraxis"` 共有）+ 天面 Surface** の3トレース構成。1本のカラーバーで天面・側壁を一気に読む設計。**`aspectmode="data"`** で x/y/z すべて mm 等倍（誇張なし）。プレートが薄板に見えるのは実物比率そのもの。物理は 2D Hele-Shaw のまま、表現上の3D化のみ。3レンダラとも `supersample: int = 1`（>=1）を受け、`>1` で **表示専用に**メッシュを補間アップサンプリング（`_supersample_for_render`：mask／厚み／カラー場を bilinear `zoom`、cavity 外は `distance_transform_edt` で最近傍埋めしてから境界を `>=0.5` 等値線で再適用、`_RenderResult` で細メッシュ Geometry を包んで既存トレースビルダーを流用）して斜め境界・側壁の階段を `1/k` に縮める。**solver・geometry・解析時間は不変**（`k=1` は完全な no-op で既存挙動と一致）。点数は `k²` 倍に増えるので回転がやや重くなる。UI は3D expander 内のスライダー「描画の細かさ (supersample)」(1〜3, 既定2, `key="ss_3d"`) で切替、3レンダラに渡す（3D は UI 専用機能なので CLI `run_demo.py` には無い）。
 
 ### 中核アルゴリズム（`solver.py`）
 
@@ -305,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 10 ファイル、合計 **177 テスト** (176 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 10 ファイル、合計 **223 テスト** (222 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -315,7 +315,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_multilayer_solver.py` — 42件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認)
 - `test_multilayer_thermal.py` — 22件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証) / **剪断発熱段階1** (shape & 非負、γ̇=0 で ΔT=0、γ̇² スケーリング、t≫τ_thermal で頭打ち、極薄 PP の桁感、shape 不整合検出) / **Brinkman 数** (shape & 非負、γ̇=0 でゼロ、極薄高速で Br>1、k と ΔT の非正検出)
-- `test_visualizer_3d.py` — 8件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承
+- `test_visualizer_3d.py` — 16件: PL extrusion anatomy（PL床 + 天面 + 側壁 Mesh3d）、外殻NaN処理（床は0/天面は厚み）、ゲート中心軸、側壁が PL〜天面を覆う、`aspectmode='data'` で等倍、側壁が天面と coloraxis 共有 + intensity を物理量から継承、**表示supersample**（`supersample=1` で native 解像度維持、`=2` で床/天面/surfacecolor が `(ny*2,nx*2)` に細密化＋壁mesh有効＋data-aspect保持、シルエット保存＋外殻NaN＋床=0維持、mm スパンは半セル以内で不変＋壁三角形数が増加）
 - `test_visualizer_layer.py` — 13件 (1 skip): `render_layer_map` 4 field smoke / 不正 field / 範囲外 layer_idx / thermal_off で field 別動作 / `render_layer_grid` / `render_short_shot_map` (flagged あり/なし、後者は skip 想定可) / `_scalar_layer_field` helper / ζ レンジが metadata に乗ること
 
 新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` か `test_skin_layer.py` か `test_multilayer_solver.py`、純関数の helper なら `test_multilayer_thermal.py`、3D 系なら `test_visualizer_3d.py`、層別可視化なら `test_visualizer_layer.py`。
@@ -353,7 +353,7 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
   - `requirements.txt` は **Streamlit Community Cloud デプロイ用**のミラー。pyproject.toml の deps を変更したら必ずこちら側も同期する。
   - `runtime.txt` は Streamlit Cloud に Python バージョンを伝える1行（`python-3.12`）。
   - `.streamlit/config.toml` は Streamlit ランタイム設定（アップロード上限等）。ローカル/Cloud 両方で読まれる。
-- 主な依存：numpy / scipy（ソルバ）、matplotlib（画像書き出し）、Pillow（画像入力）、streamlit（UI）、**plotly**（3D表示、`visualizer_3d.py` 専用）。plotly は app.py の3D expanderを開いた時点でしか描画コストが走らないので、低スペック環境でも UI レスポンスは犠牲にならない。
+- 主な依存：numpy / scipy（ソルバ＋3D表示の supersample 補間 `scipy.ndimage`）、matplotlib（画像書き出し）、Pillow（画像入力）、streamlit（UI）、**plotly**（3D表示、`visualizer_3d.py` 専用）。plotly は app.py の3D expanderを開いた時点でしか描画コストが走らないので、低スペック環境でも UI レスポンスは犠牲にならない。ただし3D の supersample スライダーを上げると点数が `k²` 倍に増え、回転操作が重くなる（既定 `k=2`）。
 
 ## UI と CLI の対応関係
 

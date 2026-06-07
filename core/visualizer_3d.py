@@ -133,9 +133,17 @@ def _supersample_for_render(
         def _fill(a: np.ndarray) -> np.ndarray:
             return np.asarray(a, dtype=float)
 
-    thk_f = zoom(_fill(g.thickness_mm), k, order=1)
-    color_f = zoom(_fill(color_field), k, order=1)
-    mask_f = zoom(mask.astype(float), k, order=1) >= 0.5
+    # grid_mode=True treats each value as covering a finite cell extent (not a
+    # center-to-center sample span), so an N-cell array upsampled by k yields
+    # N*k cells over the *same* physical extent with centers at (j+0.5)*cs/k —
+    # exactly the fine Geometry declared below. The default grid_mode=False
+    # would align end-cell centers instead, shifting every interpolated value
+    # (and the silhouette) by up to a quarter native cell at k=2. mode="nearest"
+    # clamps the half-cell margins beyond the outermost native centers.
+    zk = dict(order=1, mode="nearest", grid_mode=True)
+    thk_f = zoom(_fill(g.thickness_mm), k, **zk)
+    color_f = zoom(_fill(color_field), k, **zk)
+    mask_f = zoom(mask.astype(float), k, **zk) >= 0.5
     gates_f = [(iy * k + a, ix * k + b) for iy, ix in g.gates for a in range(k) for b in range(k)]
     fine = Geometry(
         mask=mask_f,

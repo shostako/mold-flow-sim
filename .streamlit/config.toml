@@ -10,3 +10,8 @@ maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+# アクセント色（ボタン/トグル/スライダー/ラジオ/プログレス等）。
+# 候補比較の結果アンバーを採用（2026-06-07）。
+primaryColor = "#F59F00"

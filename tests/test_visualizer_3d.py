@@ -257,6 +257,32 @@ def test_supersample_preserves_gate_field_value():
     assert np.isclose(np.nanmax(color), 1.0)  # global max still reaches the gate
 
 
+def test_supersample_no_bleed_between_disconnected_cavities():
+    """Two cavities separated by a one-cell gap must not bleed values across the
+    gap when refined. Regression: a global nearest-fill + zoom blended a
+    neighbour's field into a disconnected region's boundary cells. Each region's
+    value is constant, so per-component interpolation keeps it constant."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, k = 1.0, 2
+    # one row: [A A . B B] — gap at native col 2. A=1.0, B=5.0.
+    mask = np.array([[True, True, False, True, True]])
+    thk = np.array([[1.0, 1.0, 0.0, 5.0, 5.0]])
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cs, gates=[])
+    res, _color = _supersample_for_render(SimpleNamespace(geometry=geom), thk, k)
+    z = np.asarray(res.geometry.thickness_mm)[0]
+    mf = np.asarray(res.geometry.mask)[0]
+    # native cols 0-1 -> fine 0-3 (A); native cols 3-4 -> fine 6-9 (B)
+    a_cells = z[:4][mf[:4]]
+    b_cells = z[6:][mf[6:]]
+    assert a_cells.size and b_cells.size
+    assert np.allclose(a_cells, 1.0)  # no upward bleed from B(=5)
+    assert np.allclose(b_cells, 5.0)  # no downward bleed from A(=1)
+
+
 def test_supersample_preserves_mm_extent_and_grows_walls(small_result):
     """Refinement changes resolution, not physical span; and it yields more
     wall triangles (finer steps) than the native render."""

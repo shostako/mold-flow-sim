@@ -283,6 +283,32 @@ def test_supersample_no_bleed_between_disconnected_cavities():
     assert np.allclose(b_cells, 5.0)  # no downward bleed from A(=1)
 
 
+def test_supersample_many_disconnected_components_preserved():
+    """Many isolated cavity cells (speckles) each refine to their own value
+    block — the bbox-bounded per-component loop keeps them correct (and cheap)."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, k, ny, nx = 1.0, 2, 7, 7
+    mask = np.zeros((ny, nx), dtype=bool)
+    thk = np.zeros((ny, nx), dtype=float)
+    spots = [(1, 1, 1.0), (1, 4, 2.0), (4, 1, 3.0), (4, 4, 4.0)]  # >=1-cell gaps
+    for gy, gx, v in spots:
+        mask[gy, gx] = True
+        thk[gy, gx] = v
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cs, gates=[])
+    res, _color = _supersample_for_render(SimpleNamespace(geometry=geom), thk, k)
+    z = np.asarray(res.geometry.thickness_mm)
+    mf = np.asarray(res.geometry.mask)
+    for gy, gx, v in spots:
+        bm = mf[gy * k : (gy + 1) * k, gx * k : (gx + 1) * k]
+        bz = z[gy * k : (gy + 1) * k, gx * k : (gx + 1) * k]
+        assert bm.any()  # speckle survived refinement
+        assert np.allclose(bz[bm], v)  # with its own value — no bleed across gaps
+
+
 def test_supersample_preserves_mm_extent_and_grows_walls(small_result):
     """Refinement changes resolution, not physical span; and it yields more
     wall triangles (finer steps) than the native render."""

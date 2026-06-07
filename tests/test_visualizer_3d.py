@@ -204,6 +204,33 @@ def test_supersample_preserves_gate_origin(small_result):
         assert np.isclose(fy0, y0), f"y origin drift at k={k}: {fy0} vs {y0}"
 
 
+def test_supersample_grid_mode_value_alignment():
+    """grid_mode=True keeps interpolated values aligned to the declared
+    fine-cell centers: a linear ramp sampled at native cell centers reproduces
+    the ramp at the fine cell centers (interior). Regression for the
+    quarter-native-cell value shift the default grid_mode=False introduced."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, nx, k = 2.0, 6, 2
+    # 2 identical rows so the x-ramp survives the (scalar-k) zoom on both axes;
+    # all-cavity so _fill is identity. f(center)=x along x.
+    xramp = (np.arange(nx) + 0.5) * cs
+    ramp = np.tile(xramp, (2, 1)).astype(float)
+    mask = np.ones((2, nx), dtype=bool)
+    geom = Geometry(mask=mask, thickness_mm=ramp, cell_size_mm=cs, gates=[(0, 0)])
+    res, color = _supersample_for_render(SimpleNamespace(geometry=geom), ramp, k)
+    g2 = res.geometry
+    fine_centers = (np.arange(g2.nx) + 0.5) * g2.cell_size_mm
+    interior = (fine_centers >= xramp[0]) & (fine_centers <= xramp[-1])
+    # rows are identical; check the x-alignment on row 0
+    got = np.asarray(g2.thickness_mm)[0]
+    assert np.allclose(got[interior], fine_centers[interior], atol=1e-6)
+    assert np.allclose(np.asarray(color)[0][interior], fine_centers[interior], atol=1e-6)
+
+
 def test_supersample_preserves_mm_extent_and_grows_walls(small_result):
     """Refinement changes resolution, not physical span; and it yields more
     wall triangles (finer steps) than the native render."""

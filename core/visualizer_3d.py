@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from scipy.ndimage import distance_transform_edt, zoom
+from scipy.ndimage import distance_transform_edt, label, zoom
 
 from .geometry import Geometry
 from .solver import FlowResult
@@ -108,9 +108,14 @@ def _supersample_for_render(
     Out-of-cavity cells are filled with the nearest in-cavity value *before*
     interpolation so the surface does not bleed toward zero across the cavity
     boundary; the refined mask (the ``>= 0.5`` contour of the upsampled binary
-    mask) then re-applies the silhouette. ``factor <= 1`` is a no-op and
-    returns the original result and color field unchanged (so the default
-    render path and its tests are bit-for-bit identical).
+    mask) then re-applies the silhouette. This fill is done **per connected
+    cavity component** (`scipy.ndimage.label`): a single global nearest-fill
+    would let one region's values bleed across a one-cell gap into a separate
+    disconnected region (false colors/heights for uploaded geometries with
+    narrow gaps/holes), so each component is filled only from its own cells,
+    upsampled, and composited by its own refined mask. ``factor <= 1`` is a
+    no-op (so the default render path and its tests are bit-for-bit identical),
+    and a single connected cavity reduces to the original behaviour exactly.
 
     Each native gate cell is expanded to its full ``k×k`` fine block (not a
     single offset cell). The averaged gate centroid of a full block lands
@@ -123,15 +128,10 @@ def _supersample_for_render(
         return result, color_field
     g = result.geometry
     mask = g.mask
-    if mask.any() and not mask.all():
-        idx = distance_transform_edt(~mask, return_distances=False, return_indices=True)
-
-        def _fill(a: np.ndarray) -> np.ndarray:
-            return np.asarray(a, dtype=float)[tuple(idx)]
-    else:
-
-        def _fill(a: np.ndarray) -> np.ndarray:
-            return np.asarray(a, dtype=float)
+    thk = np.asarray(g.thickness_mm, dtype=float)
+    cf = np.asarray(color_field, dtype=float)
+    ny, nx = mask.shape
+    fine_shape = (ny * k, nx * k)
 
     # grid_mode=True treats each value as covering a finite cell extent (not a
     # center-to-center sample span), so an N-cell array upsampled by k yields
@@ -141,15 +141,32 @@ def _supersample_for_render(
     # (and the silhouette) by up to a quarter native cell at k=2. mode="nearest"
     # clamps the half-cell margins beyond the outermost native centers.
     zk = dict(order=1, mode="nearest", grid_mode=True)
-    thk_f = zoom(_fill(g.thickness_mm), k, **zk)
-    color_f = zoom(_fill(color_field), k, **zk)
-    mask_f = zoom(mask.astype(float), k, **zk) >= 0.5
+
+    # Interpolate each connected cavity component independently and composite,
+    # so a narrow gap between two disconnected regions never bleeds one region's
+    # field into the other.
+    comp_labels, ncomp = label(mask)
+    thk_f = np.zeros(fine_shape, dtype=float)
+    color_f = np.zeros(fine_shape, dtype=float)
+    mask_f = np.zeros(fine_shape, dtype=bool)
+    for comp in range(1, ncomp + 1):
+        cmask = comp_labels == comp
+        if cmask.all():
+            thk_fill, color_fill = thk, cf
+        else:
+            idx = distance_transform_edt(~cmask, return_distances=False, return_indices=True)
+            thk_fill = thk[tuple(idx)]
+            color_fill = cf[tuple(idx)]
+        cmask_f = zoom(cmask.astype(float), k, **zk) >= 0.5
+        sel = cmask_f & ~mask_f  # components are disjoint; guard any thin seam
+        thk_f[sel] = zoom(thk_fill, k, **zk)[sel]
+        color_f[sel] = zoom(color_fill, k, **zk)[sel]
+        mask_f |= cmask_f
     # Restamp each native gate cell's value over its k×k refined block. Bilinear
     # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
     # with its lower neighbors, and for even k no fine center lands on the native
     # gate center — so the displayed extremum and its auto-ranged colorbar would
     # miss the stated value. The gate block keeps the native value exactly.
-    cf = np.asarray(color_field, dtype=float)
     for iy, ix in g.gates:
         color_f[iy * k : (iy + 1) * k, ix * k : (ix + 1) * k] = cf[iy, ix]
     gates_f = [(iy * k + a, ix * k + b) for iy, ix in g.gates for a in range(k) for b in range(k)]

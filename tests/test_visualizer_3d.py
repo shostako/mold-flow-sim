@@ -295,6 +295,29 @@ def test_supersample_keeps_wall_colors_finite(small_result, renderer):
     assert np.isfinite(intensity).mean() > 0.99
 
 
+def test_supersample_no_bleed_between_diagonal_cavities():
+    """Two cavities touching only at a corner are 4-disconnected (matching the
+    solver's 4-neighbor connectivity), so refinement must not blend their values
+    at the shared corner even though they share a bilinear kernel. Per-4-
+    connected-component normalized convolution isolates them."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, k = 1.0, 2
+    mask = np.array([[True, False], [False, True]])  # diagonal touch only
+    thk = np.array([[1.0, 0.0], [0.0, 5.0]])
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cs, gates=[])
+    res, _c = _supersample_for_render(SimpleNamespace(geometry=geom), thk, k)
+    z = np.asarray(res.geometry.thickness_mm)
+    mf = np.asarray(res.geometry.mask)
+    a = z[:k, :k][mf[:k, :k]]  # region A = native (0,0), value 1
+    b = z[k:, k:][mf[k:, k:]]  # region B = native (1,1), value 5
+    assert a.size and np.all(a <= 1.0 + 1e-9)  # A never picks up B(=5)
+    assert b.size and np.all(b >= 5.0 - 1e-9)  # B never picks up A(=1)
+
+
 def test_supersample_no_bleed_across_intracomponent_gap():
     """A single *connected* U-shaped cavity whose two arms are separated locally
     by a one-cell background slot must not blend one arm's value into the other

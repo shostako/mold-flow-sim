@@ -111,6 +111,12 @@ def _supersample_for_render(
     mask) then re-applies the silhouette. ``factor <= 1`` is a no-op and
     returns the original result and color field unchanged (so the default
     render path and its tests are bit-for-bit identical).
+
+    Each native gate cell is expanded to its full ``k×k`` fine block (not a
+    single offset cell). The averaged gate centroid of a full block lands
+    *exactly* on the native gate center for any ``k`` (even ``k`` included),
+    so :func:`_gate_centered_axes` keeps the displayed origin pinned to the
+    gate — a single offset cell would shift it by up to half a native cell.
     """
     k = max(1, int(factor))
     if k == 1:
@@ -130,8 +136,7 @@ def _supersample_for_render(
     thk_f = zoom(_fill(g.thickness_mm), k, order=1)
     color_f = zoom(_fill(color_field), k, order=1)
     mask_f = zoom(mask.astype(float), k, order=1) >= 0.5
-    off = (k - 1) // 2
-    gates_f = [(iy * k + off, ix * k + off) for iy, ix in g.gates]
+    gates_f = [(iy * k + a, ix * k + b) for iy, ix in g.gates for a in range(k) for b in range(k)]
     fine = Geometry(
         mask=mask_f,
         thickness_mm=thk_f,

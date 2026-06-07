@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from scipy.ndimage import distance_transform_edt, label, zoom
+from scipy.ndimage import distance_transform_edt, find_objects, label, zoom
 
 from .geometry import Geometry
 from .solver import FlowResult
@@ -148,21 +148,26 @@ def _supersample_for_render(
     # first, so the cost is ~O(total cavity area × k²) instead of
     # O(components × full grid × k²) — a thresholded image with many speckles
     # would otherwise run a full-grid distance transform + zooms per component.
-    # The crop is exact: every cell in a component's bbox has its nearest
-    # in-component cell inside that bbox, so the filled/interpolated values match
-    # the full-grid result; the pad (>=1) only captures the half-cell silhouette
-    # margin and the one-cell bilinear reach at the component edge.
+    # `find_objects` returns every component's bbox in one pass, so we never
+    # materialize/scan `comp_labels == comp` over the whole grid per component
+    # (only over each crop). The crop is exact: every cell in a component's bbox
+    # has its nearest in-component cell inside that bbox, so the filled/
+    # interpolated values match the full-grid result; the pad (>=1) only captures
+    # the half-cell silhouette margin and the one-cell bilinear reach at the edge.
     comp_labels, ncomp = label(mask)
+    bboxes = find_objects(comp_labels)
     thk_f = np.zeros(fine_shape, dtype=float)
     color_f = np.zeros(fine_shape, dtype=float)
     mask_f = np.zeros(fine_shape, dtype=bool)
     pad = 2
     for comp in range(1, ncomp + 1):
-        cmask_full = comp_labels == comp
-        ys, xs = np.where(cmask_full)
-        r0, r1 = max(int(ys.min()) - pad, 0), min(int(ys.max()) + 1 + pad, ny)
-        c0, c1 = max(int(xs.min()) - pad, 0), min(int(xs.max()) + 1 + pad, nx)
-        sub_cmask = cmask_full[r0:r1, c0:c1]
+        sl = bboxes[comp - 1]
+        if sl is None:  # label index with no surviving cells (defensive)
+            continue
+        ry, rx = sl
+        r0, r1 = max(ry.start - pad, 0), min(ry.stop + pad, ny)
+        c0, c1 = max(rx.start - pad, 0), min(rx.stop + pad, nx)
+        sub_cmask = comp_labels[r0:r1, c0:c1] == comp
         sub_thk = thk[r0:r1, c0:c1]
         sub_cf = cf[r0:r1, c0:c1]
         if sub_cmask.all():

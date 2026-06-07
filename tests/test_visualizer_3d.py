@@ -189,6 +189,21 @@ def test_supersample_keeps_silhouette_and_masking(small_result):
     assert np.all(zf[np.isfinite(zf)] == 0.0)
 
 
+def test_supersample_preserves_gate_origin(small_result):
+    """The gate-centered origin must stay exactly on the native gate center
+    for any factor, including even k (regression: a single offset fine cell
+    shifted the origin by a quarter native cell at the default k=2)."""
+    from core.visualizer_3d import _supersample_for_render
+
+    g = small_result.geometry
+    x0, y0 = g.gate_origin_mm()
+    for k in (2, 3):
+        res, _color = _supersample_for_render(small_result, g.thickness_mm.astype(float), k)
+        fx0, fy0 = res.geometry.gate_origin_mm()
+        assert np.isclose(fx0, x0), f"x origin drift at k={k}: {fx0} vs {x0}"
+        assert np.isclose(fy0, y0), f"y origin drift at k={k}: {fy0} vs {y0}"
+
+
 def test_supersample_preserves_mm_extent_and_grows_walls(small_result):
     """Refinement changes resolution, not physical span; and it yields more
     wall triangles (finer steps) than the native render."""

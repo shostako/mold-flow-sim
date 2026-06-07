@@ -141,3 +141,63 @@ def test_walls_share_ceiling_coloraxis(small_result):
     intensity = np.asarray(walls.intensity)
     finite = np.isfinite(intensity)
     assert finite.mean() > 0.99
+
+
+# ----------------------------------------------------------------------
+# Display-only supersampling
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [render_3d_thickness_map, render_3d_fill_time, render_3d_pressure],
+)
+def test_supersample_default_is_native_resolution(small_result, renderer):
+    """supersample=1 must keep the solver-native grid (no refinement)."""
+    fig = renderer(small_result, supersample=1)
+    _floor, ceiling, _walls = _split_traces(fig)
+    assert np.asarray(ceiling.z).shape == small_result.geometry.mask.shape
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [render_3d_thickness_map, render_3d_fill_time, render_3d_pressure],
+)
+def test_supersample_refines_ceiling_grid(small_result, renderer):
+    """supersample=k refines floor/ceiling/surfacecolor to (ny*k, nx*k) and
+    keeps a valid wall mesh and the data aspect."""
+    ny, nx = small_result.geometry.mask.shape
+    fig = renderer(small_result, supersample=2)
+    floor, ceiling, walls = _split_traces(fig)
+    assert np.asarray(ceiling.z).shape == (ny * 2, nx * 2)
+    assert np.asarray(floor.z).shape == (ny * 2, nx * 2)
+    assert np.asarray(ceiling.surfacecolor).shape == (ny * 2, nx * 2)
+    assert walls is not None and len(walls.i) > 0
+    assert fig.layout.scene.aspectmode == "data"
+
+
+def test_supersample_keeps_silhouette_and_masking(small_result):
+    """On the refined grid the cavity silhouette is preserved: some ceiling
+    cells finite (>0), some NaN; floor finite cells are exactly 0."""
+    fig = render_3d_thickness_map(small_result, supersample=2)
+    floor, ceiling, _walls = _split_traces(fig)
+    z = np.asarray(ceiling.z)
+    finite = np.isfinite(z)
+    assert finite.any() and (~finite).any()
+    assert np.all(z[finite] > 0)
+    zf = np.asarray(floor.z)
+    assert np.all(zf[np.isfinite(zf)] == 0.0)
+
+
+def test_supersample_preserves_mm_extent_and_grows_walls(small_result):
+    """Refinement changes resolution, not physical span; and it yields more
+    wall triangles (finer steps) than the native render."""
+    cs = small_result.geometry.cell_size_mm
+    f1, c1, w1 = _split_traces(render_3d_thickness_map(small_result, supersample=1))
+    f2, c2, w2 = _split_traces(render_3d_thickness_map(small_result, supersample=2))
+    x1, x2 = np.asarray(c1.x), np.asarray(c2.x)
+    y1, y2 = np.asarray(c1.y), np.asarray(c2.y)
+    # physical span identical up to a half-cell (finer grid samples centers)
+    assert abs((x1.max() - x1.min()) - (x2.max() - x2.min())) <= cs
+    assert abs((y1.max() - y1.min()) - (y2.max() - y2.min())) <= cs
+    assert len(np.asarray(w2.i)) > len(np.asarray(w1.i))

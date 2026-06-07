@@ -283,6 +283,18 @@ def test_supersample_no_bleed_between_disconnected_cavities():
     assert np.allclose(b_cells, 5.0)  # no downward bleed from A(=1)
 
 
+@pytest.mark.parametrize("renderer", [render_3d_fill_time, render_3d_pressure])
+def test_supersample_keeps_wall_colors_finite(small_result, renderer):
+    """fill-time/pressure are NaN outside the cavity (solver init); the
+    mask-weighted upsample must sanitize them (NaN*0 == NaN) so the refined
+    side-wall intensities stay finite. Regression: NaN propagated into the wall
+    colors at supersample>1 and blanked the physically-colored walls."""
+    fig = renderer(small_result, supersample=2)
+    _floor, _ceiling, walls = _split_traces(fig)
+    intensity = np.asarray(walls.intensity)
+    assert np.isfinite(intensity).mean() > 0.99
+
+
 def test_supersample_no_bleed_across_intracomponent_gap():
     """A single *connected* U-shaped cavity whose two arms are separated locally
     by a one-cell background slot must not blend one arm's value into the other

@@ -144,6 +144,14 @@ def _supersample_for_render(
     thk_f = zoom(_fill(g.thickness_mm), k, **zk)
     color_f = zoom(_fill(color_field), k, **zk)
     mask_f = zoom(mask.astype(float), k, **zk) >= 0.5
+    # Restamp each native gate cell's value over its k×k refined block. Bilinear
+    # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
+    # with its lower neighbors, and for even k no fine center lands on the native
+    # gate center — so the displayed extremum and its auto-ranged colorbar would
+    # miss the stated value. The gate block keeps the native value exactly.
+    cf = np.asarray(color_field, dtype=float)
+    for iy, ix in g.gates:
+        color_f[iy * k : (iy + 1) * k, ix * k : (ix + 1) * k] = cf[iy, ix]
     gates_f = [(iy * k + a, ix * k + b) for iy, ix in g.gates for a in range(k) for b in range(k)]
     fine = Geometry(
         mask=mask_f,

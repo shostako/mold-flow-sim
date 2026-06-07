@@ -144,24 +144,43 @@ def _supersample_for_render(
 
     # Interpolate each connected cavity component independently and composite,
     # so a narrow gap between two disconnected regions never bleeds one region's
-    # field into the other.
+    # field into the other. Each component is cropped to a padded bounding box
+    # first, so the cost is ~O(total cavity area × k²) instead of
+    # O(components × full grid × k²) — a thresholded image with many speckles
+    # would otherwise run a full-grid distance transform + zooms per component.
+    # The crop is exact: every cell in a component's bbox has its nearest
+    # in-component cell inside that bbox, so the filled/interpolated values match
+    # the full-grid result; the pad (>=1) only captures the half-cell silhouette
+    # margin and the one-cell bilinear reach at the component edge.
     comp_labels, ncomp = label(mask)
     thk_f = np.zeros(fine_shape, dtype=float)
     color_f = np.zeros(fine_shape, dtype=float)
     mask_f = np.zeros(fine_shape, dtype=bool)
+    pad = 2
     for comp in range(1, ncomp + 1):
-        cmask = comp_labels == comp
-        if cmask.all():
-            thk_fill, color_fill = thk, cf
+        cmask_full = comp_labels == comp
+        ys, xs = np.where(cmask_full)
+        r0, r1 = max(int(ys.min()) - pad, 0), min(int(ys.max()) + 1 + pad, ny)
+        c0, c1 = max(int(xs.min()) - pad, 0), min(int(xs.max()) + 1 + pad, nx)
+        sub_cmask = cmask_full[r0:r1, c0:c1]
+        sub_thk = thk[r0:r1, c0:c1]
+        sub_cf = cf[r0:r1, c0:c1]
+        if sub_cmask.all():
+            thk_fill, color_fill = sub_thk, sub_cf
         else:
-            idx = distance_transform_edt(~cmask, return_distances=False, return_indices=True)
-            thk_fill = thk[tuple(idx)]
-            color_fill = cf[tuple(idx)]
-        cmask_f = zoom(cmask.astype(float), k, **zk) >= 0.5
-        sel = cmask_f & ~mask_f  # components are disjoint; guard any thin seam
-        thk_f[sel] = zoom(thk_fill, k, **zk)[sel]
-        color_f[sel] = zoom(color_fill, k, **zk)[sel]
-        mask_f |= cmask_f
+            idx = distance_transform_edt(~sub_cmask, return_distances=False, return_indices=True)
+            thk_fill = sub_thk[tuple(idx)]
+            color_fill = sub_cf[tuple(idx)]
+        cmask_f = zoom(sub_cmask.astype(float), k, **zk) >= 0.5
+        thk_cf = zoom(thk_fill, k, **zk)
+        color_cf = zoom(color_fill, k, **zk)
+        sub_thk_f = thk_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        sub_color_f = color_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        sub_mask_f = mask_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        sel = cmask_f & ~sub_mask_f  # components are disjoint; guard any thin seam
+        sub_thk_f[sel] = thk_cf[sel]
+        sub_color_f[sel] = color_cf[sel]
+        sub_mask_f |= cmask_f
     # Restamp each native gate cell's value over its k×k refined block. Bilinear
     # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
     # with its lower neighbors, and for even k no fine center lands on the native

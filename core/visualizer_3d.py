@@ -151,8 +151,14 @@ def _supersample_for_render(
     den = zoom(mask_w, k, **zk)
     mask_f = den >= 0.5
     den_safe = np.where(mask_f, den, 1.0)  # avoid /0 outside the refined mask
-    thk_f = zoom(thk * mask_w, k, **zk) / den_safe
-    color_f = zoom(cf * mask_w, k, **zk) / den_safe
+    # np.where (not `* mask_w`): fill-time/pressure are NaN *outside* the cavity
+    # (solver init), and NaN*0 == NaN would survive the multiply and propagate
+    # through zoom into the refined boundary/wall colors, blanking them. where()
+    # replaces the outside with 0 (which carries zero weight anyway).
+    thk_num = np.where(mask, thk, 0.0)
+    color_num = np.where(mask, cf, 0.0)
+    thk_f = zoom(thk_num, k, **zk) / den_safe
+    color_f = zoom(color_num, k, **zk) / den_safe
     # Restamp each native gate cell's value over its k×k refined block. Bilinear
     # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
     # with its lower neighbors, and for even k no fine center lands on the native

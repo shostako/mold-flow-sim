@@ -220,7 +220,9 @@ def test_supersample_grid_mode_value_alignment():
     xramp = (np.arange(nx) + 0.5) * cs
     ramp = np.tile(xramp, (2, 1)).astype(float)
     mask = np.ones((2, nx), dtype=bool)
-    geom = Geometry(mask=mask, thickness_mm=ramp, cell_size_mm=cs, gates=[(0, 0)])
+    # no gates: isolate grid_mode interpolation alignment from the gate-block
+    # restamp (which would overwrite a gate cell's value).
+    geom = Geometry(mask=mask, thickness_mm=ramp, cell_size_mm=cs, gates=[])
     res, color = _supersample_for_render(SimpleNamespace(geometry=geom), ramp, k)
     g2 = res.geometry
     fine_centers = (np.arange(g2.nx) + 0.5) * g2.cell_size_mm
@@ -229,6 +231,30 @@ def test_supersample_grid_mode_value_alignment():
     got = np.asarray(g2.thickness_mm)[0]
     assert np.allclose(got[interior], fine_centers[interior], atol=1e-6)
     assert np.allclose(np.asarray(color)[0][interior], fine_centers[interior], atol=1e-6)
+
+
+def test_supersample_preserves_gate_field_value():
+    """The native gate-cell field value (e.g. pressure_norm==1 'at gate') must
+    survive refinement. Bilinear zoom alone would average a single-cell gate
+    with neighbors, dropping the extremum for even k. Regression for the
+    pressure colorbar/title losing '1 at gate'."""
+    from types import SimpleNamespace
+
+    from core.geometry import Geometry
+    from core.visualizer_3d import _supersample_for_render
+
+    cs, k, ny, nx = 1.0, 2, 5, 5
+    mask = np.ones((ny, nx), dtype=bool)
+    thk = np.ones((ny, nx), dtype=float)
+    field = np.full((ny, nx), 0.3)  # pressure-like: low everywhere...
+    gy, gx = 2, 2
+    field[gy, gx] = 1.0  # ...except 1 at the single gate cell
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cs, gates=[(gy, gx)])
+    _res, color = _supersample_for_render(SimpleNamespace(geometry=geom), field, k)
+    color = np.asarray(color)
+    block = color[gy * k : (gy + 1) * k, gx * k : (gx + 1) * k]
+    assert np.allclose(block, 1.0)  # gate block keeps the native value exactly
+    assert np.isclose(np.nanmax(color), 1.0)  # global max still reaches the gate
 
 
 def test_supersample_preserves_mm_extent_and_grows_walls(small_result):

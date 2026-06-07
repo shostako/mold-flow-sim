@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from scipy.ndimage import zoom
+from scipy.ndimage import find_objects, label, zoom
 
 from .geometry import Geometry
 from .solver import FlowResult
@@ -105,19 +105,35 @@ def _supersample_for_render(
     the side-wall Mesh3d read with ``factor``x finer steps — the grid-aligned
     staircase on slanted/curved silhouette edges shrinks by ``1/factor``.
 
-    Upsampling uses **normalized convolution** (mask-weighted interpolation):
-    each fine value is the cavity-weighted average of the native field over the
-    cells the bilinear kernel reaches, with out-of-cavity cells contributing
-    zero weight (``zoom(field·mask) / zoom(mask)``). This never bleeds a value
-    across a background gap — whether the gap separates two globally
-    disconnected cavities *or* two arms of one connected (U/ring) component
-    that come within a cell of each other — and never bleeds the surface toward
-    zero at the boundary (the boundary fine cell equals its cavity cell's value,
-    not a blend with the zero outside). It needs no fill, no connected-component
-    bookkeeping, and is just three full-grid ``zoom`` calls — O(grid·k²). The
-    refined mask is the ``>= 0.5`` contour of ``zoom(mask)`` (the convolution
-    denominator), re-applying the silhouette. ``factor <= 1`` is a no-op (so the
-    default render path and its tests are bit-for-bit identical).
+    Upsampling uses **per-4-connected-component normalized convolution**
+    (mask-weighted interpolation, one component at a time). Within a component
+    each fine value is the component-weighted average of the native field over
+    the cells the bilinear kernel reaches, with everything outside that
+    component contributing zero weight (``zoom(field·m) / zoom(m)`` where ``m``
+    is the *single component's* mask). Consequences:
+
+    - **No background-gap bleed** — a gap (between disconnected cavities, or
+      between two arms of one U/ring component that come within a cell) carries
+      zero weight, so it is never crossed; the boundary also never bleeds toward
+      the zero outside (a boundary fine cell equals its own cavity value).
+    - **No diagonal bleed** — two cavities touching only at a corner are
+      *4-disconnected* (matching the solver's 4-neighbor connectivity in
+      ``solver.py``), so they are different components and never share a
+      bilinear kernel; refinement keeps them isolated.
+    - **NaN-safe** — fill-time/pressure are NaN *outside* the cavity (solver
+      init); ``zoom(field·m)`` with ``NaN·0 == NaN`` would propagate NaN into
+      the refined boundary/wall colors, so the numerator is built with
+      ``np.where(m, field, 0.0)`` (zero weight anyway, NaN removed).
+    - **Bounded cost** — each component is cropped to a padded bounding box
+      (``find_objects`` gives them all in one pass; ``comp_labels == comp`` is
+      compared only inside each crop), so the work is ``O(total cavity area·k²)``
+      rather than ``O(components · full grid · k²)`` — a thresholded image with
+      thousands of speckles stays linear.
+
+    The refined mask is the union of each component's ``>= 0.5`` contour of
+    ``zoom(m)`` (the convolution denominator). ``factor <= 1`` is a no-op (so the
+    default render path and its tests are bit-for-bit identical), and a single
+    connected cavity is just one component.
 
     Each native gate cell is expanded to its full ``k×k`` fine block (not a
     single offset cell). The averaged gate centroid of a full block lands
@@ -132,7 +148,8 @@ def _supersample_for_render(
     mask = g.mask
     thk = np.asarray(g.thickness_mm, dtype=float)
     cf = np.asarray(color_field, dtype=float)
-    mask_w = mask.astype(float)
+    ny, nx = mask.shape
+    fine_shape = (ny * k, nx * k)
 
     # grid_mode=True treats each value as covering a finite cell extent (not a
     # center-to-center sample span), so an N-cell array upsampled by k yields
@@ -143,22 +160,36 @@ def _supersample_for_render(
     # clamps the half-cell margins beyond the outermost native centers.
     zk = dict(order=1, mode="nearest", grid_mode=True)
 
-    # Normalized convolution: weight every native value by the cavity mask so a
-    # background gap (between disconnected regions OR between arms of one
-    # connected component) contributes zero and is never crossed, and the
-    # boundary never bleeds toward the zero outside. den == zoom(mask) doubles
-    # as the refined-silhouette source.
-    den = zoom(mask_w, k, **zk)
-    mask_f = den >= 0.5
-    den_safe = np.where(mask_f, den, 1.0)  # avoid /0 outside the refined mask
-    # np.where (not `* mask_w`): fill-time/pressure are NaN *outside* the cavity
-    # (solver init), and NaN*0 == NaN would survive the multiply and propagate
-    # through zoom into the refined boundary/wall colors, blanking them. where()
-    # replaces the outside with 0 (which carries zero weight anyway).
-    thk_num = np.where(mask, thk, 0.0)
-    color_num = np.where(mask, cf, 0.0)
-    thk_f = zoom(thk_num, k, **zk) / den_safe
-    color_f = zoom(color_num, k, **zk) / den_safe
+    # Per-4-connected-component normalized convolution, cropped to each
+    # component's padded bbox. See the docstring for why all four properties
+    # (no background bleed, no diagonal bleed, NaN-safety, bounded cost) hold.
+    comp_labels, ncomp = label(mask)  # 4-connectivity (default) == solver's
+    bboxes = find_objects(comp_labels)
+    thk_f = np.zeros(fine_shape, dtype=float)
+    color_f = np.zeros(fine_shape, dtype=float)
+    mask_f = np.zeros(fine_shape, dtype=bool)
+    pad = 2
+    for comp in range(1, ncomp + 1):
+        sl = bboxes[comp - 1]
+        if sl is None:  # label index with no surviving cells (defensive)
+            continue
+        ry, rx = sl
+        r0, r1 = max(ry.start - pad, 0), min(ry.stop + pad, ny)
+        c0, c1 = max(rx.start - pad, 0), min(rx.stop + pad, nx)
+        m = comp_labels[r0:r1, c0:c1] == comp
+        mw = m.astype(float)
+        den = zoom(mw, k, **zk)
+        cmask_f = den >= 0.5
+        den_safe = np.where(cmask_f, den, 1.0)
+        thk_cf = zoom(np.where(m, thk[r0:r1, c0:c1], 0.0), k, **zk) / den_safe
+        color_cf = zoom(np.where(m, cf[r0:r1, c0:c1], 0.0), k, **zk) / den_safe
+        gthk = thk_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        gcol = color_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        gmsk = mask_f[r0 * k : r1 * k, c0 * k : c1 * k]
+        sel = cmask_f & ~gmsk  # components disjoint; first-writer wins any seam
+        gthk[sel] = thk_cf[sel]
+        gcol[sel] = color_cf[sel]
+        gmsk |= cmask_f
     # Restamp each native gate cell's value over its k×k refined block. Bilinear
     # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
     # with its lower neighbors, and for even k no fine center lands on the native

@@ -474,7 +474,7 @@ with st.sidebar:
                     "2段目の深さ [mm]（薄・製品長辺側）",
                     0.2,
                     5.0,
-                    1.0,
+                    1.8,
                     step=0.1,
                     help="ランド直後（製品長辺側）の薄い段の肉厚。1段目との境界はスロープで連続。",
                 )
@@ -514,7 +514,7 @@ with st.sidebar:
 
             land_step_f2 = st.checkbox(
                 "ランド↔テーパ境界に段差をつける",
-                value=False,
+                value=True,
                 help="ランド直後のテーパ始端深さを独立指定して段差を作る。OFFで連続（段差なし）。",
             )
             if land_step_f2:
@@ -530,7 +530,7 @@ with st.sidebar:
                     "ランド↔1段目テーパ 境界深さ [mm]（2段目が無い領域）",
                     0.2,
                     float(runner_depth_f2),
-                    min(float(land_depth_f2), float(runner_depth_f2)),
+                    min(1.50, float(runner_depth_f2)),
                     step=0.05,
                     help="2段目が無い左側で、1段目テーパのランド側始端の深さ。上限は深ランナー深さ。",
                 )
@@ -897,7 +897,7 @@ with st.sidebar:
             shear_heating_enabled = False
 
     with st.expander("射出圧縮成形 (ICM)", expanded=False):
-        icm = st.checkbox("圧縮成形ON", value=True)
+        icm = st.checkbox("圧縮成形ON", value=False)
         if icm:
             # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
             # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。

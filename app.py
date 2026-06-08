@@ -25,8 +25,11 @@ from core import (
     build_direct_gate_geometry,
     build_film_gate2_geometry,
     build_film_gate_geometry,
+    build_fine_geometry,
     export_frames,
+    fine_refine_factor,
     geometry_from_image,
+    refine_for_display,
     render_3d_fill_time,
     render_3d_pressure,
     render_3d_thickness_map,
@@ -370,8 +373,10 @@ with st.sidebar:
             )
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
             st.caption(
-                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
-                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+                "細かいほど解析精度が上がるが重くなる（0.2mm・層別で1回数十秒）。"
+                "普段は0.5で速く回し、精密な解析が要るときだけ下げる。"
+                "3Dの見た目だけ滑らかにしたいなら、解析メッシュではなく"
+                "3D表示の「3D描画の精細さ」を上げる（解析は回し直さない）。"
             )
         upload = None
     elif geom_source.startswith("Film gate 2"):
@@ -540,8 +545,10 @@ with st.sidebar:
         with st.expander("メッシュ", expanded=False):
             cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
             st.caption(
-                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
-                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+                "細かいほど解析精度が上がるが重くなる（0.2mm・層別で1回数十秒）。"
+                "普段は0.5で速く回し、精密な解析が要るときだけ下げる。"
+                "3Dの見た目だけ滑らかにしたいなら、解析メッシュではなく"
+                "3D表示の「3D描画の精細さ」を上げる（解析は回し直さない）。"
             )
         upload = None
     elif geom_source.startswith("Film gate"):
@@ -716,8 +723,10 @@ with st.sidebar:
 
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
             st.caption(
-                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
-                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+                "細かいほど解析精度が上がるが重くなる（0.2mm・層別で1回数十秒）。"
+                "普段は0.5で速く回し、精密な解析が要るときだけ下げる。"
+                "3Dの見た目だけ滑らかにしたいなら、解析メッシュではなく"
+                "3D表示の「3D描画の精細さ」を上げる（解析は回し直さない）。"
             )
         upload = None
     else:
@@ -929,7 +938,14 @@ with st.sidebar:
 
 
 # ----------------------- main panel -----------------------
-def build_geometry() -> Geometry:
+def build_geometry() -> tuple[Geometry, object | None]:
+    """Return ``(geometry, cfg)``.
+
+    ``cfg`` is the parametric dataclass used to build the geometry
+    (``DirectGateConfig`` / ``FilmGate2Config`` / ``FilmGateConfig``), or
+    ``None`` for image input. The cfg lets the 3D view re-rasterize the
+    same shape at a finer ``cell_size_mm`` for display (see
+    :func:`build_fine_geometry`)."""
     if geom_source.startswith("Direct gate"):
         try:
             cfg_dg = DirectGateConfig(
@@ -943,7 +959,7 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_thk_dg if plate_split_dg > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
             )
-            return build_direct_gate_geometry(cfg_dg)
+            return build_direct_gate_geometry(cfg_dg), cfg_dg
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -975,7 +991,7 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_f2 if plate_split_f2 > 0 else None,
                 plate_upper_thk_mm=plate_upper_f2 if plate_split_f2 > 0 else None,
             )
-            return build_film_gate2_geometry(cfg_f2)
+            return build_film_gate2_geometry(cfg_f2), cfg_f2
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1003,7 +1019,7 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
-            return build_film_gate_geometry(cfg)
+            return build_film_gate_geometry(cfg), cfg
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1030,14 +1046,14 @@ def build_geometry() -> Geometry:
         col_ys = ys[xs == xs.min()]
         iy = int(np.median(col_ys))
         g.add_gate(iy, ix)
-    return g
+    return g, None
 
 
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
     st.subheader("成形品設計図")
-    geom = build_geometry()
+    geom, geom_cfg = build_geometry()
     fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
     st.write(
         f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³"
@@ -1205,6 +1221,7 @@ if do_run:
         # でも下のブロックがこれを拾って表示する。
         st.session_state["mfs_result"] = result
         st.session_state["mfs_geom"] = geom
+        st.session_state["mfs_cfg"] = geom_cfg
         st.session_state["mfs_skin_on"] = skin_on
         st.session_state["mfs_multilayer_on"] = multilayer_on
         st.session_state["mfs_num_frames"] = num_frames
@@ -1224,6 +1241,7 @@ if do_run:
 if "mfs_result" in st.session_state:
     result = st.session_state["mfs_result"]
     geom = st.session_state["mfs_geom"]
+    geom_cfg = st.session_state.get("mfs_cfg")
     skin_on = st.session_state["mfs_skin_on"]
     multilayer_on = st.session_state.get("mfs_multilayer_on", False)
     num_frames = st.session_state["mfs_num_frames"]
@@ -1356,22 +1374,59 @@ if "mfs_result" in st.session_state:
                 "読める（PLの薄グレー床は形状参照用）。ドラッグで回転、スクロール"
                 "でズーム。物理は 2D Hele-Shaw のまま（表現上の3D化のみ）。"
             )
+            refine_3d = st.slider(
+                "3D描画の精細さ (×)",
+                min_value=1,
+                max_value=3,
+                value=1,
+                step=1,
+                key="refine_3d",
+                help=(
+                    "製品外形を数式から細かく再ラスタ化し、斜め境界の階段を"
+                    "滑らかにする。解析は回し直さない（表示専用・即時）。"
+                    "上げるほど描画が重くなるので、3Dを見るときだけ上げる。"
+                    "画像入力には効かない（解析的な外形が無いため）。"
+                ),
+            )
+            coarse_cells = int(geom.mask.sum())
+            k_eff = fine_refine_factor(coarse_cells, refine_3d) if geom_cfg is not None else 1
+            geom_fine = build_fine_geometry(geom_cfg, k_eff)
+            if geom_fine is not None:
+                disp = refine_for_display(result, geom_fine)
+                msg = (
+                    f"外形を ×{k_eff} 精細化"
+                    f"（{geom.nx}×{geom.ny} → {geom_fine.nx}×{geom_fine.ny} セル）。"
+                )
+                if k_eff < refine_3d:
+                    msg += f" 要求 ×{refine_3d} はセル数上限のため ×{k_eff} に制限。"
+                st.caption(msg)
+            else:
+                disp = result
+                if refine_3d > 1 and geom_cfg is None:
+                    st.caption(
+                        "画像入力は解析的な外形が無いため精細化は無効（ネイティブ解像度で表示）。"
+                    )
+                elif refine_3d > 1:
+                    st.caption(
+                        "この格子サイズではセル数上限に達するため精細化を無効化"
+                        "（ネイティブ表示）。解析メッシュを粗くすると精細化できる。"
+                    )
             t3d_h, t3d_fill, t3d_press = st.tabs(["厚み h(x,y)", "充填時間", "圧力"])
             with t3d_h:
                 st.plotly_chart(
-                    render_3d_thickness_map(result),
+                    render_3d_thickness_map(disp),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )
             with t3d_fill:
                 st.plotly_chart(
-                    render_3d_fill_time(result),
+                    render_3d_fill_time(disp),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )
             with t3d_press:
                 st.plotly_chart(
-                    render_3d_pressure(result),
+                    render_3d_pressure(disp),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )

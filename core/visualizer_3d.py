@@ -78,16 +78,22 @@ def _cavity_surface_mesh(
                           vertex per in-cavity cell center.
       - ``cell_idx``:    flat ``iy*nx + ix`` index of each vertex's cell,
                           for pulling per-cell height / field values.
-      - ``(i, j, k)``:   triangle vertex indices. A quad of four mutually
-                          adjacent cavity cells emits two triangles; quads
-                          touching a non-cavity cell are skipped, so the
-                          mesh boundary follows the cavity silhouette.
+      - ``(i, j, k)``:   triangle vertex indices. Each 2×2 block of cells is
+                          triangulated by how many of its four cells are in
+                          the cavity: **4 present → two triangles**, **exactly
+                          3 present → the single triangle spanning them** (so
+                          diagonal / curved boundaries stay capped instead of
+                          leaving the side walls with no ceiling). Blocks with
+                          ≤2 cells (a one-cell-wide section) have no area at
+                          cell centers and are left uncapped — matching the
+                          old ``go.Surface(connectgaps=False)`` behaviour and
+                          negligible at the fine display mesh.
 
     Replaces the full rectangular ``go.Surface`` grid (which carries a NaN
     entry for *every* out-of-cavity cell, exploding the vertex count
     ~``k**2`` under display refinement) with a mesh that only spans the
     cavity — far lighter for plotly / WebGL to render and rotate. Fully
-    vectorized (no Python per-cell loop).
+    vectorized (no Python per-cell loop). Winding is CCW (upward normal).
     """
     g = result.geometry
     mask = g.mask
@@ -106,15 +112,37 @@ def _cavity_surface_mesh(
 
     vid = np.full((ny, nx), -1, dtype=np.int64)
     vid[iy_c, ix_c] = np.arange(iy_c.size)
-    quad = mask[:-1, :-1] & mask[:-1, 1:] & mask[1:, :-1] & mask[1:, 1:]
-    qy, qx = np.where(quad)
-    v00 = vid[qy, qx]
-    v01 = vid[qy, qx + 1]
-    v10 = vid[qy + 1, qx]
-    v11 = vid[qy + 1, qx + 1]
-    tri_i = np.concatenate([v00, v00])
-    tri_j = np.concatenate([v01, v11])
-    tri_k = np.concatenate([v11, v10])
+
+    # 2×2-block triangulation. CCW corner order around a block is
+    # 00 → 01 → 11 → 10 (00 = (iy, ix), 01 = (iy, ix+1), 10 = (iy+1, ix),
+    # 11 = (iy+1, ix+1)); ix→x, iy→y so this is CCW from +z (upward normal).
+    c00, c01 = mask[:-1, :-1], mask[:-1, 1:]
+    c10, c11 = mask[1:, :-1], mask[1:, 1:]
+    v00, v01 = vid[:-1, :-1], vid[:-1, 1:]
+    v10, v11 = vid[1:, :-1], vid[1:, 1:]
+    present = c00.astype(np.int8) + c01 + c10 + c11
+
+    tris_i: list[np.ndarray] = []
+    tris_j: list[np.ndarray] = []
+    tris_k: list[np.ndarray] = []
+
+    def _emit(sel: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> None:
+        tris_i.append(a[sel])
+        tris_j.append(b[sel])
+        tris_k.append(c[sel])
+
+    full = present == 4
+    _emit(full, v00, v01, v11)
+    _emit(full, v00, v11, v10)
+    three = present == 3
+    _emit(three & ~c00, v01, v11, v10)  # missing 00
+    _emit(three & ~c01, v00, v11, v10)  # missing 01
+    _emit(three & ~c10, v00, v01, v11)  # missing 10
+    _emit(three & ~c11, v00, v01, v10)  # missing 11
+
+    tri_i = np.concatenate(tris_i)
+    tri_j = np.concatenate(tris_j)
+    tri_k = np.concatenate(tris_k)
     return xs, ys, cell_idx, (tri_i, tri_j, tri_k)
 
 

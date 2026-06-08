@@ -53,16 +53,17 @@ def small_result():
     return solver.solve(num_frames=4)
 
 
-def _split_traces(fig: go.Figure) -> tuple[go.Surface, go.Surface, go.Mesh3d | None]:
-    """Identify the three expected traces in deterministic order:
-    PL floor (Z=0 surface), ceiling (top Surface), and walls (Mesh3d, optional)."""
-    surfaces = [t for t in fig.data if isinstance(t, go.Surface)]
-    meshes = [t for t in fig.data if isinstance(t, go.Mesh3d)]
-    assert len(surfaces) == 2, f"expected 2 Surface traces (PL+ceiling), got {len(surfaces)}"
-    # the floor has all-zero Z where mask=True; the ceiling has h where mask=True
-    floor = next(s for s in surfaces if np.nanmax(np.asarray(s.z)) <= 0.0)
-    ceiling = next(s for s in surfaces if s is not floor)
-    walls = meshes[0] if meshes else None
+def _split_traces(
+    fig: go.Figure,
+) -> tuple[go.Mesh3d, go.Mesh3d, go.Mesh3d | None]:
+    """Identify the three expected traces by name: PL floor (Z=0 mesh),
+    cavity ceiling (Z=h mesh), and side walls (vertical mesh, optional).
+
+    All three are now sparse ``go.Mesh3d`` traces (the floor/ceiling were
+    full-grid ``go.Surface`` before the analytic-refine perf rework)."""
+    floor = next(t for t in fig.data if t.name == "PL (parting line, Z=0)")
+    ceiling = next(t for t in fig.data if t.name == "cavity ceiling")
+    walls = next((t for t in fig.data if t.name == "cavity walls"), None)
     return floor, ceiling, walls
 
 
@@ -71,51 +72,55 @@ def _split_traces(fig: go.Figure) -> tuple[go.Surface, go.Surface, go.Mesh3d | N
     [render_3d_thickness_map, render_3d_fill_time, render_3d_pressure],
 )
 def test_figure_has_pl_extrusion_anatomy(small_result, renderer):
-    """The figure must contain a PL floor, a colored ceiling, and side walls."""
+    """The figure must contain a PL floor, a colored ceiling, and side walls
+    — all sparse Mesh3d traces (one ceiling/floor vertex per cavity cell)."""
     fig = renderer(small_result)
     assert isinstance(fig, go.Figure)
     floor, ceiling, walls = _split_traces(fig)
-    # floor and ceiling share the mask shape
+    assert isinstance(floor, go.Mesh3d)
+    assert isinstance(ceiling, go.Mesh3d)
+    assert isinstance(walls, go.Mesh3d)
     g = small_result.geometry
-    assert np.asarray(floor.z).shape == g.mask.shape
-    assert np.asarray(ceiling.z).shape == g.mask.shape
-    # ceiling carries the physics field as surfacecolor
-    assert np.asarray(ceiling.surfacecolor).shape == g.mask.shape
-    # walls trace exists and has valid (i,j,k) triangle indices
-    assert walls is not None
-    assert len(walls.i) == len(walls.j) == len(walls.k)
-    assert len(walls.i) > 0
+    n_cav = int(g.mask.sum())
+    # sparse: exactly one ceiling/floor vertex per cavity cell (no full grid)
+    assert len(ceiling.x) == n_cav
+    assert len(floor.x) == n_cav
+    # ceiling carries a per-vertex physics field via intensity + triangles
+    assert ceiling.intensity is not None
+    assert len(ceiling.intensity) == n_cav
+    assert len(ceiling.i) == len(ceiling.j) == len(ceiling.k) > 0
+    # walls have valid (i,j,k) triangle indices
+    assert len(walls.i) == len(walls.j) == len(walls.k) > 0
 
 
-def test_outside_cavity_cells_are_masked(small_result):
-    """Both floor and ceiling Z values must be NaN outside the cavity."""
+def test_ceiling_floor_span_only_cavity(small_result):
+    """The sparse mesh spans exactly the cavity: one vertex per cavity cell,
+    ceiling heights finite-positive, floor flat at the parting line."""
     fig = render_3d_thickness_map(small_result)
     floor, ceiling, _walls = _split_traces(fig)
-    outside = ~small_result.geometry.mask
-    inside = small_result.geometry.mask
-    # ceiling: NaN outside, finite-positive inside
-    z_ceiling = np.asarray(ceiling.z)
-    assert np.all(np.isnan(z_ceiling[outside]))
-    assert np.all(np.isfinite(z_ceiling[inside]))
-    assert np.all(z_ceiling[inside] > 0)
-    # floor: NaN outside, exactly 0 inside
-    z_floor = np.asarray(floor.z)
-    assert np.all(np.isnan(z_floor[outside]))
-    assert np.all(z_floor[inside] == 0.0)
+    n_cav = int(small_result.geometry.mask.sum())
+    assert len(ceiling.z) == n_cav
+    assert len(floor.z) == n_cav
+    z_ceil = np.asarray(ceiling.z)
+    assert np.all(np.isfinite(z_ceil))
+    assert np.all(z_ceil > 0)
+    assert np.all(np.asarray(floor.z) == 0.0)
 
 
-def test_axes_are_gate_centered(small_result):
-    """The x/y coordinate arrays should be centered on the gate origin."""
+def test_vertices_are_gate_centered(small_result):
+    """A cavity cell's mesh vertex sits at its gate-centered cell-center
+    coordinate (the gate cell maps to the gate origin)."""
     fig = render_3d_thickness_map(small_result)
     _floor, ceiling, _walls = _split_traces(fig)
-    x = np.asarray(ceiling.x)
-    y = np.asarray(ceiling.y)
     g = small_result.geometry
     x0, y0 = g.gate_origin_mm()
-    expected_x0 = (0 + 0.5) * g.cell_size_mm - x0
-    expected_y0 = (0 + 0.5) * g.cell_size_mm - y0
-    assert np.isclose(x[0], expected_x0)
-    assert np.isclose(y[0], expected_y0)
+    iy, ix = g.gates[0]
+    exp_x = (ix + 0.5) * g.cell_size_mm - x0
+    exp_y = (iy + 0.5) * g.cell_size_mm - y0
+    xs = np.asarray(ceiling.x)
+    ys = np.asarray(ceiling.y)
+    dist = np.hypot(xs - exp_x, ys - exp_y)
+    assert dist.min() < 1e-6
 
 
 def test_walls_span_pl_to_ceiling(small_result):
@@ -139,21 +144,20 @@ def test_aspectmode_is_data(small_result):
 
 
 def test_walls_share_ceiling_coloraxis(small_result):
-    """Walls must use the same coloraxis as the ceiling so that a single
-    colorbar covers ceiling+walls and the user reads them as one solid."""
+    """Walls and ceiling (both Mesh3d) must use the same coloraxis so a
+    single colorbar covers the whole solid."""
     fig = render_3d_pressure(small_result)
     _floor, ceiling, walls = _split_traces(fig)
     assert ceiling.coloraxis == "coloraxis"
     assert walls.coloraxis == "coloraxis"
-    # Wall vertices must carry an intensity array equal in length to xyz
+    # both carry per-vertex intensity equal in length to their xyz vertices
+    assert ceiling.intensity is not None
+    assert len(ceiling.intensity) == len(ceiling.x)
     assert walls.intensity is not None
     assert len(walls.intensity) == len(walls.x)
-    # Intensity values should be finite for at least 99% of vertices
-    # (there can be NaN cells if the field happens to be undefined for
-    # some boundary cell, but that should be rare on a healthy result)
-    intensity = np.asarray(walls.intensity)
-    finite = np.isfinite(intensity)
-    assert finite.mean() > 0.99
+    # intensities finite for at least 99% of vertices on a healthy result
+    assert np.isfinite(np.asarray(ceiling.intensity)).mean() > 0.99
+    assert np.isfinite(np.asarray(walls.intensity)).mean() > 0.99
 
 
 # ----------------------------------------------------------------------
@@ -263,8 +267,8 @@ def test_refine_for_display_uses_fine_geometry():
 )
 def test_renderers_run_on_refined_display(renderer):
     """All 3 renderers produce a finer-silhouette figure when fed a refined
-    display result: the ceiling Surface matches the fine grid (more cells
-    than the coarse solve), and thickness is the analytic fine field."""
+    display result: the sparse ceiling mesh has one vertex per FINE cavity
+    cell (more than the coarse solve), all colored and finite-height."""
     coarse, fine = _film_geoms()
     solver = HeleShawSolver(
         geometry=coarse,
@@ -276,13 +280,14 @@ def test_renderers_run_on_refined_display(renderer):
     fig = renderer(disp)
     assert isinstance(fig, go.Figure)
     _floor, ceiling, _walls = _split_traces(fig)
-    assert np.asarray(ceiling.z).shape == fine.mask.shape
-    # finer than the coarse solve grid
-    assert fine.mask.shape != coarse.mask.shape
-    # ceiling color is finite inside the fine cavity, NaN outside
-    color = np.asarray(ceiling.surfacecolor)
-    assert np.all(np.isnan(color[~fine.mask]))
-    assert np.all(np.isfinite(color[fine.mask]))
+    n_fine = int(fine.mask.sum())
+    n_coarse = int(coarse.mask.sum())
+    # one ceiling vertex per FINE cavity cell — genuinely finer than coarse
+    assert len(ceiling.x) == n_fine
+    assert n_fine > n_coarse
+    # every vertex colored (finite intensity) and at a finite cavity height
+    assert np.all(np.isfinite(np.asarray(ceiling.intensity)))
+    assert np.all(np.isfinite(np.asarray(ceiling.z)))
 
 
 def test_build_fine_geometry_refines_and_falls_back():

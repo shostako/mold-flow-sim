@@ -17,6 +17,13 @@ Phase 1 scope (current):
        boundary edge. Closes the silhouette so the geometry reads as a
        solid block, not as a floating sheet.
 
+    All three traces are **sparse ``go.Mesh3d``** built over the cavity
+    cells only. The ceiling/floor used to be full-grid ``go.Surface``
+    traces, but those carry a NaN entry for every out-of-cavity cell and
+    grow ~``k**2`` under display refinement; the sparse mesh
+    (:func:`_cavity_surface_mesh`) only spans the cavity and is far lighter
+    for plotly/WebGL to render and rotate.
+
 Animation of the flow front (frames-based) is deferred to Phase 1-2.
 
 Coordinate convention matches :mod:`core.visualizer`: x/y are in mm with
@@ -61,25 +68,54 @@ FINE_DISPLAY_CELL_CAP = 1_000_000
 # ----------------------------------------------------------------------
 
 
-def _gate_centered_axes(result: FlowResult) -> tuple[np.ndarray, np.ndarray]:
-    """Return (x_mm, y_mm) 1-D coordinate arrays in the gate-centered frame.
+def _cavity_surface_mesh(
+    result: FlowResult,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Triangulate the cavity cell-center grid into a *sparse* mesh.
 
-    Cell centers, not edges; matches the convention used by the matplotlib
-    visualizer (``_base_extent`` / ``_gate_xy_mm``).
+    Returns ``(xs, ys, cell_idx, (i, j, k))``:
+      - ``xs`` / ``ys``: per-vertex gate-centered coordinates (mm), one
+                          vertex per in-cavity cell center.
+      - ``cell_idx``:    flat ``iy*nx + ix`` index of each vertex's cell,
+                          for pulling per-cell height / field values.
+      - ``(i, j, k)``:   triangle vertex indices. A quad of four mutually
+                          adjacent cavity cells emits two triangles; quads
+                          touching a non-cavity cell are skipped, so the
+                          mesh boundary follows the cavity silhouette.
+
+    Replaces the full rectangular ``go.Surface`` grid (which carries a NaN
+    entry for *every* out-of-cavity cell, exploding the vertex count
+    ~``k**2`` under display refinement) with a mesh that only spans the
+    cavity — far lighter for plotly / WebGL to render and rotate. Fully
+    vectorized (no Python per-cell loop).
     """
     g = result.geometry
+    mask = g.mask
+    ny, nx = mask.shape
+    cs = g.cell_size_mm
     x0, y0 = g.gate_origin_mm()
-    x = (np.arange(g.nx) + 0.5) * g.cell_size_mm - x0
-    y = (np.arange(g.ny) + 0.5) * g.cell_size_mm - y0
-    return x, y
 
+    iy_c, ix_c = np.where(mask)
+    xs = (ix_c + 0.5) * cs - x0
+    ys = (iy_c + 0.5) * cs - y0
+    cell_idx = iy_c.astype(np.int64) * nx + ix_c
 
-def _surface_height(result: FlowResult) -> np.ndarray:
-    """Z-height array (mm). Outside-cavity cells are NaN so plotly hides them."""
-    g = result.geometry
-    z = g.thickness_mm.astype(float).copy()
-    z[~g.mask] = np.nan
-    return z
+    if ny < 2 or nx < 2 or iy_c.size == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return xs, ys, cell_idx, (empty, empty, empty)
+
+    vid = np.full((ny, nx), -1, dtype=np.int64)
+    vid[iy_c, ix_c] = np.arange(iy_c.size)
+    quad = mask[:-1, :-1] & mask[:-1, 1:] & mask[1:, :-1] & mask[1:, 1:]
+    qy, qx = np.where(quad)
+    v00 = vid[qy, qx]
+    v01 = vid[qy, qx + 1]
+    v10 = vid[qy + 1, qx]
+    v11 = vid[qy + 1, qx + 1]
+    tri_i = np.concatenate([v00, v00])
+    tri_j = np.concatenate([v01, v11])
+    tri_k = np.concatenate([v11, v10])
+    return xs, ys, cell_idx, (tri_i, tri_j, tri_k)
 
 
 def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -181,34 +217,32 @@ def _build_side_walls(
 # ----------------------------------------------------------------------
 
 
-def _floor_trace(result: FlowResult) -> go.Surface:
-    """PL (parting-line) floor: a Z = 0 surface masked to the cavity.
+def _floor_mesh_trace(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    tri: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> go.Mesh3d:
+    """PL (parting-line) floor: a flat Z = 0 mesh over the cavity.
 
-    Kept faint and translucent so it does not steal attention from the
-    colored ceiling and walls — its job is to anchor the silhouette
-    on the parting plane, not to convey data.
+    Faint and translucent — anchors the silhouette on the parting plane
+    without competing with the colored ceiling/walls. Shares the cavity
+    triangulation with the ceiling, so it is sparse (no full-grid NaN
+    padding).
     """
-    g = result.geometry
-    x, y = _gate_centered_axes(result)
-    z = np.where(g.mask, 0.0, np.nan)
-    return go.Surface(
-        x=x,
-        y=y,
-        z=z,
-        showscale=False,
+    i, j, k = tri
+    return go.Mesh3d(
+        x=xs,
+        y=ys,
+        z=np.zeros_like(xs),
+        i=i,
+        j=j,
+        k=k,
+        color="rgb(220,220,220)",
         opacity=0.30,
-        colorscale=[[0, "rgb(220,220,220)"], [1, "rgb(220,220,220)"]],
-        cmin=0.0,
-        cmax=1.0,
-        surfacecolor=np.where(g.mask, 0.5, np.nan),
-        connectgaps=False,
+        flatshading=True,
         name="PL (parting line, Z=0)",
-        hovertemplate="PL  x=%{x:.1f}, y=%{y:.1f}<extra></extra>",
-        contours=dict(
-            x=dict(highlight=False),
-            y=dict(highlight=False),
-            z=dict(highlight=False),
-        ),
+        hoverinfo="skip",
+        showlegend=False,
     )
 
 
@@ -250,28 +284,42 @@ def _walls_trace(
     )
 
 
-def _ceiling_trace(
+def _ceiling_mesh_trace(
     result: FlowResult,
     color_field: np.ndarray,
-    *,
-    colorscale: str,
-) -> go.Surface:
-    """Top surface (Z = h) colored by the requested physics field."""
-    x, y = _gate_centered_axes(result)
-    z = _surface_height(result)
-    return go.Surface(
-        x=x,
-        y=y,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    cell_idx: np.ndarray,
+    tri: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> go.Mesh3d:
+    """Top surface (Z = h) as a sparse Mesh3d colored by the physics field.
+
+    Per-vertex Z is the cavity thickness at that cell; per-vertex intensity
+    is the requested field value, sharing ``coloraxis`` with the walls so a
+    single colorbar covers the whole solid. The field value is also carried
+    as ``customdata`` for the hover readout.
+    """
+    g = result.geometry
+    i, j, k = tri
+    thk = np.asarray(g.thickness_mm, dtype=float).ravel()
+    z = thk[cell_idx]
+    color = np.asarray(color_field, dtype=float).ravel()[cell_idx]
+    return go.Mesh3d(
+        x=xs,
+        y=ys,
         z=z,
-        surfacecolor=color_field,
-        colorscale=colorscale,
+        i=i,
+        j=j,
+        k=k,
+        intensity=color,
+        intensitymode="vertex",
         coloraxis="coloraxis",
-        showscale=True,
-        connectgaps=False,
+        customdata=color,
+        flatshading=False,
         name="cavity ceiling",
         hovertemplate=(
             "x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>"
-            "h=%{z:.2f} mm<br>color=%{surfacecolor:.3g}<extra></extra>"
+            "h=%{z:.2f} mm<br>color=%{customdata:.3g}<extra></extra>"
         ),
     )
 
@@ -284,15 +332,21 @@ def _figure_with_pl_extrusion(
 ) -> go.Figure:
     """Compose ceiling + PL floor + side walls into one Plotly Figure.
 
-    All three traces share ``coloraxis="coloraxis"`` so the side walls
-    pick up the same colorbar as the ceiling — a single legend covers
-    the whole solid.
+    Ceiling and floor share one *sparse* cavity triangulation
+    (:func:`_cavity_surface_mesh`) instead of a full rectangular grid; all
+    colored traces share ``coloraxis="coloraxis"`` so a single colorbar
+    covers the whole solid.
     """
-    traces: list = [_floor_trace(result)]
+    xs, ys, cell_idx, tri = _cavity_surface_mesh(result)
+    has_surface = xs.size > 0 and tri[0].size > 0
+    traces: list = []
+    if has_surface:
+        traces.append(_floor_mesh_trace(xs, ys, tri))
     walls = _walls_trace(result, color_field)
     if walls is not None:
         traces.append(walls)
-    traces.append(_ceiling_trace(result, color_field, colorscale=colorscale))
+    if has_surface:
+        traces.append(_ceiling_mesh_trace(result, color_field, xs, ys, cell_idx, tri))
     fig = go.Figure(data=traces)
     fig.update_layout(coloraxis=dict(colorscale=colorscale))
     return fig

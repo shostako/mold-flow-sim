@@ -305,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 11 ファイル、合計 **217 テスト** (216 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 11 ファイル、合計 **219 テスト** (218 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -315,7 +315,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
 - `test_multilayer_solver.py` — 42件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認)
 - `test_multilayer_thermal.py` — 22件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証) / **剪断発熱段階1** (shape & 非負、γ̇=0 で ΔT=0、γ̇² スケーリング、t≫τ_thermal で頭打ち、極薄 PP の桁感、shape 不整合検出) / **Brinkman 数** (shape & 非負、γ̇=0 でゼロ、極薄高速で Br>1、k と ΔT の非正検出)
-- `test_visualizer_3d.py` — 10件: block anatomy（**3トレースとも flat-top Mesh3d**、天面=各 cavity セル2三角形＝面数 2×cavity・`intensitymode="cell"`）、天面が全 cavity セルを覆う（面数=2×cavity＝侵食ゼロ・天面 Z 有限正・床 Z=0）、**flat-top が対角境界を塞ぐ**（対角バンドで面数=2×cavity）、頂点がゲート中心座標（セル端の隅）、境界壁が PL〜天面を覆う、`aspectmode='data'` で等倍、天面=面ごと/側壁=頂点ごと intensity で coloraxis 共有、**厚み段差が縦の段差として描かれる**（段差プレートで天面 z が両厚みを保持＋PL非接触の段差壁が立つ）
+- `test_visualizer_3d.py` — 12件: block anatomy（**3トレースとも flat-top Mesh3d**、天面=各 cavity セル2三角形＝面数 2×cavity・`intensitymode="cell"`）、天面が全 cavity セルを覆う（面数=2×cavity＝侵食ゼロ・天面 Z 有限正・床 Z=0）、**flat-top が対角境界を塞ぐ**（対角バンドで面数=2×cavity）、頂点がゲート中心座標（セル端の隅）、境界壁が PL〜天面を覆う、`aspectmode='data'` で等倍、天面=面ごと/側壁=頂点ごと intensity で coloraxis 共有、**厚み段差が縦の段差として描かれる**（段差プレートで天面 z が両厚みを保持＋PL非接触の段差壁が立つ）、**天面ホバーが場の値を露出**（fill/pressure で per-vertex customdata が読める）
 - `test_visualizer_layer.py` — 13件 (1 skip): `render_layer_map` 4 field smoke / 不正 field / 範囲外 layer_idx / thermal_off で field 別動作 / `render_layer_grid` / `render_short_shot_map` (flagged あり/なし、後者は skip 想定可) / `_scalar_layer_field` helper / ζ レンジが metadata に乗ること
 
 新機能を足したら**該当する系統のテストファイルにテストを追加**するのが慣例。形状なら `test_geometry_*.py`、solver の挙動なら `test_solver_*.py` か `test_skin_layer.py` か `test_multilayer_solver.py`、純関数の helper なら `test_multilayer_thermal.py`、3D 系なら `test_visualizer_3d.py`、層別可視化なら `test_visualizer_layer.py`。

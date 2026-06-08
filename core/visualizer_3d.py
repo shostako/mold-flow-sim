@@ -5,24 +5,25 @@ PNG/GIF via matplotlib). 3D output here is a Plotly :class:`~plotly.graph_object
 intended to be embedded in the Streamlit UI via ``st.plotly_chart``.
 
 Phase 1 scope (current):
-    Each cavity cell is rendered as a solid block extruded **upward** from
-    the parting line (PL) at ``Z = 0`` to the cavity ceiling at
-    ``Z = h(x, y)``. The figure has three traces:
+    Each cavity cell is rendered as a **flat-top solid block** extruded from
+    the parting line (PL) at ``Z = 0`` to the cell's thickness ``Z = h``.
+    The figure has three sparse ``go.Mesh3d`` traces:
 
-    1. **Top surface** (Z = h)  — colored by the requested physics field
-       (thickness / fill-time / pressure). This is the "active" surface.
-    2. **PL floor**    (Z = 0)  — uniform light gray, slightly transparent.
+    1. **Top faces** (Z = h)  — one flat quad per cell, colored *per face*
+       (``intensitymode="cell"``) by the requested physics field
+       (thickness / fill-time / pressure). Flat-per-cell, matching the 2D
+       maps; thickness steps read as crisp steps, not smoothed ramps.
+    2. **PL floor**  (Z = 0)  — uniform light gray, slightly transparent.
        Represents the parting-line / mold-half boundary.
-    3. **Side walls**           — vertical Mesh3d quads on every cavity
-       boundary edge. Closes the silhouette so the geometry reads as a
-       solid block, not as a floating sheet.
+    3. **Side walls**         — vertical quads. *Boundary* walls on every
+       cavity edge close the silhouette; *step* walls on internal edges
+       where the thickness changes close the vertical face of a step.
 
-    All three traces are **sparse ``go.Mesh3d``** built over the cavity
-    cells only. The ceiling/floor used to be full-grid ``go.Surface``
-    traces, but those carry a NaN entry for every out-of-cavity cell and
-    grow ~``k**2`` under display refinement; the sparse mesh
-    (:func:`_cavity_surface_mesh`) only spans the cavity and is far lighter
-    for plotly/WebGL to render and rotate.
+    Top faces / floor come from :func:`_cavity_corner_mesh` (cell-edge
+    corners, shared between equal-thickness cells so a constant region stays
+    ~1 vertex/corner — light). This replaced the original full-grid
+    ``go.Surface`` (which carried a NaN entry for every out-of-cavity cell
+    and was a heavy trace type) to keep plotly/WebGL rotation responsive.
 
 Animation of the flow front (frames-based) is deferred to Phase 1-2.
 
@@ -49,32 +50,33 @@ from .solver import FlowResult
 # ----------------------------------------------------------------------
 
 
-def _cavity_surface_mesh(
+def _cavity_corner_mesh(
     result: FlowResult,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Triangulate the cavity cell-center grid into a *sparse* mesh.
+    z_per_cell: np.ndarray,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+    np.ndarray,
+    np.ndarray,
+]:
+    """Flat-top block mesh: each cavity cell is a flat quad of its 4 *corners*
+    (cell edges, not centers) at ``z = z_per_cell[cell]``.
 
-    Returns ``(xs, ys, cell_idx, (i, j, k))``:
-      - ``xs`` / ``ys``: per-vertex gate-centered coordinates (mm), one
-                          vertex per in-cavity cell center.
-      - ``cell_idx``:    flat ``iy*nx + ix`` index of each vertex's cell,
-                          for pulling per-cell height / field values.
-      - ``(i, j, k)``:   triangle vertex indices. Each 2×2 block of cells is
-                          triangulated by how many of its four cells are in
-                          the cavity: **4 present → two triangles**, **exactly
-                          3 present → the single triangle spanning them** (so
-                          diagonal / curved boundaries stay capped instead of
-                          leaving the side walls with no ceiling). Blocks with
-                          ≤2 cells (a one-cell-wide section) have no area at
-                          cell centers and are left uncapped — matching the
-                          old ``go.Surface(connectgaps=False)`` behaviour and
-                          negligible at the fine display mesh.
+    Corners are **shared between cells of equal z** (so a constant-thickness
+    region stays ~1 vertex/corner — light); cells of different z get separate
+    corner vertices, leaving a vertical gap at their shared edge that the
+    side-wall builder fills as a *step wall*. This renders true thickness
+    steps (plate split, balancer steps) as crisp vertical steps instead of
+    smoothing them into a one-cell ramp, and — because every cavity cell gets
+    its own quad — there is no boundary erosion at all (the old cell-center
+    triangulation could not cap 3-cell corners / 1-cell strips).
 
-    Replaces the full rectangular ``go.Surface`` grid (which carries a NaN
-    entry for *every* out-of-cavity cell, exploding the vertex count
-    ~``k**2`` under display refinement) with a mesh that only spans the
-    cavity — far lighter for plotly / WebGL to render and rotate. Fully
-    vectorized (no Python per-cell loop). Winding is CCW (upward normal).
+    Returns ``(xs, ys, zs, (i, j, k), face_iy, face_ix)``: per-vertex coords,
+    the triangle indices, and the ``(iy, ix)`` of the cell owning each *face*
+    (two faces per cell, in cell order) so callers can apply **per-face**
+    colour (``intensitymode="cell"``). Fully vectorized.
     """
     g = result.geometry
     mask = g.mask
@@ -83,48 +85,43 @@ def _cavity_surface_mesh(
     x0, y0 = g.gate_origin_mm()
 
     iy_c, ix_c = np.where(mask)
-    xs = (ix_c + 0.5) * cs - x0
-    ys = (iy_c + 0.5) * cs - y0
-    cell_idx = iy_c.astype(np.int64) * nx + ix_c
+    n = iy_c.size
+    if n == 0:
+        empty_f = np.empty(0, dtype=float)
+        empty_i = np.empty(0, dtype=np.int64)
+        return empty_f, empty_f, empty_f, (empty_i, empty_i, empty_i), iy_c, ix_c
 
-    if ny < 2 or nx < 2 or iy_c.size == 0:
-        empty = np.empty(0, dtype=np.int64)
-        return xs, ys, cell_idx, (empty, empty, empty)
+    zc = np.asarray(z_per_cell, dtype=float)[iy_c, ix_c]  # (n,)
 
-    vid = np.full((ny, nx), -1, dtype=np.int64)
-    vid[iy_c, ix_c] = np.arange(iy_c.size)
+    # Four corners per cell (CCW from +z): TL(0,0) TR(0,1) BL(1,0) BR(1,1)
+    # in (corner_iy, corner_ix). ix→x, iy→y.
+    coy = np.array([0, 0, 1, 1])
+    cox = np.array([0, 1, 0, 1])
+    cgid = (iy_c[:, None] + coy[None, :]) * (nx + 1) + (ix_c[:, None] + cox[None, :])
+    zq = np.round(zc * 1e6).astype(np.int64)
+    zq4 = np.repeat(zq[:, None], 4, axis=1)
 
-    # 2×2-block triangulation. CCW corner order around a block is
-    # 00 → 01 → 11 → 10 (00 = (iy, ix), 01 = (iy, ix+1), 10 = (iy+1, ix),
-    # 11 = (iy+1, ix+1)); ix→x, iy→y so this is CCW from +z (upward normal).
-    c00, c01 = mask[:-1, :-1], mask[:-1, 1:]
-    c10, c11 = mask[1:, :-1], mask[1:, 1:]
-    v00, v01 = vid[:-1, :-1], vid[:-1, 1:]
-    v10, v11 = vid[1:, :-1], vid[1:, 1:]
-    present = c00.astype(np.int8) + c01 + c10 + c11
+    # Dedup vertices by (corner-grid-id, quantized z): same corner + same z
+    # collapse to one vertex; different z keeps them apart (= the step gap).
+    keys = np.stack([cgid.ravel(), zq4.ravel()], axis=1)  # (4n, 2)
+    uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+    inv = np.asarray(inv).reshape(n, 4)
 
-    tris_i: list[np.ndarray] = []
-    tris_j: list[np.ndarray] = []
-    tris_k: list[np.ndarray] = []
+    ucy = uniq[:, 0] // (nx + 1)
+    ucx = uniq[:, 0] % (nx + 1)
+    xs = ucx * cs - x0
+    ys = ucy * cs - y0
+    zs = uniq[:, 1].astype(float) / 1e6
 
-    def _emit(sel: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> None:
-        tris_i.append(a[sel])
-        tris_j.append(b[sel])
-        tris_k.append(c[sel])
-
-    full = present == 4
-    _emit(full, v00, v01, v11)
-    _emit(full, v00, v11, v10)
-    three = present == 3
-    _emit(three & ~c00, v01, v11, v10)  # missing 00
-    _emit(three & ~c01, v00, v11, v10)  # missing 01
-    _emit(three & ~c10, v00, v01, v11)  # missing 10
-    _emit(three & ~c11, v00, v01, v10)  # missing 11
-
-    tri_i = np.concatenate(tris_i)
-    tri_j = np.concatenate(tris_j)
-    tri_k = np.concatenate(tris_k)
-    return xs, ys, cell_idx, (tri_i, tri_j, tri_k)
+    tl, tr, bl, br = inv[:, 0], inv[:, 1], inv[:, 2], inv[:, 3]
+    tri_i = np.concatenate([tl, tl])
+    tri_j = np.concatenate([tr, br])
+    tri_k = np.concatenate([br, bl])
+    # Faces 0..n-1 are each cell's first triangle, n..2n-1 the second; both
+    # belong to cell (face % n) → owner index arrays for per-face colour.
+    face_iy = np.concatenate([iy_c, iy_c])
+    face_ix = np.concatenate([ix_c, ix_c])
+    return xs, ys, zs, (tri_i, tri_j, tri_k), face_iy, face_ix
 
 
 def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -139,22 +136,30 @@ def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
 # ----------------------------------------------------------------------
 
 
+_STEP_EPS = 1e-6
+
+
 def _build_side_walls(
     result: FlowResult,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build a vertical-wall Mesh3d for every cavity boundary edge.
+    """Build vertical-wall Mesh3d quads for the solid block model.
 
-    For each in-cavity cell, check its 4 neighbors. Whenever a neighbor
-    is out-of-bounds or out-of-cavity, emit a vertical quad on the shared
-    edge from Z = 0 (PL) to Z = h_local (cavity ceiling).
+    Two kinds of vertical quad, for each in-cavity cell:
+
+    1. **Boundary walls** — when a 4-neighbor is out-of-bounds / out-of-cavity,
+       a quad on the shared edge from Z = 0 (PL) to Z = h_local (ceiling).
+    2. **Internal step walls** — when a +x / +y neighbor *is* in-cavity but has
+       a different thickness, a quad on the shared edge spanning the two
+       thicknesses ``[min, max]``. This closes the vertical face of a thickness
+       step so the flat-top blocks read as a crisp step (only +x/+y checked so
+       each internal edge is emitted exactly once). Owner = the taller cell.
 
     Returns five 1-D arrays:
       - xs, ys, zs:    vertex coordinates (mm)
       - tri:           flat triangle index list (3M,) → reshape to (M, 3)
-      - cell_idx:      for each vertex, the flat index ``iy*nx + ix`` of
-                       the cell that owns the wall. Lets the caller pull
-                       per-cell physics field values into the wall mesh
-                       (so walls share the ceiling's colormap).
+      - cell_idx:      for each vertex, the flat index ``iy*nx + ix`` of the
+                       owner cell, so the caller can pull per-cell physics
+                       field values into the wall mesh (shared colormap).
     """
     g = result.geometry
     nx, ny = g.nx, g.ny
@@ -174,17 +179,18 @@ def _build_side_walls(
         ay_m: float,
         bx_m: float,
         by_m: float,
-        h_top: float,
+        z_bot: float,
+        z_top: float,
         owner: int,
     ) -> None:
-        """Append a vertical quad (4 vertices, 2 triangles) tagged with the
-        owner cell's flat index so plotly can color it like the ceiling."""
+        """Append a vertical quad (4 vertices, 2 triangles) from ``z_bot`` to
+        ``z_top``, tagged with the owner cell's flat index for coloring."""
         i0 = len(xs)
         for x_m, y_m, z_m in (
-            (ax_m, ay_m, 0.0),
-            (bx_m, by_m, 0.0),
-            (bx_m, by_m, h_top),
-            (ax_m, ay_m, h_top),
+            (ax_m, ay_m, z_bot),
+            (bx_m, by_m, z_bot),
+            (bx_m, by_m, z_top),
+            (ax_m, ay_m, z_top),
         ):
             xs.append(x_m)
             ys.append(y_m)
@@ -203,14 +209,32 @@ def _build_side_walls(
         y_bot = iy * cs - y0
         y_top = (iy + 1) * cs - y0
 
+        # +y edge (shared with cell below): boundary, else internal step
         if iy + 1 >= ny or not mask[iy + 1, ix]:
-            add_quad(x_left, y_top, x_right, y_top, h_top, owner)
+            add_quad(x_left, y_top, x_right, y_top, 0.0, h_top, owner)
+        else:
+            h_n = float(thk[iy + 1, ix])
+            if abs(h_n - h_top) > _STEP_EPS:
+                step_owner = owner if h_top >= h_n else (iy + 1) * nx + ix
+                add_quad(
+                    x_left, y_top, x_right, y_top, min(h_top, h_n), max(h_top, h_n), step_owner
+                )
+        # -y edge: boundary only (internal step owned by the cell above's +y)
         if iy - 1 < 0 or not mask[iy - 1, ix]:
-            add_quad(x_left, y_bot, x_right, y_bot, h_top, owner)
+            add_quad(x_left, y_bot, x_right, y_bot, 0.0, h_top, owner)
+        # +x edge (shared with cell to the right): boundary, else internal step
         if ix + 1 >= nx or not mask[iy, ix + 1]:
-            add_quad(x_right, y_bot, x_right, y_top, h_top, owner)
+            add_quad(x_right, y_bot, x_right, y_top, 0.0, h_top, owner)
+        else:
+            h_n = float(thk[iy, ix + 1])
+            if abs(h_n - h_top) > _STEP_EPS:
+                step_owner = owner if h_top >= h_n else iy * nx + (ix + 1)
+                add_quad(
+                    x_right, y_bot, x_right, y_top, min(h_top, h_n), max(h_top, h_n), step_owner
+                )
+        # -x edge: boundary only (internal step owned by the cell left's +x)
         if ix - 1 < 0 or not mask[iy, ix - 1]:
-            add_quad(x_left, y_bot, x_left, y_top, h_top, owner)
+            add_quad(x_left, y_bot, x_left, y_top, 0.0, h_top, owner)
 
     return (
         np.asarray(xs, dtype=float),
@@ -226,23 +250,21 @@ def _build_side_walls(
 # ----------------------------------------------------------------------
 
 
-def _floor_mesh_trace(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    tri: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> go.Mesh3d:
-    """PL (parting-line) floor: a flat Z = 0 mesh over the cavity.
-
-    Faint and translucent — anchors the silhouette on the parting plane
-    without competing with the colored ceiling/walls. Shares the cavity
-    triangulation with the ceiling, so it is sparse (no full-grid NaN
-    padding).
+def _floor_block_trace(result: FlowResult) -> go.Mesh3d | None:
+    """PL (parting-line) floor: a flat Z = 0 mesh over the cavity (cell-edge
+    quads, so it aligns with the block walls/ceiling). Faint and translucent
+    — anchors the silhouette on the parting plane.
     """
+    g = result.geometry
+    zeros = np.zeros_like(np.asarray(g.thickness_mm, dtype=float))
+    xs, ys, zs, tri, _fiy, _fix = _cavity_corner_mesh(result, zeros)
+    if xs.size == 0 or tri[0].size == 0:
+        return None
     i, j, k = tri
     return go.Mesh3d(
         x=xs,
         y=ys,
-        z=np.zeros_like(xs),
+        z=zs,
         i=i,
         j=j,
         k=k,
@@ -293,43 +315,40 @@ def _walls_trace(
     )
 
 
-def _ceiling_mesh_trace(
+def _ceiling_block_trace(
     result: FlowResult,
     color_field: np.ndarray,
-    xs: np.ndarray,
-    ys: np.ndarray,
-    cell_idx: np.ndarray,
-    tri: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> go.Mesh3d:
-    """Top surface (Z = h) as a sparse Mesh3d colored by the physics field.
+) -> go.Mesh3d | None:
+    """Top faces (Z = h) as flat-top per-cell blocks colored by the field.
 
-    Per-vertex Z is the cavity thickness at that cell; per-vertex intensity
-    is the requested field value, sharing ``coloraxis`` with the walls so a
-    single colorbar covers the whole solid. The field value is also carried
-    as ``customdata`` for the hover readout.
+    Each cavity cell is a flat quad at its thickness; the colour is applied
+    **per face** (``intensitymode="cell"``) so each cell reads as one flat
+    patch — consistent with the 2D maps and faithful to the discretized
+    thickness. Thickness steps therefore show as crisp steps (the vertical
+    faces are closed by the step walls in :func:`_build_side_walls`). Shares
+    ``coloraxis`` with the walls for a single colorbar. ``flatshading`` keeps
+    facet edges crisp.
     """
     g = result.geometry
+    thk = np.asarray(g.thickness_mm, dtype=float)
+    xs, ys, zs, tri, face_iy, face_ix = _cavity_corner_mesh(result, thk)
+    if xs.size == 0 or tri[0].size == 0:
+        return None
     i, j, k = tri
-    thk = np.asarray(g.thickness_mm, dtype=float).ravel()
-    z = thk[cell_idx]
-    color = np.asarray(color_field, dtype=float).ravel()[cell_idx]
+    intensity = np.asarray(color_field, dtype=float)[face_iy, face_ix]  # per-face
     return go.Mesh3d(
         x=xs,
         y=ys,
-        z=z,
+        z=zs,
         i=i,
         j=j,
         k=k,
-        intensity=color,
-        intensitymode="vertex",
+        intensity=intensity,
+        intensitymode="cell",
         coloraxis="coloraxis",
-        customdata=color,
-        flatshading=False,
+        flatshading=True,
         name="cavity ceiling",
-        hovertemplate=(
-            "x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>"
-            "h=%{z:.2f} mm<br>color=%{customdata:.3g}<extra></extra>"
-        ),
+        hovertemplate="x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>h=%{z:.2f} mm<extra></extra>",
     )
 
 
@@ -341,21 +360,20 @@ def _figure_with_pl_extrusion(
 ) -> go.Figure:
     """Compose ceiling + PL floor + side walls into one Plotly Figure.
 
-    Ceiling and floor share one *sparse* cavity triangulation
-    (:func:`_cavity_surface_mesh`) instead of a full rectangular grid; all
-    colored traces share ``coloraxis="coloraxis"`` so a single colorbar
-    covers the whole solid.
+    All three are sparse ``go.Mesh3d`` flat-top block traces; ceiling and
+    walls share ``coloraxis="coloraxis"`` so a single colorbar covers the
+    whole solid.
     """
-    xs, ys, cell_idx, tri = _cavity_surface_mesh(result)
-    has_surface = xs.size > 0 and tri[0].size > 0
     traces: list = []
-    if has_surface:
-        traces.append(_floor_mesh_trace(xs, ys, tri))
+    floor = _floor_block_trace(result)
+    if floor is not None:
+        traces.append(floor)
     walls = _walls_trace(result, color_field)
     if walls is not None:
         traces.append(walls)
-    if has_surface:
-        traces.append(_ceiling_mesh_trace(result, color_field, xs, ys, cell_idx, tri))
+    ceiling = _ceiling_block_trace(result, color_field)
+    if ceiling is not None:
+        traces.append(ceiling)
     fig = go.Figure(data=traces)
     fig.update_layout(coloraxis=dict(colorscale=colorscale))
     return fig

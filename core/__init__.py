@@ -23,9 +23,6 @@ from .visualizer import (
     render_weldlines,
 )
 from .visualizer_3d import (
-    build_fine_geometry,
-    fine_refine_factor,
-    refine_for_display,
     render_3d_fill_time,
     render_3d_pressure,
     render_3d_thickness_map,
@@ -56,7 +53,4 @@ __all__ = [
     "render_3d_thickness_map",
     "render_3d_fill_time",
     "render_3d_pressure",
-    "refine_for_display",
-    "build_fine_geometry",
-    "fine_refine_factor",
 ]

@@ -39,29 +39,10 @@ expander is closed by default).
 
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass
-
 import numpy as np
 import plotly.graph_objects as go
-from scipy.ndimage import distance_transform_edt, map_coordinates
 
-from .geometry import (
-    DirectGateConfig,
-    FilmGate2Config,
-    FilmGateConfig,
-    Geometry,
-    build_direct_gate_geometry,
-    build_film_gate2_geometry,
-    build_film_gate_geometry,
-)
 from .solver import FlowResult
-
-# Display-only refinement: the largest fine cavity (cells) the 3D view will
-# rasterize. The analytic re-raster runs no solver — only plotly's point
-# count grows ~k**2 — so this is a *rendering* budget separate from the
-# solver-side cell guard. Keeps the browser from choking on a huge mesh.
-FINE_DISPLAY_CELL_CAP = 1_000_000
 
 # ----------------------------------------------------------------------
 # Coordinate / mask helpers
@@ -408,131 +389,6 @@ def _apply_camera_and_layout(
     )
     fig.update_layout(modebar=dict(remove=["lasso", "select"]))
     return fig
-
-
-# ----------------------------------------------------------------------
-# Display-only analytic refinement (finer silhouette without re-solving)
-# ----------------------------------------------------------------------
-
-
-@dataclass
-class _DisplayResult:
-    """A minimal ``FlowResult``-shaped view for the 3D renderers.
-
-    Carries exactly the attributes the three ``render_3d_*`` functions (and
-    their trace builders) read: ``geometry``, ``fill_time_s``,
-    ``pressure_norm``, ``total_fill_time_s``. Thickness is taken straight
-    from ``geometry.thickness_mm`` so no field is stored for it.
-
-    Used by :func:`refine_for_display` to swap in a finer, analytically
-    re-rasterized geometry while reusing the unchanged rendering machinery.
-    """
-
-    geometry: Geometry
-    fill_time_s: np.ndarray
-    pressure_norm: np.ndarray
-    total_fill_time_s: float
-
-
-def _interp_field_to_fine(
-    field_coarse: np.ndarray,
-    geom_coarse: Geometry,
-    geom_fine: Geometry,
-) -> np.ndarray:
-    """Sample a coarse solved field onto a finer geometry's grid.
-
-    The coarse field (``fill_time`` / ``pressure``) is only defined on the
-    coarse solve mesh and is NaN outside the coarse cavity. We map every
-    *fine* cell center to a fractional *coarse* index by shared physical
-    (pad-frame) coordinates — both geometries come from the same parametric
-    config with only ``cell_size_mm`` differing, so the physical layout is
-    identical — and bilinearly sample.
-
-    To keep the silhouette honest, the result is masked to
-    ``geom_fine.mask`` (the *analytic* fine cavity), NOT to an upsampled
-    coarse mask. Coarse NaNs are nearest-filled before sampling so no NaN
-    bleeds into the colored field; the fill is invisible because anything
-    outside the fine cavity is re-NaNed at the end.
-    """
-    cs_c = float(geom_coarse.cell_size_mm)
-    cs_f = float(geom_fine.cell_size_mm)
-    fc = np.asarray(field_coarse, dtype=float)
-    valid = np.isfinite(fc) & geom_coarse.mask
-    if not valid.any():
-        return np.full((geom_fine.ny, geom_fine.nx), np.nan)
-
-    # Nearest-fill invalid coarse cells so the bilinear sampler never sees NaN.
-    nearest_idx = distance_transform_edt(~valid, return_indices=True)[1]
-    filled = fc[tuple(nearest_idx)]
-
-    # Fine cell centers -> coarse fractional index (shared pad/origin in mm).
-    iy_f, ix_f = np.indices((geom_fine.ny, geom_fine.nx))
-    fy = (iy_f + 0.5) * cs_f / cs_c - 0.5
-    fx = (ix_f + 0.5) * cs_f / cs_c - 0.5
-    fine = map_coordinates(filled, [fy, fx], order=1, mode="nearest")
-
-    fine[~geom_fine.mask] = np.nan
-    return fine
-
-
-def refine_for_display(result: FlowResult, geom_fine: Geometry) -> _DisplayResult:
-    """Return a display-only view of ``result`` on a finer geometry.
-
-    ``geom_fine`` must be the *same parametric shape* as
-    ``result.geometry`` rebuilt at a smaller ``cell_size_mm`` (analytic
-    re-rasterization — cheap, no re-solve). The cavity silhouette and the
-    thickness field come from ``geom_fine`` directly (genuinely fine, no
-    interpolation artifacts). The solved fields (fill-time, pressure) are
-    smoothly interpolated from the coarse solve mesh onto the fine grid for
-    coloring only.
-
-    This sidesteps the fundamental limit of upsampling a rasterized mask
-    (bilinear cannot recover sub-cell silhouette) by sourcing the silhouette
-    from the analytic geometry instead.
-    """
-    fine_fill = _interp_field_to_fine(result.fill_time_s, result.geometry, geom_fine)
-    fine_pres = _interp_field_to_fine(result.pressure_norm, result.geometry, geom_fine)
-    return _DisplayResult(
-        geometry=geom_fine,
-        fill_time_s=fine_fill,
-        pressure_norm=fine_pres,
-        total_fill_time_s=float(result.total_fill_time_s),
-    )
-
-
-def build_fine_geometry(cfg: object | None, k: int) -> Geometry | None:
-    """Re-rasterize the parametric shape ``cfg`` at ``cell_size_mm / k``.
-
-    Display-only: no solver is run. Returns ``None`` when ``cfg`` is
-    ``None`` (image input has no analytic shape) or ``k <= 1`` (native
-    resolution, no refinement needed). The same parametric builder is
-    reused so the silhouette is genuinely finer (analytic), not an
-    upsampled raster mask.
-    """
-    if cfg is None or k <= 1:
-        return None
-    fine_cfg = dataclasses.replace(cfg, cell_size_mm=cfg.cell_size_mm / k)
-    if isinstance(cfg, DirectGateConfig):
-        return build_direct_gate_geometry(fine_cfg)
-    if isinstance(cfg, FilmGate2Config):
-        return build_film_gate2_geometry(fine_cfg)
-    if isinstance(cfg, FilmGateConfig):
-        return build_film_gate_geometry(fine_cfg)
-    return None
-
-
-def fine_refine_factor(coarse_cells: int, k_requested: int) -> int:
-    """Clamp the requested 3D refine factor to keep the fine cavity under
-    :data:`FINE_DISPLAY_CELL_CAP`.
-
-    Fine cells grow ~``k**2`` with the factor; a big plate at high ``k``
-    would flood plotly. Returns the largest ``k`` in ``1..k_requested``
-    whose estimated fine cell count stays within the cap.
-    """
-    if k_requested <= 1 or coarse_cells <= 0:
-        return 1
-    k_max = int((FINE_DISPLAY_CELL_CAP / coarse_cells) ** 0.5)
-    return max(1, min(k_requested, k_max))
 
 
 # ----------------------------------------------------------------------

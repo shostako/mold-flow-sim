@@ -1318,35 +1318,22 @@ if "mfs_result" in st.session_state:
                 "読める（PLの薄グレー床は形状参照用）。ドラッグで回転、スクロール"
                 "でズーム。物理は 2D Hele-Shaw のまま（表現上の3D化のみ）。"
             )
-            ss_3d = st.slider(
-                "描画の細かさ (supersample)",
-                min_value=1,
-                max_value=3,
-                value=1,
-                help=(
-                    "3D表示だけを補間で細かくして、斜め境界の階段を滑らかにする。"
-                    "解析結果（メッシュ・物理）は不変。1=解析グリッドそのまま（既定）。"
-                    "上げると滑らかになるが点数が k² 倍に増え、毎回の再実行で3図を"
-                    "再生成するため操作全体が重くなる。3Dを見るときだけ上げるのが吉。"
-                ),
-                key="ss_3d",
-            )
             t3d_h, t3d_fill, t3d_press = st.tabs(["厚み h(x,y)", "充填時間", "圧力"])
             with t3d_h:
                 st.plotly_chart(
-                    render_3d_thickness_map(result, supersample=ss_3d),
+                    render_3d_thickness_map(result),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )
             with t3d_fill:
                 st.plotly_chart(
-                    render_3d_fill_time(result, supersample=ss_3d),
+                    render_3d_fill_time(result),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )
             with t3d_press:
                 st.plotly_chart(
-                    render_3d_pressure(result, supersample=ss_3d),
+                    render_3d_pressure(result),
                     use_container_width=True,
                     config={"displaylogo": False},
                 )

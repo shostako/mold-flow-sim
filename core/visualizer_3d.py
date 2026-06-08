@@ -34,9 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from scipy.ndimage import find_objects, label, zoom
 
-from .geometry import Geometry
 from .solver import FlowResult
 
 # ----------------------------------------------------------------------
@@ -70,142 +68,6 @@ def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     out = arr.astype(float).copy()
     out[~mask] = np.nan
     return out
-
-
-# ----------------------------------------------------------------------
-# Display-only supersampling
-# ----------------------------------------------------------------------
-
-
-class _RenderResult:
-    """Lightweight stand-in exposing only ``.geometry``.
-
-    The trace builders (`_floor_trace`, `_walls_trace`, `_ceiling_trace`,
-    `_build_side_walls`, `_gate_centered_axes`, `_surface_height`) read
-    nothing off the result except ``.geometry``. When a renderer wants to
-    draw a display-supersampled copy of the cavity, it wraps the refined
-    geometry in this and reuses the existing builders unchanged.
-    """
-
-    __slots__ = ("geometry",)
-
-    def __init__(self, geometry: Geometry) -> None:
-        self.geometry = geometry
-
-
-def _supersample_for_render(
-    result: FlowResult, color_field: np.ndarray, factor: int
-) -> tuple[FlowResult | _RenderResult, np.ndarray]:
-    """Refine the cavity ``factor``x for display only and return a
-    ``(result_like, color_field)`` pair.
-
-    Display-only: the solver and the stored geometry are untouched. The
-    cavity mask, the thickness map (Z heights) and the per-cell ``color_field``
-    are bilinearly upsampled by ``factor`` so the ceiling Surface boundary and
-    the side-wall Mesh3d read with ``factor``x finer steps — the grid-aligned
-    staircase on slanted/curved silhouette edges shrinks by ``1/factor``.
-
-    Upsampling uses **per-4-connected-component normalized convolution**
-    (mask-weighted interpolation, one component at a time). Within a component
-    each fine value is the component-weighted average of the native field over
-    the cells the bilinear kernel reaches, with everything outside that
-    component contributing zero weight (``zoom(field·m) / zoom(m)`` where ``m``
-    is the *single component's* mask). Consequences:
-
-    - **No background-gap bleed** — a gap (between disconnected cavities, or
-      between two arms of one U/ring component that come within a cell) carries
-      zero weight, so it is never crossed; the boundary also never bleeds toward
-      the zero outside (a boundary fine cell equals its own cavity value).
-    - **No diagonal bleed** — two cavities touching only at a corner are
-      *4-disconnected* (matching the solver's 4-neighbor connectivity in
-      ``solver.py``), so they are different components and never share a
-      bilinear kernel; refinement keeps them isolated.
-    - **NaN-safe** — fill-time/pressure are NaN *outside* the cavity (solver
-      init); ``zoom(field·m)`` with ``NaN·0 == NaN`` would propagate NaN into
-      the refined boundary/wall colors, so the numerator is built with
-      ``np.where(m, field, 0.0)`` (zero weight anyway, NaN removed).
-    - **Bounded cost** — each component is cropped to a padded bounding box
-      (``find_objects`` gives them all in one pass; ``comp_labels == comp`` is
-      compared only inside each crop), so the work is ``O(total cavity area·k²)``
-      rather than ``O(components · full grid · k²)`` — a thresholded image with
-      thousands of speckles stays linear.
-
-    The refined mask is the union of each component's ``>= 0.5`` contour of
-    ``zoom(m)`` (the convolution denominator). ``factor <= 1`` is a no-op (so the
-    default render path and its tests are bit-for-bit identical), and a single
-    connected cavity is just one component.
-
-    Each native gate cell is expanded to its full ``k×k`` fine block (not a
-    single offset cell). The averaged gate centroid of a full block lands
-    *exactly* on the native gate center for any ``k`` (even ``k`` included),
-    so :func:`_gate_centered_axes` keeps the displayed origin pinned to the
-    gate — a single offset cell would shift it by up to half a native cell.
-    """
-    k = max(1, int(factor))
-    if k == 1:
-        return result, color_field
-    g = result.geometry
-    mask = g.mask
-    thk = np.asarray(g.thickness_mm, dtype=float)
-    cf = np.asarray(color_field, dtype=float)
-    ny, nx = mask.shape
-    fine_shape = (ny * k, nx * k)
-
-    # grid_mode=True treats each value as covering a finite cell extent (not a
-    # center-to-center sample span), so an N-cell array upsampled by k yields
-    # N*k cells over the *same* physical extent with centers at (j+0.5)*cs/k —
-    # exactly the fine Geometry declared below. The default grid_mode=False
-    # would align end-cell centers instead, shifting every interpolated value
-    # (and the silhouette) by up to a quarter native cell at k=2. mode="nearest"
-    # clamps the half-cell margins beyond the outermost native centers.
-    zk = dict(order=1, mode="nearest", grid_mode=True)
-
-    # Per-4-connected-component normalized convolution, cropped to each
-    # component's padded bbox. See the docstring for why all four properties
-    # (no background bleed, no diagonal bleed, NaN-safety, bounded cost) hold.
-    comp_labels, ncomp = label(mask)  # 4-connectivity (default) == solver's
-    bboxes = find_objects(comp_labels)
-    thk_f = np.zeros(fine_shape, dtype=float)
-    color_f = np.zeros(fine_shape, dtype=float)
-    mask_f = np.zeros(fine_shape, dtype=bool)
-    pad = 2
-    for comp in range(1, ncomp + 1):
-        sl = bboxes[comp - 1]
-        if sl is None:  # label index with no surviving cells (defensive)
-            continue
-        ry, rx = sl
-        r0, r1 = max(ry.start - pad, 0), min(ry.stop + pad, ny)
-        c0, c1 = max(rx.start - pad, 0), min(rx.stop + pad, nx)
-        m = comp_labels[r0:r1, c0:c1] == comp
-        mw = m.astype(float)
-        den = zoom(mw, k, **zk)
-        cmask_f = den >= 0.5
-        den_safe = np.where(cmask_f, den, 1.0)
-        thk_cf = zoom(np.where(m, thk[r0:r1, c0:c1], 0.0), k, **zk) / den_safe
-        color_cf = zoom(np.where(m, cf[r0:r1, c0:c1], 0.0), k, **zk) / den_safe
-        gthk = thk_f[r0 * k : r1 * k, c0 * k : c1 * k]
-        gcol = color_f[r0 * k : r1 * k, c0 * k : c1 * k]
-        gmsk = mask_f[r0 * k : r1 * k, c0 * k : c1 * k]
-        sel = cmask_f & ~gmsk  # components disjoint; first-writer wins any seam
-        gthk[sel] = thk_cf[sel]
-        gcol[sel] = color_cf[sel]
-        gmsk |= cmask_f
-    # Restamp each native gate cell's value over its k×k refined block. Bilinear
-    # zoom would average a single-cell gate (e.g. pressure_norm==1 "at gate")
-    # with its lower neighbors, and for even k no fine center lands on the native
-    # gate center — so the displayed extremum and its auto-ranged colorbar would
-    # miss the stated value. The gate block keeps the native value exactly.
-    for iy, ix in g.gates:
-        color_f[iy * k : (iy + 1) * k, ix * k : (ix + 1) * k] = cf[iy, ix]
-    gates_f = [(iy * k + a, ix * k + b) for iy, ix in g.gates for a in range(k) for b in range(k)]
-    fine = Geometry(
-        mask=mask_f,
-        thickness_mm=thk_f,
-        cell_size_mm=g.cell_size_mm / k,
-        gates=gates_f,
-        label=g.label,
-    )
-    return _RenderResult(fine), color_f
 
 
 # ----------------------------------------------------------------------
@@ -452,17 +314,11 @@ def _apply_camera_and_layout(
 # ----------------------------------------------------------------------
 
 
-def render_3d_thickness_map(result: FlowResult, *, supersample: int = 1) -> go.Figure:
-    """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness.
-
-    ``supersample`` (>= 1) refines the mesh for display only (see
-    :func:`_supersample_for_render`); 1 keeps the native solver resolution.
-    """
-    res, color = _supersample_for_render(
-        result, result.geometry.thickness_mm.astype(float), supersample
-    )
-    color = _scalar_with_mask(color, res.geometry.mask)
-    fig = _figure_with_pl_extrusion(res, color, colorscale="Viridis")
+def render_3d_thickness_map(result: FlowResult) -> go.Figure:
+    """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness."""
+    g = result.geometry
+    color = _scalar_with_mask(g.thickness_mm, g.mask)
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
     return _apply_camera_and_layout(
         fig,
         title="Cavity thickness h(x, y) [mm] — solid view from PL",
@@ -470,16 +326,11 @@ def render_3d_thickness_map(result: FlowResult, *, supersample: int = 1) -> go.F
     )
 
 
-def render_3d_fill_time(result: FlowResult, *, supersample: int = 1) -> go.Figure:
-    """3D solid extrusion with the ceiling colored by fill-time.
-
-    ``supersample`` (>= 1) refines the mesh for display only.
-    """
-    res, color = _supersample_for_render(
-        result, np.asarray(result.fill_time_s, dtype=float), supersample
-    )
-    color = _scalar_with_mask(color, res.geometry.mask)
-    fig = _figure_with_pl_extrusion(res, color, colorscale="Plasma")
+def render_3d_fill_time(result: FlowResult) -> go.Figure:
+    """3D solid extrusion with the ceiling colored by fill-time."""
+    g = result.geometry
+    color = _scalar_with_mask(result.fill_time_s, g.mask)
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Plasma")
     return _apply_camera_and_layout(
         fig,
         title=f"Fill time on cavity ceiling — T_fill = {result.total_fill_time_s:.3f} s",
@@ -487,16 +338,11 @@ def render_3d_fill_time(result: FlowResult, *, supersample: int = 1) -> go.Figur
     )
 
 
-def render_3d_pressure(result: FlowResult, *, supersample: int = 1) -> go.Figure:
-    """3D solid extrusion with the ceiling colored by normalized pressure.
-
-    ``supersample`` (>= 1) refines the mesh for display only.
-    """
-    res, color = _supersample_for_render(
-        result, np.asarray(result.pressure_norm, dtype=float), supersample
-    )
-    color = _scalar_with_mask(color, res.geometry.mask)
-    fig = _figure_with_pl_extrusion(res, color, colorscale="Turbo")
+def render_3d_pressure(result: FlowResult) -> go.Figure:
+    """3D solid extrusion with the ceiling colored by normalized pressure."""
+    g = result.geometry
+    color = _scalar_with_mask(result.pressure_norm, g.mask)
+    fig = _figure_with_pl_extrusion(result, color, colorscale="Turbo")
     return _apply_camera_and_layout(
         fig,
         title="Normalized pressure on cavity ceiling (1 at gate, 0 at last fill)",

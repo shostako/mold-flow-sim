@@ -36,6 +36,7 @@ from core import (
 )
 from core.visualizer_3d import (
     FINE_DISPLAY_CELL_CAP,
+    _cavity_surface_mesh,
     _DisplayResult,
     _interp_field_to_fine,
 )
@@ -105,6 +106,26 @@ def test_ceiling_floor_span_only_cavity(small_result):
     assert np.all(np.isfinite(z_ceil))
     assert np.all(z_ceil > 0)
     assert np.all(np.asarray(floor.z) == 0.0)
+
+
+def test_sparse_mesh_caps_diagonal_boundary():
+    """A diagonal cavity band — every 2x2 block has only 3 cavity cells, so
+    full-quad-only triangulation would emit ZERO faces (ceiling missing,
+    walls floating). Three-cell corners must be capped so every cavity
+    vertex is referenced by a triangle (Codex P2)."""
+    mask = np.array(
+        [
+            [1, 1, 0, 0],
+            [0, 1, 1, 0],
+            [0, 0, 1, 1],
+        ],
+        dtype=bool,
+    )
+    geom = SimpleNamespace(mask=mask, cell_size_mm=1.0, gate_origin_mm=lambda: (0.0, 0.0))
+    result = SimpleNamespace(geometry=geom)
+    _xs, _ys, _cell_idx, (ti, tj, tk) = _cavity_surface_mesh(result)
+    referenced = set(ti.tolist()) | set(tj.tolist()) | set(tk.tolist())
+    assert referenced == set(range(int(mask.sum())))
 
 
 def test_vertices_are_gate_centered(small_result):

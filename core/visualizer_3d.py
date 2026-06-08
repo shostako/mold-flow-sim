@@ -73,10 +73,11 @@ def _cavity_corner_mesh(
     its own quad — there is no boundary erosion at all (the old cell-center
     triangulation could not cap 3-cell corners / 1-cell strips).
 
-    Returns ``(xs, ys, zs, (i, j, k), face_iy, face_ix)``: per-vertex coords,
-    the triangle indices, and the ``(iy, ix)`` of the cell owning each *face*
-    (two faces per cell, in cell order) so callers can apply **per-face**
-    colour (``intensitymode="cell"``). Fully vectorized.
+    Returns ``(xs, ys, zs, (i, j, k), face_iy, face_ix, vert_iy, vert_ix)``:
+    per-vertex coords, the triangle indices, the ``(iy, ix)`` of the cell
+    owning each *face* (two faces per cell, in cell order — for **per-face**
+    colour, ``intensitymode="cell"``), and the ``(iy, ix)`` of an owner cell
+    for each *vertex* (for the hover field readout). Fully vectorized.
     """
     g = result.geometry
     mask = g.mask
@@ -89,7 +90,16 @@ def _cavity_corner_mesh(
     if n == 0:
         empty_f = np.empty(0, dtype=float)
         empty_i = np.empty(0, dtype=np.int64)
-        return empty_f, empty_f, empty_f, (empty_i, empty_i, empty_i), iy_c, ix_c
+        return (
+            empty_f,
+            empty_f,
+            empty_f,
+            (empty_i, empty_i, empty_i),
+            iy_c,
+            ix_c,
+            iy_c,
+            ix_c,
+        )
 
     zc = np.asarray(z_per_cell, dtype=float)[iy_c, ix_c]  # (n,)
 
@@ -121,7 +131,15 @@ def _cavity_corner_mesh(
     # belong to cell (face % n) → owner index arrays for per-face colour.
     face_iy = np.concatenate([iy_c, iy_c])
     face_ix = np.concatenate([ix_c, ix_c])
-    return xs, ys, zs, (tri_i, tri_j, tri_k), face_iy, face_ix
+    # Per-vertex owner cell (for the hover field readout). A corner shared by
+    # equal-z cells keeps an arbitrary one of them (values differ only by the
+    # local gradient) — enough to read a number off the hover, not the colorbar.
+    num_verts = uniq.shape[0]
+    vert_cell = np.empty(num_verts, dtype=np.int64)
+    vert_cell[inv.ravel()] = np.repeat(np.arange(n), 4)
+    vert_iy = iy_c[vert_cell]
+    vert_ix = ix_c[vert_cell]
+    return xs, ys, zs, (tri_i, tri_j, tri_k), face_iy, face_ix, vert_iy, vert_ix
 
 
 def _scalar_with_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -268,7 +286,7 @@ def _floor_block_trace(result: FlowResult) -> go.Mesh3d | None:
     """
     g = result.geometry
     zeros = np.zeros_like(np.asarray(g.thickness_mm, dtype=float))
-    xs, ys, zs, tri, _fiy, _fix = _cavity_corner_mesh(result, zeros)
+    xs, ys, zs, tri, _fiy, _fix, _viy, _vix = _cavity_corner_mesh(result, zeros)
     if xs.size == 0 or tri[0].size == 0:
         return None
     i, j, k = tri
@@ -342,11 +360,13 @@ def _ceiling_block_trace(
     """
     g = result.geometry
     thk = np.asarray(g.thickness_mm, dtype=float)
-    xs, ys, zs, tri, face_iy, face_ix = _cavity_corner_mesh(result, thk)
+    xs, ys, zs, tri, face_iy, face_ix, vert_iy, vert_ix = _cavity_corner_mesh(result, thk)
     if xs.size == 0 or tri[0].size == 0:
         return None
     i, j, k = tri
-    intensity = np.asarray(color_field, dtype=float)[face_iy, face_ix]  # per-face
+    cf = np.asarray(color_field, dtype=float)
+    intensity = cf[face_iy, face_ix]  # per-face → drives the colour
+    vert_val = cf[vert_iy, vert_ix]  # per-vertex → readable on hover
     return go.Mesh3d(
         x=xs,
         y=ys,
@@ -357,9 +377,13 @@ def _ceiling_block_trace(
         intensity=intensity,
         intensitymode="cell",
         coloraxis="coloraxis",
+        customdata=vert_val,
         flatshading=True,
         name="cavity ceiling",
-        hovertemplate="x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>h=%{z:.2f} mm<extra></extra>",
+        hovertemplate=(
+            "x=%{x:.1f} mm<br>y=%{y:.1f} mm<br>"
+            "h=%{z:.2f} mm<br>value=%{customdata:.3g}<extra></extra>"
+        ),
     )
 
 

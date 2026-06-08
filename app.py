@@ -1082,6 +1082,32 @@ with col_left:
 
 
 if do_run:
+    # --- セル数ガード（メッシュ下限 0.2mm 開放に伴う安全弁）---
+    # 最大寸法のプレート × 0.2mm では cavity が 100 万セルを超え得る。
+    # 行列組立は Python ループ＋直接 spsolve、さらに層別モードは (N, ny, nx) の
+    # 場を複数確保するため、Streamlit Cloud のメモリ枠を食い潰してプロセスごと
+    # 落ちる恐れがある（Codex P1）。ソルバー起動前に cavity セル数を見て、
+    # 安全上限を超えるなら明示して止める（クラッシュさせず綺麗に停止）。
+    n_cavity = int(geom.mask.sum())
+    if multilayer_on:
+        # 層別はメモリが層数 N に比例するため上限を N で割る。
+        cell_limit = max(120_000, 1_500_000 // num_layers)
+    else:
+        cell_limit = 500_000
+    if n_cavity > cell_limit:
+        _hint = (
+            " 層別モードは厚み方向 N 層分のメモリを使うため上限が低めです。"
+            "「なし」/「スキン層」に切り替えるか N を下げると緩和されます。"
+            if multilayer_on
+            else ""
+        )
+        st.error(
+            f"この設定は格子が大きすぎます（cavity {n_cavity:,} セル ＞ 上限 "
+            f"{cell_limit:,} セル）。メッシュ粗さを上げるか、製品・ランナー寸法を"
+            f"小さくしてください。{_hint}"
+            "（メモリ枯渇によるアプリのクラッシュを防ぐためのガードです。）"
+        )
+        st.stop()
     with st.spinner("Hele-Shaw方程式を解いている…"):
         if multilayer_on:
             solver = MultilayerHeleShawSolver(

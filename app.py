@@ -368,7 +368,11 @@ with st.sidebar:
                     "（ランナーもスプルーもない、垂直に注入する）。"
                 ),
             )
-            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
+            st.caption(
+                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
+                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+            )
         upload = None
     elif geom_source.startswith("Film gate 2"):
         with st.expander("製品形状", expanded=False):
@@ -534,7 +538,11 @@ with st.sidebar:
                 taper1_near_f2 = None
 
         with st.expander("メッシュ", expanded=False):
-            cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+            cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
+            st.caption(
+                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
+                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+            )
         upload = None
     elif geom_source.startswith("Film gate"):
         with st.expander("製品・ゲート形状", expanded=False):
@@ -706,7 +714,11 @@ with st.sidebar:
                 bal_widths_mm = []
                 bal_thks = []
 
-            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.5, 3.0, 0.5, step=0.1)
+            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
+            st.caption(
+                "細かいほど斜め境界が滑らかになり精度も上がるが、解析は重くなる"
+                "（0.2mm・層別で1回数十秒）。普段は0.5、仕上げの3D描画時のみ下げる運用を推奨。"
+            )
         upload = None
     else:
         with st.expander("画像入力", expanded=False):

@@ -154,6 +154,17 @@ def _build_side_walls(
        step so the flat-top blocks read as a crisp step (only +x/+y checked so
        each internal edge is emitted exactly once). Owner = the taller cell.
 
+    **Accepted tradeoff (intentional):** every thickness change is treated as a
+    step, so an *intentionally continuous* taper — e.g. ``build_film_gate_geometry``'s
+    runner-exit slope, interpolated over many cells — renders as a fine
+    staircase rather than a smooth ramp. A designed step (Δ≈0.15 over one cell)
+    and a sampled gradient (≈0.15 *per* cell) have **identical per-cell deltas**,
+    so they cannot be told apart by magnitude; the only robust signal (local
+    curvature / 2nd difference) is fragile at ramp ends and disproportionate for
+    a display-only feature. Flat-top is chosen deliberately so product-surface
+    steps (plate split, balancer steps) read crisply; the staircased tapers are
+    on the flow channel and are the honest rendering of the discretized data.
+
     Returns five 1-D arrays:
       - xs, ys, zs:    vertex coordinates (mm)
       - tri:           flat triangle index list (3M,) → reshape to (M, 3)

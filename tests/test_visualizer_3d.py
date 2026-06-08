@@ -111,7 +111,7 @@ def test_flat_top_caps_diagonal_boundary():
     geom = SimpleNamespace(mask=mask, cell_size_mm=1.0, gate_origin_mm=lambda: (0.0, 0.0))
     result = SimpleNamespace(geometry=geom)
     z = np.ones_like(mask, dtype=float)
-    _xs, _ys, _zs, (ti, _tj, _tk), _fiy, _fix = _cavity_corner_mesh(result, z)
+    _xs, _ys, _zs, (ti, _tj, _tk), _fiy, _fix, _viy, _vix = _cavity_corner_mesh(result, z)
     assert len(ti) == 2 * int(mask.sum())
 
 
@@ -149,6 +149,20 @@ def test_aspectmode_is_data(small_result):
     """All 3 axes share the same mm scale (aspectmode='data')."""
     fig = render_3d_thickness_map(small_result)
     assert fig.layout.scene.aspectmode == "data"
+
+
+@pytest.mark.parametrize("renderer", [render_3d_fill_time, render_3d_pressure])
+def test_ceiling_hover_exposes_field_value(small_result, renderer):
+    """The ceiling hover must still expose the mapped field value (per-vertex
+    ``customdata``) so it is readable numerically, not only off the colorbar
+    (the flat-top per-face colour dropped the old per-vertex readout)."""
+    fig = renderer(small_result)
+    _floor, ceiling, _walls = _split_traces(fig)
+    assert ceiling.customdata is not None
+    cd = np.asarray(ceiling.customdata, dtype=float).ravel()
+    assert len(cd) == len(ceiling.x)  # one value per vertex
+    assert np.isfinite(cd).mean() > 0.99
+    assert "customdata" in (ceiling.hovertemplate or "")
 
 
 def test_walls_share_ceiling_coloraxis(small_result):

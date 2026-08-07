@@ -24,14 +24,17 @@ from core import (
     DirectGateConfig,
     FilmGate2Config,
     FilmGateConfig,
+    GateProfileSpec,
     Geometry,
     HeleShawSolver,
     MaterialDB,
     MultilayerHeleShawSolver,
+    ProfilePlateConfig,
     build_demo_geometry,
     build_direct_gate_geometry,
     build_film_gate2_geometry,
     build_film_gate_geometry,
+    build_profile_gate_geometry,
     export_frames,
     render_core_layer_map,
     render_fill_animation,
@@ -631,6 +634,51 @@ FILM_GATE2_CASES: dict[str, dict] = {
 }
 
 
+def _profile_gate_spec_demo() -> GateProfileSpec:
+    """Bundled fictional-dimension demo spec (exercises the JSON file path)."""
+    return GateProfileSpec.from_json_file(
+        Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
+    )
+
+
+def _profile_plate_cfg_demo() -> ProfilePlateConfig:
+    return ProfilePlateConfig(
+        plate_w_mm=300.0,
+        plate_h_mm=50.0,
+        plate_thk_mm=0.35,
+        plate_split_height_mm=20.0,
+        plate_lower_thk_mm=0.35,
+        plate_upper_thk_mm=0.50,
+    )
+
+
+def run_profile_gate_case(
+    label: str,
+    out_root: Path,
+    *,
+    spec: GateProfileSpec,
+    plate: ProfilePlateConfig,
+    cell_size_mm: float = 1.0,
+    **solver_kwargs,
+) -> None:
+    geom = build_profile_gate_geometry(spec, plate, cell_size_mm=cell_size_mm)
+    _solve_and_export(label, out_root, geom, **solver_kwargs)
+
+
+PROFILE_GATE_CASES: dict[str, dict] = {
+    "ProfileGate_demo": dict(
+        spec=_profile_gate_spec_demo(),
+        plate=_profile_plate_cfg_demo(),
+        cell_size_mm=1.0,
+        material_key="PP_T20",
+        melt_K=523.15,
+        mold_K=323.15,
+        inj_velocity_mms=400.0,
+        inj_Q_cm3s=589.0,
+    ),
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="outputs", help="output root directory")
@@ -650,6 +698,7 @@ def main() -> None:
         + list(FILM_GATE_CASES.keys())
         + list(FILM_GATE2_CASES.keys())
         + list(DIRECT_GATE_CASES.keys())
+        + list(PROFILE_GATE_CASES.keys())
     )
     keys = args.cases or all_keys
     for k in keys:
@@ -661,6 +710,8 @@ def main() -> None:
             run_film_gate2_case(k, out_root, **FILM_GATE2_CASES[k])
         elif k in DIRECT_GATE_CASES:
             run_direct_gate_case(k, out_root, **DIRECT_GATE_CASES[k])
+        elif k in PROFILE_GATE_CASES:
+            run_profile_gate_case(k, out_root, **PROFILE_GATE_CASES[k])
         else:
             print(f"unknown case: {k}")
             continue

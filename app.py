@@ -19,12 +19,15 @@ from core import (
     DirectGateConfig,
     FilmGate2Config,
     FilmGateConfig,
+    GateProfileSpec,
     HeleShawSolver,
     MaterialDB,
     MultilayerHeleShawSolver,
+    ProfilePlateConfig,
     build_direct_gate_geometry,
     build_film_gate2_geometry,
     build_film_gate_geometry,
+    build_profile_gate_geometry,
     export_frames,
     geometry_from_image,
     render_3d_fill_time,
@@ -38,6 +41,8 @@ from core import (
 )
 from core.geometry import Geometry
 from core.visualizer import render_layer_grid, render_short_shot_map
+
+DEMO_PROFILE_JSON = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
 
 st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
 st.title("極薄プレート 簡易流動解析")
@@ -298,6 +303,7 @@ with st.sidebar:
             "Film gate 1 (左右対称)",
             "Film gate 2 (ゲート位置可変)",
             "Direct gate (parametric)",
+            "Profile gate (JSONスペック)",
             "画像から生成 (PNG/JPG)",
         ],
         index=1,
@@ -723,6 +729,62 @@ with st.sidebar:
                 "滑らかな3Dが要るときだけ下げる。"
             )
         upload = None
+    elif geom_source.startswith("Profile gate"):
+        with st.expander("ゲートプロファイル (JSON)", expanded=False):
+            spec_source_pg = st.radio(
+                "スペック入力",
+                ["デモプリセット（架空寸法）", "JSONアップロード", "JSON貼り付け"],
+                horizontal=True,
+                help=(
+                    "図面から抽出したゲートブロック深さ場の JSON スペックを読み込む。"
+                    "実図面由来のスペックはリポジトリに含めず、ここでローカル読込する運用。"
+                ),
+            )
+            upload_pg = None
+            json_text_pg = ""
+            if spec_source_pg.startswith("JSONアップロード"):
+                upload_pg = st.file_uploader("スペック JSON", type=["json"])
+            elif spec_source_pg.startswith("JSON貼り付け"):
+                json_text_pg = st.text_area(
+                    "スペック JSON を貼り付け", height=240, placeholder='{\n  "name": ...\n}'
+                )
+            else:
+                st.caption(f"同梱デモ: {DEMO_PROFILE_JSON.name}（架空寸法）")
+
+        with st.expander("製品形状", expanded=False):
+            plate_w_pg = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
+            plate_h_pg = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+
+            plate_2layer_pg = st.checkbox(
+                "製品肉厚を2層化する（ゲート側／反ゲート側）",
+                value=True,
+                help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
+            )
+            if plate_2layer_pg:
+                plate_split_pg = st.slider(
+                    "段差位置（製品長辺から）[mm]",
+                    1.0,
+                    float(plate_h_pg),
+                    min(20.0, float(plate_h_pg)),
+                    step=1.0,
+                    help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
+                )
+                plate_lower_pg = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+                plate_upper_pg = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
+                plate_thk_pg = float(plate_lower_pg)
+            else:
+                plate_thk_pg = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+                plate_split_pg = 0.0
+                plate_lower_pg = float(plate_thk_pg)
+                plate_upper_pg = float(plate_thk_pg)
+
+        with st.expander("メッシュ", expanded=False):
+            cell_size_pg = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+            st.caption(
+                "スペックの想定解像度は 1.0mm。細かいほど深さ場の再現精度が上がるが、"
+                "解析が重くなる。"
+            )
+        upload = None
     else:
         with st.expander("画像入力", expanded=False):
             upload = st.file_uploader(
@@ -1007,6 +1069,32 @@ def build_geometry() -> Geometry:
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
             return build_film_gate_geometry(cfg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
+    if geom_source.startswith("Profile gate"):
+        try:
+            if upload_pg is not None:
+                spec_pg = GateProfileSpec.from_json(upload_pg.read().decode("utf-8"))
+            elif json_text_pg.strip():
+                spec_pg = GateProfileSpec.from_json(json_text_pg)
+            elif spec_source_pg.startswith("デモプリセット"):
+                spec_pg = GateProfileSpec.from_json_file(DEMO_PROFILE_JSON)
+            else:
+                st.warning("スペック JSON をアップロードまたは貼り付けてください。")
+                st.stop()
+            plate_pg = ProfilePlateConfig(
+                plate_w_mm=plate_w_pg,
+                plate_h_mm=plate_h_pg,
+                plate_thk_mm=plate_thk_pg,
+                plate_split_height_mm=plate_split_pg if plate_split_pg > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_pg if plate_split_pg > 0 else None,
+                plate_upper_thk_mm=plate_upper_pg if plate_split_pg > 0 else None,
+            )
+            return build_profile_gate_geometry(spec_pg, plate_pg, cell_size_mm=cell_size_pg)
+        except json.JSONDecodeError as exc:
+            st.error(f"JSON構文エラー: {exc}")
+            st.stop()
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()

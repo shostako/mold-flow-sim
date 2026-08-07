@@ -13,6 +13,16 @@ from .geometry import (
 )
 from .materials import MaterialDB, cross_wlf_viscosity
 from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
+from .profile_gate import (
+    GateProfileSpec,
+    IslandSpec,
+    LandSpec,
+    MainRampSpec,
+    ProfilePlateConfig,
+    ValveSpec,
+    WellSpec,
+    build_profile_gate_geometry,
+)
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
     export_frames,
@@ -40,6 +50,14 @@ __all__ = [
     "build_film_gate2_geometry",
     "build_direct_gate_geometry",
     "geometry_from_image",
+    "GateProfileSpec",
+    "ProfilePlateConfig",
+    "LandSpec",
+    "MainRampSpec",
+    "IslandSpec",
+    "WellSpec",
+    "ValveSpec",
+    "build_profile_gate_geometry",
     "HeleShawSolver",
     "MultilayerHeleShawSolver",
     "MultilayerFlowResult",

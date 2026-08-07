@@ -993,6 +993,14 @@ with st.sidebar:
     with st.expander("出力", expanded=False):
         num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
 
+    # Version / build label.
+    # Rendered here (end of the sidebar) rather than at the end of the script
+    # because the main flow has several ``st.stop()`` calls for parameter
+    # validation — a footer placed after them would vanish exactly when a user
+    # screenshots an error and asks which build produced it.
+    st.divider()
+    st.caption(build_label())
+
 
 # ----------------------- main panel -----------------------
 def build_geometry() -> Geometry:
@@ -1473,11 +1481,3 @@ if "mfs_result" in st.session_state:
 else:
     with col_right:
         st.info("左側でパラメータを設定し、「解析実行」を押してください。")
-
-
-# ----------------------- footer -----------------------
-# The commit SHA is what tells you whether a deployed instance actually
-# picked up the latest push (Streamlit Cloud may serve a cached build
-# until it is rebooted).
-st.divider()
-st.caption(f"極薄プレート 簡易流動解析 — {build_label()} ・ 変更履歴は CHANGELOG.md 参照")

@@ -80,13 +80,20 @@ class IslandSpec:
 
 @dataclass(frozen=True)
 class WellSpec:
-    """Obround valve well (deep pocket around the valve pin)."""
+    """Obround valve well (deep pocket around the valve pin).
+
+    The rasterizer derives the well floor from ``depth`` and
+    ``wall_angle_deg`` via the distance field; ``floor_t_range`` is
+    optional drawing-reference metadata (the floor extent as dimensioned
+    on the drawing) kept for round-trip fidelity. It does not affect the
+    rasterized geometry.
+    """
 
     shape: str  # only "obround" is supported
     t_range: tuple[float, float]
     half_width: float
     depth: float
-    floor_t_range: tuple[float, float]
+    floor_t_range: tuple[float, float] | None = None
     wall_angle_deg: float = 60.0
 
 
@@ -135,6 +142,18 @@ def _pair(d: dict, key: str, path: str) -> tuple[float, float]:
         return (float(a), float(b))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"gate profile JSON: '{path}{key}' must be [a, b], got {val!r}") from exc
+
+
+def _section(d: dict, key: str, *, required: bool) -> dict | None:
+    """Fetch a nested JSON object, rejecting non-object values with a path."""
+    val = _req(d, key, "") if required else d.get(key)
+    if val is None and not required:
+        return None
+    if not isinstance(val, dict):
+        raise ValueError(
+            f"gate profile JSON: '{key}' must be an object, got {type(val).__name__} ({val!r})"
+        )
+    return val
 
 
 def _check_unknown(d: dict, known: set[str], path: str) -> None:
@@ -203,13 +222,13 @@ class GateProfileSpec:
             )
         gate_exit_width = _num(d, "gate_exit_width", "")
 
-        land_d = _req(d, "land", "")
+        land_d = _section(d, "land", required=True)
         _check_unknown(land_d, {"depth", "length"}, "land")
         land = LandSpec(
             depth=_num(land_d, "depth", "land."), length=_num(land_d, "length", "land.")
         )
 
-        ramp_d = _req(d, "main_ramp", "")
+        ramp_d = _section(d, "main_ramp", required=True)
         _check_unknown(ramp_d, {"angle_deg", "cap_depth"}, "main_ramp")
         main_ramp = MainRampSpec(
             angle_deg=_num(ramp_d, "angle_deg", "main_ramp."),
@@ -217,8 +236,8 @@ class GateProfileSpec:
         )
 
         island: IslandSpec | None = None
-        if d.get("island") is not None:
-            isl_d = d["island"]
+        isl_d = _section(d, "island", required=False)
+        if isl_d is not None:
             _check_unknown(isl_d, {"angle_deg", "boundary_line", "end_dist"}, "island")
             island = IslandSpec(
                 angle_deg=_num(isl_d, "angle_deg", "island."),
@@ -229,8 +248,8 @@ class GateProfileSpec:
         outer_wall_line = _line(d, "outer_wall_line", "")
 
         well: WellSpec | None = None
-        if d.get("well") is not None:
-            well_d = d["well"]
+        well_d = _section(d, "well", required=False)
+        if well_d is not None:
             _check_unknown(
                 well_d,
                 {"shape", "t_range", "half_width", "depth", "floor_t_range", "wall_angle_deg"},
@@ -241,13 +260,17 @@ class GateProfileSpec:
                 t_range=_pair(well_d, "t_range", "well."),
                 half_width=_num(well_d, "half_width", "well."),
                 depth=_num(well_d, "depth", "well."),
-                floor_t_range=_pair(well_d, "floor_t_range", "well."),
+                floor_t_range=(
+                    _pair(well_d, "floor_t_range", "well.")
+                    if well_d.get("floor_t_range") is not None
+                    else None
+                ),
                 wall_angle_deg=(
                     _num(well_d, "wall_angle_deg", "well.") if "wall_angle_deg" in well_d else 60.0
                 ),
             )
 
-        valve_d = _req(d, "valve", "")
+        valve_d = _section(d, "valve", required=True)
         _check_unknown(valve_d, {"t", "w", "orifice_diameter"}, "valve")
         valve = ValveSpec(
             t=_num(valve_d, "t", "valve."),
@@ -308,9 +331,10 @@ class GateProfileSpec:
                 "t_range": list(self.well.t_range),
                 "half_width": self.well.half_width,
                 "depth": self.well.depth,
-                "floor_t_range": list(self.well.floor_t_range),
                 "wall_angle_deg": self.well.wall_angle_deg,
             }
+            if self.well.floor_t_range is not None:
+                d["well"]["floor_t_range"] = list(self.well.floor_t_range)
         return d
 
     def to_json(self, indent: int = 2) -> str:
@@ -399,21 +423,18 @@ class GateProfileSpec:
                 )
             if not (0.0 < w.wall_angle_deg <= 90.0):
                 raise ValueError(f"well.wall_angle_deg must be in (0, 90], got {w.wall_angle_deg}")
-            if (
-                w.floor_t_range[0] < w.t_range[0] - _EPS
-                or w.floor_t_range[1] > w.t_range[1] + _EPS
-                or w.floor_t_range[0] >= w.floor_t_range[1] - _EPS
-            ):
-                raise ValueError(
-                    f"well.floor_t_range ({w.floor_t_range}) must be an increasing range "
-                    f"inside well.t_range ({w.t_range})"
-                )
-            r_floor = w.half_width - (w.floor_t_range[0] - w.t_range[0])
-            if r_floor < -_EPS:
-                raise ValueError(
-                    f"well.floor_t_range inset ({w.floor_t_range[0] - w.t_range[0]}) "
-                    f"must be ≤ well.half_width ({w.half_width})"
-                )
+            if w.floor_t_range is not None:
+                # reference metadata only (see WellSpec docstring) — still
+                # reject nonsensical ranges to catch extraction typos
+                if (
+                    w.floor_t_range[0] < w.t_range[0] - _EPS
+                    or w.floor_t_range[1] > w.t_range[1] + _EPS
+                    or w.floor_t_range[0] >= w.floor_t_range[1] - _EPS
+                ):
+                    raise ValueError(
+                        f"well.floor_t_range ({w.floor_t_range}) must be an increasing range "
+                        f"inside well.t_range ({w.t_range})"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +577,24 @@ def build_profile_gate_geometry(
         x_valve = x_edge + spec.valve.w
         wa = xx - x_edge
         full_half_width = gew
+
+    # --- grid-fit check: the pocket must not overhang the raster grid ---
+    # (otherwise it would silently truncate at the array edge and produce
+    # wrong volume / conductance with no diagnostic)
+    w_wall_max = max(full_half_width, spec.outer_wall_line[0][1], spec.outer_wall_line[1][1])
+    well_hw = spec.well.half_width if spec.well is not None else 0.0
+    if spec.symmetric:
+        x_lo = x_valve - max(w_wall_max, well_hw)
+        x_hi = x_valve + max(w_wall_max, well_hw)
+    else:
+        x_lo = x_edge - well_hw  # the well may overhang past the w=0 edge
+        x_hi = x_edge + max(w_wall_max, well_hw)
+    if x_lo < -_EPS or x_hi > total_w + _EPS:
+        raise ValueError(
+            f"gate pocket x-extent [{x_lo:.1f}, {x_hi:.1f}] mm overhangs the grid "
+            f"[0, {total_w:.1f}] mm; widen plate_w_mm/pad_mm or shrink the spec "
+            f"(outer_wall_line w, well.half_width, valve.w)"
+        )
 
     # --- base depth field (land + capped main ramp) ---
     land_depth = spec.land.depth

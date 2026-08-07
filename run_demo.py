@@ -634,11 +634,7 @@ FILM_GATE2_CASES: dict[str, dict] = {
 }
 
 
-def _profile_gate_spec_demo() -> GateProfileSpec:
-    """Bundled fictional-dimension demo spec (exercises the JSON file path)."""
-    return GateProfileSpec.from_json_file(
-        Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
-    )
+DEMO_PROFILE_SPEC_PATH = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
 
 
 def _profile_plate_cfg_demo() -> ProfilePlateConfig:
@@ -656,18 +652,21 @@ def run_profile_gate_case(
     label: str,
     out_root: Path,
     *,
-    spec: GateProfileSpec,
+    spec_path: Path,
     plate: ProfilePlateConfig,
     cell_size_mm: float = 1.0,
     **solver_kwargs,
 ) -> None:
+    # Load lazily (not at module import) so a missing/corrupt spec JSON only
+    # breaks this case, not every other CLI case.
+    spec = GateProfileSpec.from_json_file(spec_path)
     geom = build_profile_gate_geometry(spec, plate, cell_size_mm=cell_size_mm)
     _solve_and_export(label, out_root, geom, **solver_kwargs)
 
 
 PROFILE_GATE_CASES: dict[str, dict] = {
     "ProfileGate_demo": dict(
-        spec=_profile_gate_spec_demo(),
+        spec_path=DEMO_PROFILE_SPEC_PATH,
         plate=_profile_plate_cfg_demo(),
         cell_size_mm=1.0,
         material_key="PP_T20",

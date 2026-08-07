@@ -1,0 +1,23 @@
+{
+  "name": "Demo Profile Gate (fictional dimensions)",
+  "units": "mm",
+  "symmetric": true,
+  "gate_exit_width": 200.0,
+  "land": { "depth": 0.4, "length": 2.0 },
+  "main_ramp": { "angle_deg": 10.0, "cap_depth": 2.4 },
+  "island": {
+    "angle_deg": 2.5,
+    "boundary_line": [[2.0, 40.0], [14.0, 10.0]],
+    "end_dist": 14.0
+  },
+  "outer_wall_line": [[2.0, 100.0], [26.0, 20.0]],
+  "well": {
+    "shape": "obround",
+    "t_range": [14.0, 26.0],
+    "half_width": 4.0,
+    "depth": 4.0,
+    "floor_t_range": [16.31, 23.69],
+    "wall_angle_deg": 60
+  },
+  "valve": { "t": 20.0, "w": 0.0, "orifice_diameter": 3.0 }
+}

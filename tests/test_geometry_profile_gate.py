@@ -92,6 +92,36 @@ def test_from_dict_rejects_non_mm_units() -> None:
         GateProfileSpec.from_dict(_minimal_spec_dict(units="inch"))
 
 
+def test_from_dict_rejects_non_object_section() -> None:
+    # a scalar where an object is expected must be a ValueError with the
+    # section name (not a TypeError escaping the UI's error handling)
+    with pytest.raises(ValueError, match="'land' must be an object"):
+        GateProfileSpec.from_dict(_minimal_spec_dict(land=5))
+    with pytest.raises(ValueError, match="'well' must be an object"):
+        GateProfileSpec.from_dict(_minimal_spec_dict(well="abc"))
+
+
+def test_well_floor_t_range_is_optional_reference_metadata() -> None:
+    # floor_t_range is drawing-reference metadata: omitting it (or changing
+    # it) must not change the rasterized geometry
+    well = {
+        "shape": "obround",
+        "t_range": [14.0, 26.0],
+        "half_width": 4.0,
+        "depth": 4.0,
+        "wall_angle_deg": 60,
+    }
+    spec_none = _minimal_spec(well=dict(well))
+    spec_ref = _minimal_spec(well=dict(well, floor_t_range=[16.31, 23.69]))
+    assert spec_none.well.floor_t_range is None
+    g_none = build_profile_gate_geometry(spec_none, _plate())
+    g_ref = build_profile_gate_geometry(spec_ref, _plate())
+    np.testing.assert_array_equal(g_none.thickness_mm, g_ref.thickness_mm)
+    # round-trip keeps the reference field when present, omits it when absent
+    assert GateProfileSpec.from_json(spec_ref.to_json()) == spec_ref
+    assert GateProfileSpec.from_json(spec_none.to_json()) == spec_none
+
+
 # ----------------------- validation ------------------
 
 
@@ -132,6 +162,13 @@ def test_validation_rejects_island_steeper_than_ramp() -> None:
 def test_builder_rejects_gate_wider_than_plate() -> None:
     with pytest.raises(ValueError, match="gate_exit_width"):
         build_profile_gate_geometry(_minimal_spec(), _plate(plate_w_mm=100.0))
+
+
+def test_builder_rejects_pocket_overhanging_grid() -> None:
+    # outer wall wider than the raster grid must raise, not silently truncate
+    spec = _minimal_spec(outer_wall_line=[[0.0, 400.0], [24.0, 400.0]])
+    with pytest.raises(ValueError, match="overhangs the grid"):
+        build_profile_gate_geometry(spec, _plate())
 
 
 # ----------------------- smoke / silhouette ------------------

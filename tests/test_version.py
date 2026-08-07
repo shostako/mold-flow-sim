@@ -6,7 +6,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from core.version import __version__, build_label
+from core.version import __version__, build_label, git_build_info
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -33,3 +33,16 @@ def test_changelog_versions_are_descending() -> None:
 def test_build_label_starts_with_version() -> None:
     label = build_label()
     assert label.startswith(f"v{__version__}")
+
+
+def test_build_label_reports_git_metadata_when_available() -> None:
+    info = git_build_info()
+    if info is None:  # no .git / no git binary — bare version is correct
+        assert build_label() == f"v{__version__}"
+        return
+    sha, date, dirty = info
+    label = build_label()
+    assert sha in label
+    assert date in label
+    # a modified working tree must be flagged, a clean one must not be
+    assert ("+dirty" in label) is dirty

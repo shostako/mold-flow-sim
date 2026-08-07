@@ -40,6 +40,7 @@ from core import (
     render_weldlines,
 )
 from core.geometry import Geometry
+from core.version import build_label
 from core.visualizer import render_layer_grid, render_short_shot_map
 
 DEMO_PROFILE_JSON = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
@@ -1472,3 +1473,11 @@ if "mfs_result" in st.session_state:
 else:
     with col_right:
         st.info("左側でパラメータを設定し、「解析実行」を押してください。")
+
+
+# ----------------------- footer -----------------------
+# The commit SHA is what tells you whether a deployed instance actually
+# picked up the latest push (Streamlit Cloud may serve a cached build
+# until it is rebooted).
+st.divider()
+st.caption(f"極薄プレート 簡易流動解析 — {build_label()} ・ 変更履歴は CHANGELOG.md 参照")

@@ -135,31 +135,53 @@ def _req(d: dict, key: str, path: str) -> Any:
     return d[key]
 
 
+def _finite(val: float, label: str) -> float:
+    """Reject NaN / ±Infinity at the parsing boundary.
+
+    ``json.loads`` accepts the ``NaN`` / ``Infinity`` literals, and every
+    comparison against NaN is False — so a NaN would slip through *both*
+    sides of every range check in :meth:`GateProfileSpec.validate` and reach
+    the rasterizer. There it either poisons the depth field (NaN volume, NaN
+    solve) or, in a mask test, silently drops the feature it was meant to
+    describe. Catching it here covers every numeric field at once.
+    """
+    if not math.isfinite(val):
+        raise ValueError(f"gate profile JSON: '{label}' must be a finite number, got {val!r}")
+    return val
+
+
 def _num(d: dict, key: str, path: str) -> float:
     val = _req(d, key, path)
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise ValueError(f"gate profile JSON: '{path}{key}' must be a number, got {val!r}")
-    return float(val)
+    return _finite(float(val), f"{path}{key}")
 
 
 def _line(d: dict, key: str, path: str) -> tuple[tuple[float, float], tuple[float, float]]:
     val = _req(d, key, path)
     try:
         (t1, w1), (t2, w2) = val
-        return ((float(t1), float(w1)), (float(t2), float(w2)))
+        pts = ((float(t1), float(w1)), (float(t2), float(w2)))
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"gate profile JSON: '{path}{key}' must be [[t1, w1], [t2, w2]], got {val!r}"
         ) from exc
+    for pt in pts:
+        for v in pt:
+            _finite(v, f"{path}{key}")
+    return pts
 
 
 def _pair(d: dict, key: str, path: str) -> tuple[float, float]:
     val = _req(d, key, path)
     try:
         a, b = val
-        return (float(a), float(b))
+        pair = (float(a), float(b))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"gate profile JSON: '{path}{key}' must be [a, b], got {val!r}") from exc
+    for v in pair:
+        _finite(v, f"{path}{key}")
+    return pair
 
 
 def _section(d: dict, key: str, *, required: bool) -> dict | None:

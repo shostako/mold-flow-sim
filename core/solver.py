@@ -57,6 +57,9 @@ import scipy.sparse.linalg as spla
 from .geometry import Geometry
 from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 
+#: Fill time assumed when no injection rate is given, for the cavity as drawn.
+DEFAULT_FILL_TIME_S = 1.5
+
 
 @dataclass
 class FlowResult:
@@ -239,6 +242,19 @@ class HeleShawSolver:
             tau_max = 1.0
         return tau, tau_max
 
+    def _effective_flow_rate_cm3s(self) -> float:
+        """Volume rate [cm3/s] the timeline is built on.
+
+        With no rate given, the default is stated as a 1.5 s fill of the cavity
+        as drawn; that is a rate, not a duration. Reading it as a duration
+        would hand the same 1.5 s to a short shot with a tenth of the volume
+        left, which is where the live-volume scaling would quietly stop
+        working.
+        """
+        if self.injection_volume_flow_cm3s is not None:
+            return max(float(self.injection_volume_flow_cm3s), 1e-6)
+        return max(self.geometry.volume_cm3() / DEFAULT_FILL_TIME_S, 1e-9)
+
     def _baseline_fill_time(self, geom: Geometry) -> float:
         """Skin-free fill time [s] of ``geom`` at constant Q.
 
@@ -246,12 +262,13 @@ class HeleShawSolver:
         them: the cavity as drawn, and the part of it the melt can actually
         reach. The time to fill is the second one's -- melt does not spend
         time on volume it never occupies.
+
+        Call this on the solver that owns the *full* cavity and pass the
+        restricted geometry in. The flow rate comes from ``self``, and with no
+        rate given it is derived from ``self.geometry`` -- so a restricted
+        solver asking itself would cancel the two and return the default.
         """
-        if self.injection_volume_flow_cm3s is None:
-            base = 1.5
-        else:
-            Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
-            base = geom.volume_cm3() / Q
+        base = geom.volume_cm3() / self._effective_flow_rate_cm3s()
         if not self.compression_molding:
             return base
         # Effective inflation acting on the whole cavity (Q = const proxy).
@@ -469,7 +486,11 @@ class HeleShawSolver:
                 )
                 # Both references now live on the same domain, so the ratio is
                 # "how much did freezing slow the region that still flows".
-                T_fill_baseline = sub._baseline_fill_time(sub.geometry)
+                # ``self``, not ``sub``: the implicit flow rate is defined by
+                # the cavity as drawn. Asking the restricted solver would make
+                # it divide the live volume by a rate derived from that same
+                # live volume, handing back the default 1.5 s unchanged.
+                T_fill_baseline = self._baseline_fill_time(sub.geometry)
                 tau_max_baseline = tau_max_open
                 tau_max_flow = self._tau_reference(tau, live)
             else:

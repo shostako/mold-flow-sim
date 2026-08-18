@@ -26,6 +26,7 @@ from .profile_gate import (
     MainRampSpec,
     ProfilePlateConfig,
     ValveSpec,
+    WeldSpec,
     WellSpec,
     build_profile_gate_geometry,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "LandSpec",
     "MainRampSpec",
     "IslandSpec",
+    "WeldSpec",
     "WellSpec",
     "ValveSpec",
     "build_profile_gate_geometry",

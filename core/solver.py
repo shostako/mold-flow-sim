@@ -428,8 +428,16 @@ class HeleShawSolver:
         pressure_norm = np.full_like(tau, np.nan)
         pressure_norm[fillable] = 1.0 - tau[fillable] / tau_max_flow
 
-        weld_score = self._compute_weld_score(tau)
-        air_traps = self._compute_air_traps(tau)
+        # Weld lines and air traps read tau as "when did melt get here". A cell
+        # that never receives melt has no such time -- and its floored core
+        # leaves a tau far above every live cell, which is exactly the shape a
+        # local-maximum search calls an air trap. Blank them out first so the
+        # diagnostics cannot plant defects in material that stays empty.
+        tau_flow = tau
+        if unfillable_mask is not None:
+            tau_flow = np.where(unfillable_mask, np.nan, tau)
+        weld_score = self._compute_weld_score(tau_flow)
+        air_traps = self._compute_air_traps(tau_flow)
 
         metadata = {
             "material": self.material.name,

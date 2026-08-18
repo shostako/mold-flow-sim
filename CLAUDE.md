@@ -305,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 16 ファイル、合計 **304 テスト** (303 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 16 ファイル、合計 **305 テスト** (304 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -313,7 +313,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_geometry_film_gate2.py` — 33件: 直角台形シルエット / 厚み場のプロファイル（連続性・段差の有無・x非依存性）/ ゲート位置可変 / 2段テーパ / 深ランナー / `resolved_*` フォールバック / バリデーション / solver 統合
 - `test_geometry_profile_gate.py` — 28件: JSON I/O（round-trip、パス付きエラー、未知キー拒否、非オブジェクトのセクション拒否）/ バリデーション / シルエット（ランド・ランプ式・cap 底打ち・アイランド・外壁・対称性 flip・非対称）/ 井戸（フロア深さ・max 合成・体積差分を放射積分と照合）/ **閉形式の体積検算**（直壁最小スペック ±3%）/ グリッドはみ出し拒否 / compression_mask / プレート2層 / solver 統合
-- `test_settings_record.py` — 10件: 形状 config の全フィールドが記録されること（dataclass 自身と突き合わせ）/ `None` が null として残ること / tuple が list になり JSON round-trip すること / **アップロードしたスペックの中身がシリアライズ結果に現れないこと**（キーの有無でなく実際の数値で検証）/ フィンガープリントの同一性・差分検出 / bytes と str の等価 / config 無し（画像入力）/ 型・空文字の拒否
+- `test_settings_record.py` — 11件: 形状 config の全フィールドが記録されること（dataclass 自身と突き合わせ）/ `None` が null として残ること / tuple が list になり JSON round-trip すること / **アップロードしたスペックの中身がシリアライズ結果に現れないこと**（キーの有無でなく実際の数値で検証）/ フィンガープリントの同一性・差分検出 / bytes と str の等価 / config 無し（画像入力）/ `spec` 配下のキーが `name`/`sha256`/`bytes` に限られること（スペック自身の `name` フィールドは中身なので載せない）/ 型・空文字の拒否
 - `test_version.py` — 5件: `pyproject.toml` と `__version__` の一致 / CHANGELOG に現行版の項目がある / CHANGELOG の版が降順 / `build_label()` が版で始まる / git メタデータ（SHA・日付・dirty フラグ）の反映
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性

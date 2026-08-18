@@ -72,7 +72,9 @@ def test_uploaded_spec_is_fingerprinted_not_embedded():
     inspecting which keys were set -- a future change that starts embedding
     the spec would keep the keys and still leak.
     """
-    spec_text = json.dumps({"name": "real_part", "gate_exit_width": 299.0, "land": {"depth": 0.35}})
+    spec_text = json.dumps(
+        {"name": "customer_partno_rev3", "gate_exit_width": 299.0, "land": {"depth": 0.35}}
+    )
     rec = config_settings(
         "Profile gate (JSONスペック)",
         ProfilePlateConfig(plate_w_mm=300.0, plate_h_mm=50.0, plate_thk_mm=0.35),
@@ -81,6 +83,9 @@ def test_uploaded_spec_is_fingerprinted_not_embedded():
     blob = settings_json(rec)
     assert "299.0" not in blob
     assert "gate_exit_width" not in blob
+    # The spec's own ``name`` is content too, and it is the field most likely
+    # to carry a part or customer identifier.
+    assert "customer_partno_rev3" not in blob
     assert rec["spec"]["sha256"] == file_fingerprint("x", spec_text)["sha256"]
     assert rec["spec"]["name"] == "real_part.json"
 
@@ -126,3 +131,19 @@ def test_rejects_a_dataclass_type_passed_by_mistake():
 def test_rejects_an_empty_source():
     with pytest.raises(ValueError):
         config_settings("", None)
+
+
+def test_only_the_fingerprint_keys_describe_an_uploaded_spec():
+    """Whatever ends up under ``spec`` must be derivable without reading the file.
+
+    ``name`` is the name the *user* chose for the upload, not a field lifted
+    out of the JSON. Anything else here would be content by another route --
+    which is how the spec's internal ``name`` slipped in the first time.
+    """
+    rec = config_settings(
+        "Profile gate (JSONスペック)",
+        ProfilePlateConfig(plate_w_mm=300.0, plate_h_mm=50.0, plate_thk_mm=0.35),
+        spec=file_fingerprint("part.json", '{"name": "secret", "depth": 0.35}'),
+    )
+    assert set(rec["spec"]) == {"name", "sha256", "bytes"}
+    assert rec["spec"]["name"] == "part.json"

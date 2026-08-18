@@ -1,0 +1,127 @@
+"""Tests for the fill-front HTML player and its shared frame-timing helpers.
+
+The GIF, the PNG frame sequence and the HTML scrubber must all agree on
+what frame ``k`` shows. That agreement now lives in one place
+(``fill_frame_times``); these tests pin it so the three renderers cannot
+drift apart again.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+
+import numpy as np
+import pytest
+
+from core import (
+    HeleShawSolver,
+    MaterialDB,
+    build_demo_geometry,
+    build_fill_player_html,
+    export_frames,
+    fill_frame_fractions,
+    fill_frame_times,
+)
+
+
+@pytest.fixture(scope="module")
+def result():
+    geom = build_demo_geometry(cell_size_mm=3.0)
+    mat = MaterialDB()["PP"]
+    return HeleShawSolver(geom, mat).solve(num_frames=6)
+
+
+# --- fill_frame_times -------------------------------------------------------
+
+
+def test_frame_times_span_first_step_to_full_fill(result):
+    n = 6
+    t = fill_frame_times(result, n)
+    t_max = float(np.nanmax(result.fill_time_s))
+    assert t.shape == (n,)
+    assert t[-1] == pytest.approx(t_max)
+    assert t[0] == pytest.approx(t_max / n)
+    assert np.all(np.diff(t) > 0)
+
+
+def test_frame_times_rejects_non_positive_count(result):
+    with pytest.raises(ValueError, match="num_frames"):
+        fill_frame_times(result, 0)
+
+
+def test_frame_times_match_exported_frame_count(result, tmp_path):
+    """The PNG sequence and the timing helper must stay the same length."""
+    n = 6
+    paths = export_frames(result, tmp_path / "frames", num_frames=n)
+    assert len(paths) == len(fill_frame_times(result, n)) == n
+
+
+# --- fill_frame_fractions ---------------------------------------------------
+
+
+def test_frame_fractions_rise_monotonically_to_full(result):
+    f = fill_frame_fractions(result, 6)
+    assert f.shape == (6,)
+    assert np.all(f >= 0.0) and np.all(f <= 1.0)
+    assert np.all(np.diff(f) >= -1e-12)
+    assert f[-1] == pytest.approx(1.0)
+
+
+# --- build_fill_player_html -------------------------------------------------
+
+
+def _payload(html: str) -> dict:
+    m = re.search(r"const D = (\{.*?\});", html, re.S)
+    assert m, "player payload not found"
+    return json.loads(m.group(1))
+
+
+def test_player_embeds_every_frame_and_its_readout(result, tmp_path):
+    n = 6
+    paths = export_frames(result, tmp_path / "frames", num_frames=n)
+    times = fill_frame_times(result, n)
+    fills = fill_frame_fractions(result, n)
+    html = build_fill_player_html(paths, times, fills, fps=8)
+
+    d = _payload(html)
+    assert len(d["frames"]) == n
+    assert all(src.startswith("data:image/png;base64,") for src in d["frames"])
+    assert d["times"] == pytest.approx(list(times))
+    assert d["fills"] == pytest.approx(list(fills))
+    assert d["fps"] == 8
+
+
+def test_player_frame_payload_decodes_to_the_actual_png(result, tmp_path):
+    paths = export_frames(result, tmp_path / "frames", num_frames=6)
+    html = build_fill_player_html(
+        paths, fill_frame_times(result, 6), fill_frame_fractions(result, 6)
+    )
+    src = _payload(html)["frames"][0]
+    raw = base64.b64decode(src.split(",", 1)[1])
+    assert raw == paths[0].read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_player_is_self_contained(result, tmp_path):
+    """No external fetches: the CSP-sandboxed iframe would block them."""
+    paths = export_frames(result, tmp_path / "frames", num_frames=6)
+    html = build_fill_player_html(
+        paths, fill_frame_times(result, 6), fill_frame_fractions(result, 6)
+    )
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "<script>" in html and "seek" in html
+
+
+def test_player_rejects_mismatched_or_empty_inputs(result, tmp_path):
+    paths = export_frames(result, tmp_path / "frames", num_frames=6)
+    times = fill_frame_times(result, 6)
+    fills = fill_frame_fractions(result, 6)
+    with pytest.raises(ValueError, match="must not be empty"):
+        build_fill_player_html([], [], [])
+    with pytest.raises(ValueError, match="equal length"):
+        build_fill_player_html(paths, times[:-1], fills)
+    with pytest.raises(ValueError, match="fps"):
+        build_fill_player_html(paths, times, fills, fps=0)

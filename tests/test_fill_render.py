@@ -311,3 +311,28 @@ def test_gate_marker_sits_above_the_unfilled_overlay(result, tmp_path):
     assert markers, "expected at least one gate marker"
     assert all(m.get_zorder() > overlay_z for m in markers)
     plt.close(fig)
+
+
+def test_frame_export_contours_once_for_the_whole_sequence(result, tmp_path, monkeypatch):
+    """60 PNGs must not mean 60 contour passes over the cavity.
+
+    The GIF renderer builds the figure once and only swaps the overlay array;
+    the PNG exporter used to rebuild the whole figure per frame, so the
+    one-pass contour optimization was lost exactly where the UI asks for the
+    most frames. Counting the contour calls is the only way to see this — the
+    output PNGs look identical either way.
+    """
+    from matplotlib.axes import Axes
+
+    calls = 0
+    real_contour = Axes.contour
+
+    def counting_contour(self, *a, **kw):
+        nonlocal calls
+        calls += 1
+        return real_contour(self, *a, **kw)
+
+    monkeypatch.setattr(Axes, "contour", counting_contour)
+    paths = export_frames(result, tmp_path / "frames", num_frames=5, isochrone_levels=8)
+    assert len(paths) == 5
+    assert calls == 1, f"contoured {calls} times for 5 frames"

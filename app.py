@@ -46,6 +46,7 @@ from core import (
     wrap_standalone_html,
 )
 from core.geometry import Geometry
+from core.settings_record import config_settings, file_fingerprint, settings_json
 from core.version import build_label
 from core.visualizer import ISOCHRONE_LEVELS, render_layer_grid, render_short_shot_map
 
@@ -1032,7 +1033,12 @@ with st.sidebar:
 
 
 # ----------------------- main panel -----------------------
-def build_geometry() -> Geometry:
+def build_geometry() -> tuple[Geometry, dict]:
+    """Return the geometry and a record of the inputs that produced it.
+
+    The settings travel with the results ZIP so a downloaded run can be
+    reproduced without measuring the images and solving for the volume.
+    """
     if geom_source.startswith("Direct gate"):
         try:
             cfg_dg = DirectGateConfig(
@@ -1046,7 +1052,7 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_thk_dg if plate_split_dg > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
             )
-            return build_direct_gate_geometry(cfg_dg)
+            return build_direct_gate_geometry(cfg_dg), config_settings(geom_source, cfg_dg)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1078,7 +1084,7 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_f2 if plate_split_f2 > 0 else None,
                 plate_upper_thk_mm=plate_upper_f2 if plate_split_f2 > 0 else None,
             )
-            return build_film_gate2_geometry(cfg_f2)
+            return build_film_gate2_geometry(cfg_f2), config_settings(geom_source, cfg_f2)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1106,21 +1112,25 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
-            return build_film_gate_geometry(cfg)
+            return build_film_gate_geometry(cfg), config_settings(geom_source, cfg)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
     if geom_source.startswith("Profile gate"):
         try:
             if upload_pg is not None:
-                spec_pg = GateProfileSpec.from_json(upload_pg.read().decode("utf-8"))
+                _spec_text = upload_pg.read().decode("utf-8")
+                _spec_fp = file_fingerprint(upload_pg.name, _spec_text)
             elif json_text_pg.strip():
-                spec_pg = GateProfileSpec.from_json(json_text_pg)
+                _spec_text = json_text_pg
+                _spec_fp = file_fingerprint("(貼り付け)", _spec_text)
             elif spec_source_pg.startswith("デモプリセット"):
-                spec_pg = GateProfileSpec.from_json_file(DEMO_PROFILE_JSON)
+                _spec_text = DEMO_PROFILE_JSON.read_text(encoding="utf-8")
+                _spec_fp = file_fingerprint(DEMO_PROFILE_JSON.name, _spec_text)
             else:
                 st.warning("スペック JSON をアップロードまたは貼り付けてください。")
                 st.stop()
+            spec_pg = GateProfileSpec.from_json(_spec_text)
             plate_pg = ProfilePlateConfig(
                 plate_w_mm=plate_w_pg,
                 plate_h_mm=plate_h_pg,
@@ -1129,7 +1139,18 @@ def build_geometry() -> Geometry:
                 plate_lower_thk_mm=plate_lower_pg if plate_split_pg > 0 else None,
                 plate_upper_thk_mm=plate_upper_pg if plate_split_pg > 0 else None,
             )
-            return build_profile_gate_geometry(spec_pg, plate_pg, cell_size_mm=cell_size_pg)
+            return build_profile_gate_geometry(
+                spec_pg, plate_pg, cell_size_mm=cell_size_pg
+            ), config_settings(
+                geom_source,
+                plate_pg,
+                cell_size_mm=cell_size_pg,
+                # The spec usually comes off a real drawing and this ZIP is
+                # made to be forwarded, so record which file it was -- not
+                # what was in it.
+                spec=_spec_fp,
+                spec_name=getattr(spec_pg, "name", None),
+            )
         except json.JSONDecodeError as exc:
             st.error(f"JSON構文エラー: {exc}")
             st.stop()
@@ -1159,14 +1180,21 @@ def build_geometry() -> Geometry:
         col_ys = ys[xs == xs.min()]
         iy = int(np.median(col_ys))
         g.add_gate(iy, ix)
-    return g
+    return g, config_settings(
+        geom_source,
+        image=file_fingerprint(upload.name, img_bytes),
+        cell_size_mm=cell_size,
+        plate_thk_mm=plate_thk,
+        invert=invert,
+        threshold=threshold,
+    )
 
 
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
     st.subheader("成形品設計図")
-    geom = build_geometry()
+    geom, geom_settings = build_geometry()
     fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
     st.write(
         f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³"
@@ -1277,6 +1305,56 @@ if do_run:
             )
         result = solver.solve(num_frames=num_frames)
 
+        # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
+        # ダウンロードした ZIP から設定を復元できない (画像から寸法を測って
+        # 体積と tau_max で逆算する羽目になる)。
+        run_settings = {
+            "app_version": build_label(),
+            "geometry": geom_settings,
+            "material": material_key,
+            "injection": {
+                "melt_temperature_C": melt_C,
+                "mold_temperature_C": mold_C,
+                "injection_velocity_mms": inj_v,
+                "injection_volume_flow_cm3s": inj_Q,
+            },
+            "wall_cooling": (
+                {
+                    "model": "skin",
+                    "skin_growth_constant": c_skin,
+                    "skin_max_iterations": skin_max_iter,
+                    "skin_convergence_tol": skin_tol,
+                }
+                if skin_on
+                else {
+                    "model": "multilayer",
+                    "num_layers": num_layers,
+                    "layer_distribution": layer_distribution,
+                    "max_iterations": multilayer_max_iter,
+                    "convergence_tol": multilayer_tol,
+                    "solidification_temperature_fraction": solid_fraction,
+                    "shear_heating_enabled": shear_heating_enabled,
+                }
+                if multilayer_on
+                else {"model": "none"}
+            ),
+            "compression_molding": (
+                {
+                    "enabled": True,
+                    "mode": "stroke",
+                    "stroke_mm": comp_stroke,
+                    "fraction": comp_frac,
+                }
+                if icm
+                else {"enabled": False}
+            ),
+            "output": {
+                "num_frames": num_frames,
+                "fill_cmap": fill_cmap,
+                "isochrone_levels": iso_levels,
+            },
+        }
+
         # 重い PNG/GIF レンダリングはここで一回だけやる。後段の widget 操作で
         # rerun が走っても再生成しないよう、すべて session_state に置く。
         _tmp_dir = Path(tempfile.mkdtemp())
@@ -1356,6 +1434,7 @@ if do_run:
                     note=build_label(),
                 ),
             )
+            _zf_run.writestr("settings.json", settings_json(run_settings))
             _zf_run.writestr(
                 "metadata.json",
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
@@ -1364,6 +1443,7 @@ if do_run:
         # 解析結果の一式を session_state に格納。次回 rerun（3D スライダー操作等）
         # でも下のブロックがこれを拾って表示する。
         st.session_state["mfs_result"] = result
+        st.session_state["mfs_settings"] = run_settings
         st.session_state["mfs_geom"] = geom
         st.session_state["mfs_skin_on"] = skin_on
         st.session_state["mfs_multilayer_on"] = multilayer_on
@@ -1434,7 +1514,8 @@ if "mfs_result" in st.session_state:
             key="dl_zip_all",
             help=(
                 "GIF（fill.gif）・各フレーム PNG（frames/frame_NNN.png）・"
-                "各マップ PNG・metadata.json を1つの ZIP にまとめてダウンロード"
+                "各マップ PNG・metadata.json（解析結果）・settings.json（入力設定）を"
+                "1つの ZIP にまとめてダウンロード"
             ),
         )
 
@@ -1545,6 +1626,15 @@ if "mfs_result" in st.session_state:
                     use_container_width=True,
                     config={"displaylogo": False},
                 )
+
+        with st.expander("この結果を出した設定"):
+            st.caption(
+                "ZIP の settings.json と同じ内容。metadata.json は解いた結果しか"
+                "持たないので、設定を辿るならこちら。"
+                "アップロードしたスペック JSON は名前と SHA-256 だけを記録する"
+                "（ZIP は人に渡す前提なので、図面由来の寸法は載せない）。"
+            )
+            st.json(st.session_state.get("mfs_settings", {}))
 
         with st.expander("生データ"):
             st.json(result.metadata)

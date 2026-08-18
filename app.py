@@ -1147,9 +1147,10 @@ def build_geometry() -> tuple[Geometry, dict]:
                 cell_size_mm=cell_size_pg,
                 # The spec usually comes off a real drawing and this ZIP is
                 # made to be forwarded, so record which file it was -- not
-                # what was in it.
+                # what was in it. That rules out the spec's own ``name``
+                # field too: it is content, and it is exactly the field that
+                # carries a part or customer identifier.
                 spec=_spec_fp,
-                spec_name=getattr(spec_pg, "name", None),
             )
         except json.JSONDecodeError as exc:
             st.error(f"JSON構文エラー: {exc}")

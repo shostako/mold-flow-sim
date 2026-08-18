@@ -59,6 +59,30 @@ def _draw_geometry(ax, result: FlowResult) -> None:
     )
 
 
+def fill_frame_times(result: FlowResult, num_frames: int) -> np.ndarray:
+    """Frame timestamps [s] shared by the GIF, the PNG frames and the player.
+
+    Frame ``k`` shows every cell with ``fill_time_s <= t_k``. The first frame
+    is one step in (never empty) and the last frame is the completed fill, so
+    the three renderers stay in lockstep: the scrubber's frame ``k`` is the
+    same instant as ``frames/frame_kkk.png`` and the GIF's frame ``k``.
+    """
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}")
+    t_max = float(np.nanmax(result.fill_time_s))
+    if not np.isfinite(t_max) or t_max <= 0:
+        t_max = 1.0
+    return np.linspace(t_max / num_frames, t_max, num_frames)
+
+
+def fill_frame_fractions(result: FlowResult, num_frames: int) -> np.ndarray:
+    """Filled area fraction (0..1) of the cavity at each frame time."""
+    g = result.geometry
+    cells = max(int(g.mask.sum()), 1)
+    times = fill_frame_times(result, num_frames)
+    return np.array([float((g.mask & (result.fill_time_s <= t)).sum()) / cells for t in times])
+
+
 def render_fill_animation(
     result: FlowResult,
     output_path: str | Path,
@@ -80,7 +104,7 @@ def render_fill_animation(
     t_max = float(np.nanmax(result.fill_time_s))
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
-    frames_t = np.linspace(t_max / num_frames, t_max, num_frames)
+    frames_t = fill_frame_times(result, num_frames)
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -697,7 +721,7 @@ def export_frames(
     t_max = float(np.nanmax(result.fill_time_s))
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
-    frames_t = np.linspace(t_max / num_frames, t_max, num_frames)
+    frames_t = fill_frame_times(result, num_frames)
     norm = mcolors.Normalize(vmin=0, vmax=t_max)
     rgba_full = plt.get_cmap(cmap)(norm(result.fill_time_s))
 

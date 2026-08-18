@@ -14,8 +14,10 @@ from pathlib import Path
 
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core import (
+    CONTROLS_HEIGHT_PX,
     DirectGateConfig,
     FilmGate2Config,
     FilmGateConfig,
@@ -25,10 +27,13 @@ from core import (
     MultilayerHeleShawSolver,
     ProfilePlateConfig,
     build_direct_gate_geometry,
+    build_fill_player_html,
     build_film_gate2_geometry,
     build_film_gate_geometry,
     build_profile_gate_geometry,
     export_frames,
+    fill_frame_fractions,
+    fill_frame_times,
     geometry_from_image,
     render_3d_fill_time,
     render_3d_pressure,
@@ -1257,6 +1262,14 @@ if do_run:
         # 各フレームの PNG 連番も書き出す。GIF と同じ ZIP に frames/ で同梱して、
         # ユーザーが GIF とフレーム画像を 1 ダウンロードで両取りできるようにする。
         _frame_paths = export_frames(result, _tmp_dir / "frames", num_frames=num_frames)
+        # スクラバ用プレイヤーの HTML はここで一度だけ組む。フレーム PNG を
+        # data URI で埋め込むので、後段の再生・シーク操作はサーバに戻らない。
+        _player_html = build_fill_player_html(
+            _frame_paths,
+            fill_frame_times(result, num_frames),
+            fill_frame_fractions(result, num_frames),
+            fps=8,
+        )
         _press_path = render_pressure_map(result, _tmp_dir / "pressure.png")
         _weld_path = render_weldlines(result, _tmp_dir / "weld.png")
         _skin_path: Path | None = None
@@ -1310,6 +1323,7 @@ if do_run:
         st.session_state["mfs_num_frames"] = num_frames
         st.session_state["mfs_tmp_dir"] = _tmp_dir
         st.session_state["mfs_gif_path"] = _gif_path
+        st.session_state["mfs_player_html"] = _player_html
         st.session_state["mfs_press_path"] = _press_path
         st.session_state["mfs_weld_path"] = _weld_path
         st.session_state["mfs_skin_path"] = _skin_path
@@ -1328,6 +1342,7 @@ if "mfs_result" in st.session_state:
     multilayer_on = st.session_state.get("mfs_multilayer_on", False)
     num_frames = st.session_state["mfs_num_frames"]
     gif_path = st.session_state["mfs_gif_path"]
+    player_html = st.session_state.get("mfs_player_html")
     press_path = st.session_state["mfs_press_path"]
     weld_path = st.session_state["mfs_weld_path"]
     skin_path = st.session_state["mfs_skin_path"]
@@ -1355,7 +1370,16 @@ if "mfs_result" in st.session_state:
                 )
 
         st.markdown("**充填先端アニメーション**")
-        st.image(str(gif_path))
+        if player_html:
+            # フレーム PNG は 700x500 (figsize 7x5 @ dpi100)。列幅に合わせて
+            # 横いっぱいに伸びるので、その比率ぶんの高さ + 操作列を確保する。
+            components.html(
+                player_html,
+                height=int(700 * (5 / 7)) + CONTROLS_HEIGHT_PX,
+                scrolling=False,
+            )
+        else:
+            st.image(str(gif_path))
         st.download_button(
             "⬇ GIF + フレーム画像をダウンロード",
             data=_zip_bytes,

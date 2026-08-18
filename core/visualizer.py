@@ -213,8 +213,15 @@ def _unfilled_overlay(result: FlowResult, filled: np.ndarray) -> np.ndarray:
 
 
 def fill_time_max(result: FlowResult) -> float:
-    """Total fill time [s] used as the shared color/axis scale."""
-    t_max = float(np.nanmax(result.fill_time_s))
+    """Total fill time [s] used as the shared color/axis scale.
+
+    A part where nothing beyond the gates fills leaves a field of zeros. The
+    axis then comes from the reported total fill time, not from a hard-coded
+    second: two different numbers for the same run is worse than a coarse one.
+    """
+    t_max = float(np.nanmax(result.fill_time_s)) if np.isfinite(result.fill_time_s).any() else 0.0
+    if not np.isfinite(t_max) or t_max <= 0:
+        t_max = float(result.total_fill_time_s)
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
     return t_max

@@ -17,7 +17,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from core import (
-    CONTROLS_HEIGHT_PX,
     DirectGateConfig,
     FilmGate2Config,
     FilmGateConfig,
@@ -34,6 +33,7 @@ from core import (
     export_frames,
     fill_frame_fractions,
     fill_frame_times,
+    fill_player_height_px,
     geometry_from_image,
     render_3d_fill_time,
     render_3d_pressure,
@@ -1324,6 +1324,7 @@ if do_run:
         st.session_state["mfs_tmp_dir"] = _tmp_dir
         st.session_state["mfs_gif_path"] = _gif_path
         st.session_state["mfs_player_html"] = _player_html
+        st.session_state["mfs_player_height"] = fill_player_height_px(_frame_paths)
         st.session_state["mfs_press_path"] = _press_path
         st.session_state["mfs_weld_path"] = _weld_path
         st.session_state["mfs_skin_path"] = _skin_path
@@ -1343,6 +1344,7 @@ if "mfs_result" in st.session_state:
     num_frames = st.session_state["mfs_num_frames"]
     gif_path = st.session_state["mfs_gif_path"]
     player_html = st.session_state.get("mfs_player_html")
+    player_height = st.session_state.get("mfs_player_height")
     press_path = st.session_state["mfs_press_path"]
     weld_path = st.session_state["mfs_weld_path"]
     skin_path = st.session_state["mfs_skin_path"]
@@ -1371,13 +1373,10 @@ if "mfs_result" in st.session_state:
 
         st.markdown("**充填先端アニメーション**")
         if player_html:
-            # フレーム PNG は 700x500 (figsize 7x5 @ dpi100)。列幅に合わせて
-            # 横いっぱいに伸びるので、その比率ぶんの高さ + 操作列を確保する。
-            components.html(
-                player_html,
-                height=int(700 * (5 / 7)) + CONTROLS_HEIGHT_PX,
-                scrolling=False,
-            )
+            # 高さはフレーム PNG の実寸から導出する。プレイヤー側が画像を
+            # ネイティブ幅で頭打ちにするので、列がどれだけ広くても操作列が
+            # この高さから溢れない（scrolling=False で切れると操作不能になる）。
+            components.html(player_html, height=player_height, scrolling=False)
         else:
             st.image(str(gif_path))
         st.download_button(

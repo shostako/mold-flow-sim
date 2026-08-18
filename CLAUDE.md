@@ -305,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 15 ファイル、合計 **294 テスト** (293 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 16 ファイル、合計 **304 テスト** (303 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -313,6 +313,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_geometry_film_gate2.py` — 33件: 直角台形シルエット / 厚み場のプロファイル（連続性・段差の有無・x非依存性）/ ゲート位置可変 / 2段テーパ / 深ランナー / `resolved_*` フォールバック / バリデーション / solver 統合
 - `test_geometry_profile_gate.py` — 28件: JSON I/O（round-trip、パス付きエラー、未知キー拒否、非オブジェクトのセクション拒否）/ バリデーション / シルエット（ランド・ランプ式・cap 底打ち・アイランド・外壁・対称性 flip・非対称）/ 井戸（フロア深さ・max 合成・体積差分を放射積分と照合）/ **閉形式の体積検算**（直壁最小スペック ±3%）/ グリッドはみ出し拒否 / compression_mask / プレート2層 / solver 統合
+- `test_settings_record.py` — 10件: 形状 config の全フィールドが記録されること（dataclass 自身と突き合わせ）/ `None` が null として残ること / tuple が list になり JSON round-trip すること / **アップロードしたスペックの中身がシリアライズ結果に現れないこと**（キーの有無でなく実際の数値で検証）/ フィンガープリントの同一性・差分検出 / bytes と str の等価 / config 無し（画像入力）/ 型・空文字の拒否
 - `test_version.py` — 5件: `pyproject.toml` と `__version__` の一致 / CHANGELOG に現行版の項目がある / CHANGELOG の版が降順 / `build_label()` が版で始まる / git メタデータ（SHA・日付・dirty フラグ）の反映
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉での short shot 検出、metadata の整合性
@@ -401,5 +402,5 @@ CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上
   - **層別**: `MultilayerHeleShawSolver(num_layers=N, layer_distribution="wall_refined", thermal_coupling=True, ...)`。Cross-WLF 結合 N 層モデル。スライダーで `num_layers` (3..9、既定 7) / `layer_distribution` (`wall_refined` 既定 / `uniform`) / `max_iterations` (1..20、既定 12) / `convergence_tol` / `solidification_temperature_fraction` を出す。**剪断発熱補正 (段階1)** はチェックボックス `shear_heating_enabled` (極薄向け既定 ON)。
   - CLI 側は `_solve_and_export(multilayer=True, num_layers=..., layer_distribution=..., shear_heating_enabled=..., ...)` で明示。`skin_layer=True` と `multilayer=True` の同時指定は `ValueError`。`FilmGate_PP_multilayer_5L` が層別の参照ケース、`FilmGate_PP_multilayer_5L_shear` が剪断発熱 ON の比較ケース (高 V、N=7、極薄)。
   - 結果ペインに「層別プロファイル (Multi-layer N=...)」expander が現れ、温度グリッド / 粘度グリッド / 短ショットマップを表示、各 PNG ダウンロード + ZIP exports に同梱。**剪断発熱メタデータ** (ΔT_max / ΔT_mean / Brinkman 数 max & mean、信号灯 🟢/🟡/🔴) は expander 直下のキャプションに出る。
-- **結果 ZIP の中身**: 「⬇ GIF + フレーム画像をダウンロード」は `fill.gif` / 各マップ PNG / `frames/` の連番 PNG / `metadata.json` に加えて **`player.html`** を含む。UI に埋め込んでいるのと同じプレイヤーを `wrap_standalone_html()` で完全な HTML 文書に包んだもので、ダブルクリックすれば追加ソフト無しでコマ送りできる。**フラグメントをそのまま `.html` として出すな** — `<meta charset="utf-8">` が無いと `file://` で開いたブラウザが CP932 等にフォールバックして日本語ラベルが化ける（`tests/test_fill_player.py` が charset の位置を検証している）。同梱で ZIP はおよそ 2 倍になる（base64 は 4/3 に膨らみ、PNG は圧縮済みで deflate が効かない）。
+- **結果 ZIP の中身**: 「⬇ GIF + フレーム画像をダウンロード」は `fill.gif` / 各マップ PNG / `frames/` の連番 PNG / `metadata.json`（解析結果）/ **`settings.json`（入力設定）** に加えて **`player.html`** を含む。`settings.json` は形状 config の全フィールド・材料・射出条件・壁面冷却・圧縮・出力・版を持つ（`core/settings_record.py`）。**アップロードしたスペック JSON と入力画像は名前と SHA-256 だけを記録し、中身は載せない** — ZIP は人に渡す前提なので、実図面由来の寸法を同梱しない。UI に埋め込んでいるのと同じプレイヤーを `wrap_standalone_html()` で完全な HTML 文書に包んだもので、ダブルクリックすれば追加ソフト無しでコマ送りできる。**フラグメントをそのまま `.html` として出すな** — `<meta charset="utf-8">` が無いと `file://` で開いたブラウザが CP932 等にフォールバックして日本語ラベルが化ける（`tests/test_fill_player.py` が charset の位置を検証している）。同梱で ZIP はおよそ 2 倍になる（base64 は 4/3 に膨らみ、PNG は圧縮済みで deflate が効かない）。
 - **剪断発熱補正 (viscous dissipation, 段階1)**: 層別モード専用。`ΔT_shear,k = (η_k·γ̇_k²)·min(t_arr, τ_thermal)/(ρ·cp)`、`τ_thermal = h²/(π²·α)`。fixed-point ループで前イテレーションの `η_k` から ΔT_shear を計算 → Neumann 温度に加算 → Cross-WLF で η 再評価。負のフィードバック (T↑ → η↓ → 発熱↓) なので発散しにくい。**Brinkman 数 `Br = η·γ̇²·h²/(k·ΔT_ref)` は補正 OFF でも常に計算**してメタデータに出すので、必要性を事前判定できる。Br>2 は段階2 (1D FDM 陰解法) が本来必要なシグナル。材料 DB 拡張: `specific_heat_J_kgK` 追加 (8 樹脂)、熱伝導率は `k = α·ρ·cp` で派生。

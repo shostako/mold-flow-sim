@@ -76,7 +76,9 @@ def test_the_time_scale_comes_from_the_flowing_tau_not_the_frozen_one(frozen_run
     ratio asserted here.
     """
     md = frozen_run.metadata
-    assert md["tau_max"] / md["tau_max_flow"] > 10.0
+    # the cavity-wide solve, which the frozen cells dominate, against the
+    # re-solve over the cells that fill
+    assert md["tau_max_cavity"] / md["tau_max_flow"] > 10.0
     expected = md["T_fill_baseline_s"] * md["tau_max_flow"] / md["tau_max_baseline"]
     assert frozen_run.total_fill_time_s == pytest.approx(expected, rel=1e-9)
 
@@ -321,10 +323,25 @@ def test_defect_diagnostics_ignore_material_that_never_fills():
     dead = r.unfillable_mask
     assert dead is not None and dead.sum() > 10
 
-    raw_traps = solver._compute_air_traps(r.tau)
-    raw_weld = solver._compute_weld_score(r.tau)
-    assert (raw_traps & dead).any(), "geometry no longer plants a false air trap"
-    assert ((raw_weld > 0.0) & dead).any(), "geometry no longer plants a false weld"
+    # The solved field has no value at all on dead cells, so the diagnostics
+    # cannot see them. Proven not vacuous by feeding the same detector a field
+    # that *does* carry the frozen cells' tau: it fires inside the pocket.
+    assert np.all(np.isnan(r.tau[dead]))
+    # a bowl rather than a plateau: the weld heuristic needs neighbours that
+    # are strictly smaller, which a flat block of equal values never gives
+    yy, xx = np.mgrid[: dead.shape[0], : dead.shape[1]]
+    cy, cx = (np.mean(np.where(dead)[0]), np.mean(np.where(dead)[1]))
+    # the peak is nudged off the cell centers: a bowl centered exactly between
+    # four cells leaves them tied, and the heuristic counts strictly-smaller
+    # neighbours
+    bowl = (
+        1e3
+        * float(np.nanmax(r.tau[~dead]))
+        / (1.0 + (yy - cy - 0.37) ** 2 + 1.3 * (xx - cx - 0.11) ** 2)
+    )
+    spiked = np.where(dead, bowl, np.nan_to_num(r.tau))
+    assert (solver._compute_air_traps(spiked) & dead).any()
+    assert ((solver._compute_weld_score(spiked) > 0.0) & dead).any()
 
     assert not (r.air_traps & dead).any()
     assert not ((r.weld_score > 0.0) & dead).any()
@@ -388,3 +405,61 @@ def test_freezing_everything_mid_iteration_does_not_crash(max_iterations):
     assert r.metadata["no_flow"] is True
     assert r.total_fill_time_s == pytest.approx(r.metadata["T_fill_baseline_s"], rel=1e-9)
     assert r.metadata["skin_iterations"] <= max_iterations
+
+
+def _sealed_strip():
+    """Strip cut in two by a band thin enough to freeze shut."""
+    return _strip(np.concatenate([np.full(20, 2.0), np.full(6, 0.04), np.full(20, 2.0)]))
+
+
+def test_the_live_region_is_re_solved_without_the_dead_load():
+    """The first solve pushes the dead region's volume through the live cells.
+
+    Every cavity cell contributes a unit source, and a frozen cell still
+    conducts through the numerical floor -- so the volume behind the frozen
+    band is driven through the cells upstream of it, inflating their tau by
+    material that never fills. Measured at 3.3x on this strip.
+    """
+    r = _solve(_sealed_strip())
+    live = r.geometry.mask & ~r.unfillable_mask
+
+    # what the live region looks like when it is the whole problem
+    alone = _strip(r.geometry.thickness_mm[0].copy())
+    alone.mask = live.copy()
+    reference = _solve(alone)
+
+    ours = float(np.nanmax(r.tau[live]))
+    theirs = float(np.nanmax(reference.tau[live]))
+    # Not equal: the reference runs its own skin iteration on the smaller
+    # domain, so its arrival times -- and the skin they grow -- differ a little.
+    # The point is the order of magnitude: carrying the dead load put this 3.3x
+    # above the reference, which no amount of skin bookkeeping accounts for.
+    assert abs(ours / theirs - 1.0) < 0.25, "the live field still carries the dead load"
+
+
+def test_the_baseline_time_counts_only_the_volume_that_fills():
+    """Melt does not spend time on volume it never occupies."""
+    r = _solve(_sealed_strip())
+    live = r.geometry.mask & ~r.unfillable_mask
+    thickness = r.geometry.thickness_mm
+    q_cm3s = 50.0
+    live_cm3 = float(thickness[live].sum()) * r.geometry.cell_size_mm**2 / 1000.0
+    whole_cm3 = r.geometry.volume_cm3()
+    assert live_cm3 < whole_cm3 * 0.9  # the case is worth testing
+    assert r.metadata["T_fill_baseline_s"] == pytest.approx(live_cm3 / q_cm3s, rel=1e-9)
+
+
+def test_the_inflation_compares_two_states_of_the_same_region():
+    """Freezing slowed *the region that still flows*; both references live there.
+
+    Comparing a skin-carved live domain against a cavity-wide open reference
+    would fold the geometry change into a number that is supposed to measure
+    the skin.
+    """
+    r = _solve(_sealed_strip())
+    md = r.metadata
+    assert md["T_fill_inflation"] == pytest.approx(
+        md["tau_max_flow"] / md["tau_max_baseline"], rel=1e-9
+    )
+    # the cavity-wide solve is orders away; it must not be what fed the ratio
+    assert md["tau_max_cavity"] / md["tau_max_flow"] > 100.0

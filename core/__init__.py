@@ -1,6 +1,10 @@
 """mold-flow-sim core package."""
 
-from .fill_player import CONTROLS_HEIGHT_PX, build_fill_player_html
+from .fill_player import (
+    CONTROLS_HEIGHT_PX,
+    build_fill_player_html,
+    fill_player_height_px,
+)
 from .geometry import (
     DirectGateConfig,
     FilmGate2Config,
@@ -75,6 +79,7 @@ __all__ = [
     "fill_frame_fractions",
     "build_fill_player_html",
     "CONTROLS_HEIGHT_PX",
+    "fill_player_height_px",
     "render_3d_thickness_map",
     "render_3d_fill_time",
     "render_3d_pressure",

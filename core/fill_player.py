@@ -22,6 +22,8 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from PIL import Image
+
 # Vertical space the controls occupy under the image [px]. Callers sizing the
 # component (``st.components.v1.html(..., height=...)``) add this to the
 # image height so the controls are never clipped.
@@ -30,6 +32,29 @@ CONTROLS_HEIGHT_PX = 104
 
 def _data_uri(path: Path) -> str:
     return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _native_size(path: str | Path) -> tuple[int, int]:
+    """Pixel size of a rendered frame PNG."""
+    with Image.open(Path(path)) as im:
+        return int(im.width), int(im.height)
+
+
+def fill_player_height_px(frame_paths: Sequence[str | Path]) -> int:
+    """Component height [px] that always fits the player without clipping.
+
+    ``st.components.v1.html`` takes a fixed height while the iframe width
+    follows the surrounding column, so the height cannot be derived from the
+    image's *rendered* width. The player therefore caps the image at its
+    native width (upscaling a 700x500 matplotlib PNG only blurs it anyway),
+    which bounds the image height by the native height — and that is what
+    this returns, plus the controls. Without the cap a column wider than the
+    native width grows the image past the fixed height and, with
+    ``scrolling=False``, puts the controls out of reach.
+    """
+    if not frame_paths:
+        raise ValueError("frame_paths must not be empty")
+    return _native_size(frame_paths[0])[1] + CONTROLS_HEIGHT_PX
 
 
 def build_fill_player_html(
@@ -67,7 +92,8 @@ def build_fill_player_html(
             "autoplay": bool(autoplay),
         }
     )
-    return _TEMPLATE.replace("__PAYLOAD__", payload)
+    native_w = _native_size(frame_paths[0])[0]
+    return _TEMPLATE.replace("__PAYLOAD__", payload).replace("__MAXW__", str(native_w))
 
 
 _TEMPLATE = """
@@ -76,7 +102,8 @@ _TEMPLATE = """
   body { margin:0; background:transparent;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
   #wrap { display:flex; flex-direction:column; gap:6px; }
-  #stage { width:100%; background:#fff; border-radius:6px; overflow:hidden; line-height:0; }
+  #stage { width:100%; max-width:__MAXW__px; margin:0 auto;
+           background:#fff; border-radius:6px; overflow:hidden; line-height:0; }
   #stage img { width:100%; height:auto; display:block; }
   #bar { display:flex; align-items:center; gap:10px; }
   #seek { flex:1; height:22px; cursor:pointer; accent-color:#2ecc71; }

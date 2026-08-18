@@ -14,8 +14,10 @@ import re
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from core import (
+    CONTROLS_HEIGHT_PX,
     HeleShawSolver,
     MaterialDB,
     build_demo_geometry,
@@ -23,6 +25,7 @@ from core import (
     export_frames,
     fill_frame_fractions,
     fill_frame_times,
+    fill_player_height_px,
 )
 
 
@@ -125,3 +128,40 @@ def test_player_rejects_mismatched_or_empty_inputs(result, tmp_path):
         build_fill_player_html(paths, times[:-1], fills)
     with pytest.raises(ValueError, match="fps"):
         build_fill_player_html(paths, times, fills, fps=0)
+
+
+# --- component sizing (regression: PR #47 review) -------------------------
+
+
+def test_player_caps_the_image_at_its_native_width(result, tmp_path):
+    """A column wider than the PNG must not stretch the image.
+
+    ``st.components.v1.html`` gets a fixed height while the iframe width
+    follows the column. Without the cap, a 900 px column renders the 7:5
+    image 642 px tall, overflowing the fixed height — and with
+    ``scrolling=False`` the controls become unreachable.
+    """
+    paths = export_frames(result, tmp_path / "frames", num_frames=6)
+    with Image.open(paths[0]) as im:
+        native_w, native_h = im.width, im.height
+    html = build_fill_player_html(
+        paths, fill_frame_times(result, 6), fill_frame_fractions(result, 6)
+    )
+    assert f"max-width:{native_w}px" in html
+    assert "__MAXW__" not in html
+    # the cap bounds the image height, so the declared component height fits
+    assert fill_player_height_px(paths) == native_h + CONTROLS_HEIGHT_PX
+
+
+def test_player_height_covers_image_plus_controls(result, tmp_path):
+    paths = export_frames(result, tmp_path / "frames", num_frames=6)
+    with Image.open(paths[0]) as im:
+        native_h = im.height
+    h = fill_player_height_px(paths)
+    assert h > native_h  # controls are not clipped
+    assert h - native_h == CONTROLS_HEIGHT_PX
+
+
+def test_player_height_rejects_empty_input():
+    with pytest.raises(ValueError, match="must not be empty"):
+        fill_player_height_px([])

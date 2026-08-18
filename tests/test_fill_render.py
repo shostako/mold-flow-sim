@@ -15,7 +15,7 @@ import pytest
 from core import HeleShawSolver, MaterialDB, build_demo_geometry, export_frames
 from core.visualizer import (
     FILL_CMAP,
-    ISOCHRONE_LEVELS,
+    _draw_fill_state,
     _draw_isochrones,
     _fill_field_rgb,
     _nearest_extend,
@@ -129,19 +129,65 @@ def test_overlay_distinguishes_outside_from_unfilled_cavity(result):
 
 
 def test_isochrone_levels_are_fixed_to_the_total_fill_time(result):
-    """Levels come from T_fill, not from the current frame.
+    """Levels come from T_fill, so every frame shows the same contour set.
 
     Per-frame levels would make the contours crawl as the front advances,
     which reads as flow that is not there.
     """
     import matplotlib.pyplot as plt
 
-    t_max = fill_time_max(result)
     fig, ax = plt.subplots()
-    early = _draw_isochrones(ax, result, result.fill_time_s <= t_max * 0.4, 8)
-    late = _draw_isochrones(ax, result, result.fill_time_s <= t_max, 8)
-    shared = set(np.round(early.levels, 9)) & set(np.round(late.levels, 9))
-    assert len(shared) == len(early.levels)
+    cs = _draw_isochrones(ax, result, 8)
+    t_max = fill_time_max(result)
+    assert np.all(cs.levels > 0.0)
+    assert np.all(cs.levels < t_max)
+    plt.close(fig)
+
+
+def test_isochrones_are_drawn_once_and_stacked_under_the_overlay(result):
+    """No per-frame contour churn, and the overlay really covers the lines.
+
+    Removing and redrawing the contours each frame needed
+    ``ContourSet.remove()``, which only exists from Matplotlib 3.8 (the
+    package floor is 3.7) and cost one contour pass per frame. Drawing them
+    across the whole cavity *under* the opaque unfilled overlay hides them
+    at the melt front for free.
+
+    Asserted on ``zorder``, not on call order: matplotlib defaults images to
+    0 and contours to 2, so drawing the overlay last is not enough — the
+    first version of this passed a call-order check while the rendered PNG
+    showed isochrones bleeding across the unfilled region.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.contour import ContourSet
+    from matplotlib.image import AxesImage
+
+    fig, ax = plt.subplots()
+    _draw_fill_state(
+        ax,
+        result,
+        _fill_field_rgb(result, FILL_CMAP),
+        result.fill_time_s <= fill_time_max(result) * 0.5,
+        smooth=True,
+        isochrone_levels=8,
+    )
+    images = [c for c in ax.get_children() if isinstance(c, AxesImage)]
+    contours = [c for c in ax.get_children() if isinstance(c, ContourSet)]
+    assert len(images) == 2, "expected the color field and the unfilled overlay"
+    assert len(contours) == 1, "isochrones must be drawn exactly once"
+    field_z, overlay_z = sorted(im.get_zorder() for im in images)
+    assert field_z < contours[0].get_zorder() < overlay_z
+    plt.close(fig)
+
+
+def test_isochrones_cover_the_whole_cavity_not_just_the_filled_part(result):
+    """They are clipped by paint, not by data, so the same set serves all frames."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    early = _draw_isochrones(ax, result, 8)
+    late = _draw_isochrones(ax, result, 8)
+    assert np.array_equal(early.levels, late.levels)
     plt.close(fig)
 
 
@@ -149,17 +195,8 @@ def test_isochrones_can_be_switched_off(result):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()
-    assert _draw_isochrones(ax, result, result.fill_time_s <= fill_time_max(result), 0) is None
-    assert _draw_isochrones(ax, result, result.fill_time_s <= fill_time_max(result), 1) is None
-    plt.close(fig)
-
-
-def test_isochrones_skip_a_frame_with_nothing_filled(result):
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots()
-    nothing = np.zeros_like(result.geometry.mask)
-    assert _draw_isochrones(ax, result, nothing, ISOCHRONE_LEVELS) is None
+    assert _draw_isochrones(ax, result, 0) is None
+    assert _draw_isochrones(ax, result, 1) is None
     plt.close(fig)
 
 

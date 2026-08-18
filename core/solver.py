@@ -258,19 +258,24 @@ class HeleShawSolver:
         return cavity & ~reachable
 
     @staticmethod
-    def _tau_reference(tau: np.ndarray, where: np.ndarray, fallback: float) -> float:
-        """Largest tau among the cells that actually fill.
+    def _tau_reference(tau: np.ndarray, where: np.ndarray) -> float | None:
+        """Largest tau among the cells that actually fill, or None if none do.
 
         The absolute time scale hangs off this: a single frozen cell carries a
         tau orders of magnitude above the rest, and letting it set the scale
         reports a short shot as "it just takes longer" -- squeezing the real
         fill into the bottom of every color bar and frame schedule.
+
+        Returns None when the selection is empty or holds nothing but zeros
+        (the gates, which are pinned at tau = 0). Falling back to the global
+        maximum there would restore exactly the dead-cell tau this exists to
+        keep out, so the caller has to treat "nothing flows" as its own case.
         """
         sel = where & ~np.isnan(tau)
         if not sel.any():
-            return fallback
+            return None
         value = float(np.nanmax(tau[sel]))
-        return value if value > 0 else fallback
+        return value if value > 0 else None
 
     def solve(self, num_frames: int = 24) -> FlowResult:
         if not self.geometry.gates:
@@ -323,7 +328,7 @@ class HeleShawSolver:
         T_fill = T_fill_baseline
         # tau of the slowest cell that still fills. Identical to ``tau_max``
         # until the skin model closes a core somewhere.
-        tau_max_flow = tau_max
+        tau_max_flow: float | None = tau_max
 
         skin_thk_mm: np.ndarray | None = None
         h_core_mm: np.ndarray | None = None
@@ -370,14 +375,15 @@ class HeleShawSolver:
                     & ((h_open - 2.0 * s_mm_new) <= min_core + 1e-9)
                     & (h_open > min_core + 1e-9)
                 )
-                tau_max_flow_new = self._tau_reference(
-                    tau_new, cavity_mask & ~frozen_new, tau_max_new
-                )
+                tau_max_flow_new = self._tau_reference(tau_new, cavity_mask & ~frozen_new)
 
-                # constant-pressure proxy: T_fill grows with the resistance
-                T_fill_new = T_fill_baseline * (
-                    tau_max_flow_new / tau_max_baseline if tau_max_baseline > 0 else 1.0
-                )
+                # constant-pressure proxy: T_fill grows with the resistance.
+                # With nothing flowing there is no resistance to speak of, so
+                # the baseline stands rather than an inflation off a dead cell.
+                if tau_max_flow_new is None or tau_max_baseline <= 0:
+                    T_fill_new = T_fill_baseline
+                else:
+                    T_fill_new = T_fill_baseline * (tau_max_flow_new / tau_max_baseline)
 
                 # convergence check on tau (relative L2 over masked cells)
                 msk_new = cavity_mask & ~np.isnan(tau_new) & ~np.isnan(tau)
@@ -410,10 +416,18 @@ class HeleShawSolver:
         unfillable_mask: np.ndarray | None = None
         if short_shot_mask is not None and short_shot_mask.any():
             unfillable_mask = self._unfillable_cells(short_shot_mask)
-            tau_max_flow = self._tau_reference(tau, cavity_mask & ~unfillable_mask, tau_max)
-            T_fill = T_fill_baseline * (
-                tau_max_flow / tau_max_baseline if tau_max_baseline > 0 else 1.0
-            )
+            tau_max_flow = self._tau_reference(tau, cavity_mask & ~unfillable_mask)
+            if tau_max_flow is None or tau_max_baseline <= 0:
+                T_fill = T_fill_baseline
+            else:
+                T_fill = T_fill_baseline * (tau_max_flow / tau_max_baseline)
+
+        # Nothing beyond the gates flows. Every time here is zero, so the
+        # divisor only has to be positive -- what matters is that the reported
+        # T_fill stays the geometric baseline instead of an inflation read off
+        # material the melt never reaches.
+        no_flow = tau_max_flow is None
+        tau_scale = 1.0 if no_flow else float(tau_max_flow)
 
         # absolute time scaling per cell. Cells that never fill stay NaN: a
         # time would say they arrive eventually, which is the opposite of what
@@ -422,11 +436,11 @@ class HeleShawSolver:
         if unfillable_mask is not None:
             fillable = fillable & ~unfillable_mask
         fill_time_s = np.full_like(tau, np.nan)
-        fill_time_s[fillable] = (tau[fillable] / tau_max_flow) * T_fill
+        fill_time_s[fillable] = (tau[fillable] / tau_scale) * T_fill
 
         # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at last fill
         pressure_norm = np.full_like(tau, np.nan)
-        pressure_norm[fillable] = 1.0 - tau[fillable] / tau_max_flow
+        pressure_norm[fillable] = 1.0 - tau[fillable] / tau_scale
 
         # Weld lines and air traps read tau as "when did melt get here". A cell
         # that never receives melt has no such time -- and its floored core
@@ -479,6 +493,7 @@ class HeleShawSolver:
                         else 0
                     ),
                     "tau_max_flow": tau_max_flow,
+                    "no_flow": no_flow,
                 }
             )
 

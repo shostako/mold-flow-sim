@@ -50,6 +50,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.ndimage as ndi
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
@@ -72,6 +73,10 @@ class FlowResult:
     skin_thickness_mm: np.ndarray | None = None  # s(x,y) [mm]
     core_thickness_mm: np.ndarray | None = None  # h_core(x,y) = h - 2*s [mm]
     short_shot_mask: np.ndarray | None = None  # cells where the two skins met
+    # Cells the melt never reaches: the frozen ones plus whatever they cut off
+    # from every gate. ``fill_time_s`` is NaN there, so no renderer can show
+    # them arriving. None when the skin-layer model is off.
+    unfillable_mask: np.ndarray | None = None
 
 
 @dataclass
@@ -234,6 +239,39 @@ class HeleShawSolver:
             tau_max = 1.0
         return tau, tau_max
 
+    def _unfillable_cells(self, frozen: np.ndarray) -> np.ndarray:
+        """Cells the melt cannot fill: the frozen ones and everything they seal off.
+
+        A cell whose core has closed is a wall, not a slow path. Anything left
+        behind that wall never sees melt either, even though its own core is
+        still open -- so connectivity to a gate, not local thickness, decides.
+        """
+        cavity = self.geometry.mask
+        live = cavity & ~frozen
+        labels, _ = ndi.label(live)
+        gate_labels = {int(labels[iy, ix]) for iy, ix in self.geometry.gates if live[iy, ix]}
+        if not gate_labels:
+            # Every gate froze. Nothing fills; report that rather than dividing
+            # by a tau_max taken over an empty set.
+            return cavity.copy()
+        reachable = np.isin(labels, sorted(gate_labels)) & live
+        return cavity & ~reachable
+
+    @staticmethod
+    def _tau_reference(tau: np.ndarray, where: np.ndarray, fallback: float) -> float:
+        """Largest tau among the cells that actually fill.
+
+        The absolute time scale hangs off this: a single frozen cell carries a
+        tau orders of magnitude above the rest, and letting it set the scale
+        reports a short shot as "it just takes longer" -- squeezing the real
+        fill into the bottom of every color bar and frame schedule.
+        """
+        sel = where & ~np.isnan(tau)
+        if not sel.any():
+            return fallback
+        value = float(np.nanmax(tau[sel]))
+        return value if value > 0 else fallback
+
     def solve(self, num_frames: int = 24) -> FlowResult:
         if not self.geometry.gates:
             raise ValueError("Geometry has no gates")
@@ -283,6 +321,9 @@ class HeleShawSolver:
         tau, tau_max = self._solve_tau_field(S0, dirichlet)
         tau_max_baseline = tau_max
         T_fill = T_fill_baseline
+        # tau of the slowest cell that still fills. Identical to ``tau_max``
+        # until the skin model closes a core somewhere.
+        tau_max_flow = tau_max
 
         skin_thk_mm: np.ndarray | None = None
         h_core_mm: np.ndarray | None = None
@@ -303,7 +344,7 @@ class HeleShawSolver:
                 msk = cavity_mask & ~np.isnan(tau)
                 # arrival time per cell, scaled to current best estimate of T_fill
                 t_arr = np.zeros_like(tau)
-                t_arr[msk] = (tau[msk] / tau_max) * T_fill
+                t_arr[msk] = (tau[msk] / tau_max_flow) * T_fill
 
                 # skin layer thickness: s(t) = c_skin * sqrt(alpha * t) (m → mm)
                 s_m = c_skin * np.sqrt(alpha * np.maximum(t_arr, 0.0))
@@ -321,9 +362,21 @@ class HeleShawSolver:
                 S_new = self._conductance_field(eta, h_core_new)
                 tau_new, tau_max_new = self._solve_tau_field(S_new, dirichlet)
 
+                # Cells whose two skins have met. Their core is pinned at the
+                # numerical floor, so their tau is a stand-in for "closed" and
+                # must not drive the time scale.
+                frozen_new = (
+                    cavity_mask
+                    & ((h_open - 2.0 * s_mm_new) <= min_core + 1e-9)
+                    & (h_open > min_core + 1e-9)
+                )
+                tau_max_flow_new = self._tau_reference(
+                    tau_new, cavity_mask & ~frozen_new, tau_max_new
+                )
+
                 # constant-pressure proxy: T_fill grows with the resistance
                 T_fill_new = T_fill_baseline * (
-                    tau_max_new / tau_max_baseline if tau_max_baseline > 0 else 1.0
+                    tau_max_flow_new / tau_max_baseline if tau_max_baseline > 0 else 1.0
                 )
 
                 # convergence check on tau (relative L2 over masked cells)
@@ -337,6 +390,7 @@ class HeleShawSolver:
 
                 tau = tau_new
                 tau_max = tau_max_new
+                tau_max_flow = tau_max_flow_new
                 T_fill = T_fill_new
                 skin_thk_mm = s_mm_new
                 h_core_mm = h_core_new
@@ -351,14 +405,28 @@ class HeleShawSolver:
                 & (h_open > min_core + 1e-9)  # ignore cells whose open gap is already tiny
             )
 
-        # absolute time scaling per cell
-        msk = ~np.isnan(tau)
-        fill_time_s = np.full_like(tau, np.nan)
-        fill_time_s[msk] = (tau[msk] / tau_max) * T_fill
+        # Which cells actually fill. Frozen cells seal their neighbours off, so
+        # this is a connectivity question, not a per-cell one.
+        unfillable_mask: np.ndarray | None = None
+        if short_shot_mask is not None and short_shot_mask.any():
+            unfillable_mask = self._unfillable_cells(short_shot_mask)
+            tau_max_flow = self._tau_reference(tau, cavity_mask & ~unfillable_mask, tau_max)
+            T_fill = T_fill_baseline * (
+                tau_max_flow / tau_max_baseline if tau_max_baseline > 0 else 1.0
+            )
 
-        # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at far field
+        # absolute time scaling per cell. Cells that never fill stay NaN: a
+        # time would say they arrive eventually, which is the opposite of what
+        # a short shot means.
+        fillable = ~np.isnan(tau)
+        if unfillable_mask is not None:
+            fillable = fillable & ~unfillable_mask
+        fill_time_s = np.full_like(tau, np.nan)
+        fill_time_s[fillable] = (tau[fillable] / tau_max_flow) * T_fill
+
+        # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at last fill
         pressure_norm = np.full_like(tau, np.nan)
-        pressure_norm[msk] = 1.0 - tau[msk] / tau_max
+        pressure_norm[fillable] = 1.0 - tau[fillable] / tau_max_flow
 
         weld_score = self._compute_weld_score(tau)
         air_traps = self._compute_air_traps(tau)
@@ -394,6 +462,15 @@ class HeleShawSolver:
                     "T_fill_inflation": (T_fill / T_fill_baseline if T_fill_baseline > 0 else 1.0),
                     "short_shot_cells": short_count,
                     "short_shot_fraction": short_count / cells_total,
+                    "unfillable_cells": (
+                        int(unfillable_mask.sum()) if unfillable_mask is not None else 0
+                    ),
+                    "sealed_off_cells": (
+                        int(unfillable_mask.sum()) - short_count
+                        if unfillable_mask is not None
+                        else 0
+                    ),
+                    "tau_max_flow": tau_max_flow,
                 }
             )
 
@@ -407,6 +484,7 @@ class HeleShawSolver:
             viscosity_Pa_s=eta,
             geometry=self.geometry,
             metadata=metadata,
+            unfillable_mask=unfillable_mask,
             skin_thickness_mm=skin_thk_mm,
             core_thickness_mm=h_core_mm,
             short_shot_mask=short_shot_mask,

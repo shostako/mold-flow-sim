@@ -440,8 +440,15 @@ def render_pressure_map(
     _draw_geometry(ax, result)
 
     p = result.pressure_norm.copy()
-    rgba = plt.get_cmap(cmap)(np.clip(p, 0.0, 1.0))
+    rgba = plt.get_cmap(cmap)(np.clip(np.nan_to_num(p, nan=0.0), 0.0, 1.0))
     rgba[..., 3] = np.where(g.mask, 1.0, 0.0)
+    # Cells that never fill have no pressure. Left as NaN they take the
+    # colormap's "bad" color, which is transparent -- and the alpha is forced
+    # to 1 right above, so they would come out solid black and read as the
+    # bottom of the pressure scale instead of as empty material.
+    dead = getattr(result, "unfillable_mask", None)
+    if dead is not None:
+        rgba[g.mask & dead] = (*SHORT_SHOT_RGB, 1.0)
     ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
 
     for iy, ix in g.gates:
@@ -485,13 +492,23 @@ def render_weldlines(
     _draw_geometry(ax, result)
 
     masked_t = np.where(g.mask, result.fill_time_s, np.nan)
-    levels = np.linspace(
-        np.nanmin(masked_t[masked_t > 0]) if np.any(masked_t > 0) else 0, np.nanmax(masked_t), 12
-    )
-    cs = ax.contour(
-        masked_t, levels=levels, extent=extent, origin="lower", colors="#2980b9", linewidths=0.7
-    )
-    ax.clabel(cs, inline=True, fontsize=7, fmt="%.2fs")
+    # A severe short shot can leave one distinct fill time (the gate) or none
+    # at all. contour() rejects a flat level list, and losing the weld/air-trap
+    # plot over a decoration would throw away an analysis that ran to the end.
+    finite_t = masked_t[np.isfinite(masked_t)]
+    if finite_t.size and np.unique(finite_t).size >= 2 and min(g.mask.shape) >= 2:
+        t_lo = float(np.min(finite_t[finite_t > 0])) if np.any(finite_t > 0) else 0.0
+        levels = np.linspace(t_lo, float(np.max(finite_t)), 12)
+        if np.unique(levels).size >= 2:
+            cs = ax.contour(
+                masked_t,
+                levels=levels,
+                extent=extent,
+                origin="lower",
+                colors="#2980b9",
+                linewidths=0.7,
+            )
+            ax.clabel(cs, inline=True, fontsize=7, fmt="%.2fs")
 
     # weld lines (red overlay)
     weld = result.weld_score

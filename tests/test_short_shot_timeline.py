@@ -222,3 +222,102 @@ def test_no_short_shot_leaves_the_title_alone():
 
     r = _solve(_strip(np.full(40, 2.0)), skin_growth_constant=0.2)
     assert "short shot" not in _fill_title(r, 0.01, 0.5)
+
+
+# --- downstream of the NaNs --------------------------------------------------
+
+
+def _sealed_plate(n: int = 24):
+    """Plate whose gate is ringed by cells thin enough to freeze shut."""
+    thk = np.full((n, n), 2.0)
+    thk[2:5, 2:5] = 0.04
+    thk[3, 3] = 2.0
+    geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
+    geom.gates = [(3, 3)]
+    return geom
+
+
+def test_the_weld_plot_survives_a_part_that_barely_fills(tmp_path):
+    """One distinct fill time left is still an analysis, not an error.
+
+    A ring of frozen cells around the gate leaves the gate as the only cell
+    with a time. ``contour`` rejects a flat level list, so the renderer used to
+    raise and take a completed run down with it.
+    """
+    from core.visualizer import render_weldlines
+
+    r = _solve(_sealed_plate())
+    finite = r.fill_time_s[np.isfinite(r.fill_time_s)]
+    assert np.unique(finite).size < 2, "geometry no longer reproduces the degenerate case"
+    out = render_weldlines(r, tmp_path / "weld.png")
+    assert out.exists() and out.stat().st_size > 0
+
+
+def _sealed_pocket(n: int = 30):
+    """Plate with a pocket walled off by a frozen ring, gate in a far corner.
+
+    The pocket matters: a dead region that touches the domain border has its
+    tau maximum on the border, where the neighbour scan does not look, so the
+    false defects never appear and a test built on it proves nothing.
+    """
+    thk = np.full((n, n), 2.0)
+    thk[10:20, 10:20] = 0.04
+    thk[12:18, 12:18] = 2.0
+    geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
+    geom.gates = [(2, 2)]
+    return geom
+
+
+def test_defect_diagnostics_ignore_material_that_never_fills():
+    """A frozen cell's tau is huge, which is the exact shape of an air trap.
+
+    Weld lines and air traps answer "when did melt arrive"; where none arrives
+    there is nothing to answer, and a marker there is a defect the part cannot
+    have. The precondition is asserted too: on the raw tau these diagnostics
+    *do* fire inside the dead pocket, so this test can tell the two apart.
+    """
+    geom = _sealed_pocket()
+    solver = HeleShawSolver(
+        geom,
+        MaterialDB()["PP"],
+        melt_temperature_K=523.15,
+        mold_temperature_K=323.15,
+        injection_velocity_mms=200.0,
+        injection_volume_flow_cm3s=50.0,
+        skin_layer_enabled=True,
+        skin_growth_constant=1.5,
+    )
+    r = solver.solve(num_frames=6)
+    dead = r.unfillable_mask
+    assert dead is not None and dead.sum() > 10
+
+    raw_traps = solver._compute_air_traps(r.tau)
+    raw_weld = solver._compute_weld_score(r.tau)
+    assert (raw_traps & dead).any(), "geometry no longer plants a false air trap"
+    assert ((raw_weld > 0.0) & dead).any(), "geometry no longer plants a false weld"
+
+    assert not (r.air_traps & dead).any()
+    assert not ((r.weld_score > 0.0) & dead).any()
+
+
+def test_the_pressure_map_colors_dead_cells_instead_of_leaving_them_black(tmp_path):
+    """NaN through a colormap is the "bad" color, and the renderer forces alpha 1.
+
+    The result reads as the bottom of the pressure scale -- the opposite of
+    "no melt here". Checked on the rendered pixels, because the defect only
+    appears after the alpha is forced.
+    """
+    import matplotlib.pyplot as plt
+    from PIL import Image
+
+    from core.visualizer import SHORT_SHOT_RGB, render_pressure_map
+
+    r = _solve(_sealed_plate())
+    path = render_pressure_map(r, tmp_path / "pressure.png")
+    px = np.asarray(Image.open(path).convert("RGB")).astype(float)
+    short_shot = np.array(SHORT_SHOT_RGB) * 255.0
+    bottom = np.array(plt.get_cmap("magma")(0.0)[:3]) * 255.0
+    n_short = int((np.abs(px - short_shot).max(axis=2) < 6).sum())
+    n_bottom = int((np.abs(px - bottom).max(axis=2) < 6).sum())
+    assert n_short > 1000, "dead cells are not marked"
+    assert n_short > n_bottom, "dead cells still read as lowest pressure"

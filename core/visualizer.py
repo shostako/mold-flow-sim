@@ -16,6 +16,17 @@ from scipy.ndimage import distance_transform_edt
 from .multilayer_solver import MultilayerFlowResult
 from .solver import FlowResult
 
+# Explicit stacking for the fill renderers. matplotlib's defaults would
+# put contours (2) above images (0) whatever the call order, so the
+# unfilled overlay could never hide the isochrones behind the melt front.
+_Z_FIELD = 1
+_Z_ISOCHRONE = 2
+_Z_OVERLAY = 3
+# Above the overlay: the gate marker is bigger than one cell, so at the
+# start of the animation — and for gates sitting on the cavity boundary —
+# the opaque unfilled paint would eat most of it.
+_Z_GATE = 4
+
 
 def _base_extent(result: FlowResult) -> list[float]:
     """Image extent in mm with the gate centroid placed at the origin.
@@ -50,10 +61,19 @@ def _draw_gate_markers(
     color: str = "red",
     edgecolor: str = "white",
     size: int = 8,
+    zorder: float = _Z_GATE,
 ) -> None:
     for iy, ix in result.geometry.gates:
         gx_mm, gy_mm = _gate_xy_mm(result, iy, ix)
-        ax.plot(gx_mm, gy_mm, marker="o", color=color, markersize=size, markeredgecolor=edgecolor)
+        ax.plot(
+            gx_mm,
+            gy_mm,
+            marker="o",
+            color=color,
+            markersize=size,
+            markeredgecolor=edgecolor,
+            zorder=zorder,
+        )
 
 
 def _draw_geometry(ax, result: FlowResult) -> None:
@@ -88,16 +108,12 @@ def _draw_geometry(ax, result: FlowResult) -> None:
 # colorblind-safe map if red/green confusion is a concern.
 FILL_CMAP = "turbo"
 
-# Number of isochrone bands drawn over the fill front. The lines are the
-# quantitative read of the plot; the colors only rank them.
+# Number of isochrone *lines* drawn over the fill front — asking for N puts
+# exactly N lines on the plot, which is what the UI label promises and what a
+# reader counts. The lines are the quantitative read of the plot; the colors
+# only rank them.
 ISOCHRONE_LEVELS = 12
 
-# Explicit stacking for the fill renderers. matplotlib's defaults would
-# put contours (2) above images (0) whatever the call order, so the
-# unfilled overlay could never hide the isochrones behind the melt front.
-_Z_FIELD = 1
-_Z_ISOCHRONE = 2
-_Z_OVERLAY = 3
 
 # ``_draw_geometry`` paints the cavity and its surroundings as a 35 %-opaque
 # gray ramp over the white figure. The fill renderers need those two flat
@@ -228,11 +244,17 @@ def _draw_isochrones(ax, result: FlowResult, n_levels: int):
     unfilled area over these lines afterwards, which hides them exactly at
     the melt front without recomputing anything.
     """
-    if n_levels < 2:
+    if n_levels < 1:
         return None
     g = result.geometry
+    if min(g.mask.shape) < 2:
+        # contour needs a 2x2 neighbourhood. A one-cell-wide cavity (an
+        # uploaded image a single pixel across) solves fine, so raising here
+        # would throw away a finished analysis over a decoration.
+        return None
     t_max = fill_time_max(result)
-    levels = np.linspace(0.0, t_max, n_levels + 1)[1:-1]
+    # n_levels + 2 points, ends dropped: N interior lines for a request of N.
+    levels = np.linspace(0.0, t_max, n_levels + 2)[1:-1]
     field = np.where(g.mask, result.fill_time_s, np.nan)
     if not np.isfinite(field).any():
         return None

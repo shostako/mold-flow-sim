@@ -47,7 +47,7 @@ captures the wall-side freezing front in isolation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import scipy.ndimage as ndi
@@ -239,6 +239,57 @@ class HeleShawSolver:
             tau_max = 1.0
         return tau, tau_max
 
+    def _baseline_fill_time(self, geom: Geometry) -> float:
+        """Skin-free fill time [s] of ``geom`` at constant Q.
+
+        Takes the geometry as an argument because a short shot has two of
+        them: the cavity as drawn, and the part of it the melt can actually
+        reach. The time to fill is the second one's -- melt does not spend
+        time on volume it never occupies.
+        """
+        if self.injection_volume_flow_cm3s is None:
+            base = 1.5
+        else:
+            Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
+            base = geom.volume_cm3() / Q
+        if not self.compression_molding:
+            return base
+        # Effective inflation acting on the whole cavity (Q = const proxy).
+        # ``effective_factor`` is the open-state cavity volume divided by
+        # the as-cast volume. When only the product body inflates
+        # (compression_mask set), the net resistance drop is proportional
+        # to that body's contribution, so the compression-phase speed-up
+        # is diluted accordingly.
+        V_total_mm3 = geom.volume_cm3() * 1000.0
+        if self.compression_stroke_mm is not None:
+            # Stroke mode: ΔV = stroke * A_target (independent of local h).
+            delta_V = float(self.compression_stroke_mm) * geom.compression_area_mm2()
+            effective_factor = 1.0 + (delta_V / max(V_total_mm3, 1e-9))
+        else:
+            # Factor mode (legacy): same expression as before.
+            f_comp = float(geom.compression_volume_fraction())
+            f_comp = max(min(f_comp, 1.0), 0.0)
+            effective_factor = 1.0 + (float(self.compression_factor) - 1.0) * f_comp
+        effective_factor = max(effective_factor, 1e-3)
+        return base * (
+            self.compression_fraction / effective_factor + (1.0 - self.compression_fraction)
+        )
+
+    def _restricted_to(self, live: np.ndarray) -> HeleShawSolver:
+        """A copy of this solver whose cavity is only the cells that fill."""
+        geom = self.geometry
+        sub_geom = Geometry(
+            mask=live.copy(),
+            thickness_mm=geom.thickness_mm.copy(),
+            cell_size_mm=geom.cell_size_mm,
+            gates=[(iy, ix) for iy, ix in geom.gates if live[iy, ix]],
+            label=geom.label,
+            compression_mask=(
+                None if geom.compression_mask is None else geom.compression_mask & live
+            ),
+        )
+        return replace(self, geometry=sub_geom)
+
     def _unfillable_cells(self, frozen: np.ndarray) -> np.ndarray:
         """Cells the melt cannot fill: the frozen ones and everything they seal off.
 
@@ -290,36 +341,8 @@ class HeleShawSolver:
         h_open = self._open_thickness_field()  # mm
         cavity_mask = self.geometry.mask
 
-        # absolute time scaling baseline (skin-layer-free, constant Q)
         V_cm3 = self.geometry.volume_cm3()
-        if self.injection_volume_flow_cm3s is None:
-            T_fill_baseline = 1.5
-        else:
-            Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
-            T_fill_baseline = V_cm3 / Q
-        if self.compression_molding:
-            # Effective inflation acting on the whole cavity (Q = const proxy).
-            # ``effective_factor`` is the open-state cavity volume divided by
-            # the as-cast volume. When only the product body inflates
-            # (compression_mask set), the net resistance drop is proportional
-            # to that body's contribution, so the compression-phase speed-up
-            # is diluted accordingly.
-            V_total_mm3 = self.geometry.volume_cm3() * 1000.0
-            if self.compression_stroke_mm is not None:
-                # Stroke mode: ΔV = stroke * A_target (independent of local h).
-                stroke = float(self.compression_stroke_mm)
-                A_cm_mm2 = self.geometry.compression_area_mm2()
-                delta_V = stroke * A_cm_mm2
-                effective_factor = 1.0 + (delta_V / max(V_total_mm3, 1e-9))
-            else:
-                # Factor mode (legacy): same expression as before.
-                f_comp = float(self.geometry.compression_volume_fraction())
-                f_comp = max(min(f_comp, 1.0), 0.0)
-                effective_factor = 1.0 + (float(self.compression_factor) - 1.0) * f_comp
-            effective_factor = max(effective_factor, 1e-3)
-            T_fill_baseline = T_fill_baseline * (
-                self.compression_fraction / effective_factor + (1.0 - self.compression_fraction)
-            )
+        T_fill_baseline = self._baseline_fill_time(self.geometry)
 
         # baseline solve (no skin) — also serves as the tau_max reference
         S0 = self._conductance_field(eta, h_open)
@@ -420,9 +443,37 @@ class HeleShawSolver:
         # Which cells actually fill. Frozen cells seal their neighbours off, so
         # this is a connectivity question, not a per-cell one.
         unfillable_mask: np.ndarray | None = None
+        tau_max_cavity = tau_max
         if short_shot_mask is not None and short_shot_mask.any():
             unfillable_mask = self._unfillable_cells(short_shot_mask)
-            tau_max_flow = self._tau_reference(tau, cavity_mask & ~unfillable_mask)
+            tau_max_cavity = tau_max  # whole-cavity solve, kept as evidence
+            live = cavity_mask & ~unfillable_mask
+            sub = self._restricted_to(live) if live.any() else None
+            if sub is not None and sub.geometry.gates:
+                # Re-solve on the cells that fill. The first solve ran over the
+                # whole cavity, where a sealed-off region still contributed its
+                # unit source and the frozen band still conducted through the
+                # numerical floor -- so its volume was pushed through the live
+                # cells upstream and inflated their tau (measured 3.3x on a
+                # strip sealed by a frozen band). That flow does not happen:
+                # the melt never goes there.
+                dirichlet_live = np.zeros(self.geometry.shape, dtype=bool)
+                for iy, ix in sub.geometry.gates:
+                    dirichlet_live[iy, ix] = True
+                h_core_live = h_core_mm if h_core_mm is not None else h_open
+                tau, tau_max = sub._solve_tau_field(
+                    sub._conductance_field(eta, h_core_live), dirichlet_live
+                )
+                tau_open, tau_max_open = sub._solve_tau_field(
+                    sub._conductance_field(eta, sub._open_thickness_field()), dirichlet_live
+                )
+                # Both references now live on the same domain, so the ratio is
+                # "how much did freezing slow the region that still flows".
+                T_fill_baseline = sub._baseline_fill_time(sub.geometry)
+                tau_max_baseline = tau_max_open
+                tau_max_flow = self._tau_reference(tau, live)
+            else:
+                tau_max_flow = None
             if tau_max_flow is None or tau_max_baseline <= 0:
                 T_fill = T_fill_baseline
             else:
@@ -499,6 +550,11 @@ class HeleShawSolver:
                         else 0
                     ),
                     "tau_max_flow": tau_max_flow,
+                    # tau of the slowest cell in the cavity-wide solve, frozen
+                    # cells included. Kept because the gap between this and
+                    # tau_max_flow is the size of the error that would land in
+                    # the reported time if the dead cells were left in.
+                    "tau_max_cavity": tau_max_cavity,
                     "no_flow": no_flow,
                 }
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 
@@ -49,6 +50,26 @@ def _plate(**overrides) -> ProfilePlateConfig:
     return ProfilePlateConfig(**base)
 
 
+def _numeric_slots(obj, path=()):
+    """Every numeric leaf in a spec dict, as a path of keys / list indices."""
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        yield path
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _numeric_slots(v, (*path, k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _numeric_slots(v, (*path, i))
+
+
+def _set_at(obj, path, value):
+    for step in path[:-1]:
+        obj = obj[step]
+    obj[path[-1]] = value
+
+
 def _grid(geom):
     """Cell-center coordinates in mm."""
     iy, ix = np.indices(geom.shape)
@@ -85,6 +106,37 @@ def test_from_dict_rejects_unknown_key() -> None:
     d["land"]["depht"] = 0.4  # typo
     with pytest.raises(ValueError, match="depht"):
         GateProfileSpec.from_dict(d)
+
+
+def test_every_numeric_field_rejects_non_finite() -> None:
+    """NaN/Inf must die at the parser, not inside validate.
+
+    Every range check in ``validate`` is a comparison, and every comparison
+    against NaN is False — so a NaN passes *both* sides of a bounds test.
+    Downstream it either poisons the depth field (NaN volume, NaN solve) or,
+    in a mask test, silently drops the feature. This sweeps all numeric
+    fields rather than naming the two that were reported, so a field added
+    later cannot quietly reopen the hole.
+    """
+    base = _weld_spec().to_dict()
+    slots = list(_numeric_slots(base))
+    # land 2 + main_ramp 2 + island (1 + 4 line + 1 + weld 3) + wall 4
+    # + well (2 t_range + 1 hw + 1 depth + 2 floor + 1 angle) + valve 3 + width 1
+    assert len(slots) == 28, slots
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        for path in slots:
+            d = copy.deepcopy(base)
+            _set_at(d, path, bad)
+            with pytest.raises(ValueError, match="finite"):
+                GateProfileSpec.from_dict(d)
+
+
+def test_json_nan_literal_is_rejected() -> None:
+    """json.loads accepts the bare NaN literal — the parser must not."""
+    text = _weld_spec().to_json().replace('"depth": 0.1', '"depth": NaN')
+    assert "NaN" in text
+    with pytest.raises(ValueError, match="finite"):
+        GateProfileSpec.from_json(text)
 
 
 def test_from_dict_rejects_non_mm_units() -> None:

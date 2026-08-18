@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter
+from scipy.ndimage import distance_transform_edt
 
 from .multilayer_solver import MultilayerFlowResult
 from .solver import FlowResult
@@ -42,6 +43,19 @@ def _gate_xy_mm(result: FlowResult, iy: int, ix: int) -> tuple[float, float]:
     )
 
 
+def _draw_gate_markers(
+    ax,
+    result: FlowResult,
+    *,
+    color: str = "red",
+    edgecolor: str = "white",
+    size: int = 8,
+) -> None:
+    for iy, ix in result.geometry.gates:
+        gx_mm, gy_mm = _gate_xy_mm(result, iy, ix)
+        ax.plot(gx_mm, gy_mm, marker="o", color=color, markersize=size, markeredgecolor=edgecolor)
+
+
 def _draw_geometry(ax, result: FlowResult) -> None:
     g = result.geometry
     extent = _base_extent(result)
@@ -57,6 +71,141 @@ def _draw_geometry(ax, result: FlowResult) -> None:
         interpolation="nearest",
         alpha=0.35,
     )
+
+
+# Fill-front rendering defaults.
+#
+# ``turbo`` rather than matplotlib's ``viridis``: the fill-time field is read
+# for the *shape of its isochrones* (where they bunch up = slow flow, where
+# they collide = weld line, where they end = air trap), and a rainbow's hue
+# contrast makes those bands legible where a luminance ramp smooths them away.
+# It also matches what commercial mold-flow packages plot, so a colleague
+# reads the picture without a legend lesson, and it puts red — "look here" —
+# on the last-filled region, which is exactly the risky one. ``turbo`` is the
+# engineered rainbow: unlike ``jet`` its luminance rises monotonically, so it
+# does not paint false banding at cyan and yellow that could be mistaken for
+# real isochrones. Pass ``cmap="viridis"`` to get the old look back, or any
+# colorblind-safe map if red/green confusion is a concern.
+FILL_CMAP = "turbo"
+
+# Number of isochrone bands drawn over the fill front. The lines are the
+# quantitative read of the plot; the colors only rank them.
+ISOCHRONE_LEVELS = 12
+
+# ``_draw_geometry`` paints the cavity and its surroundings as a 35 %-opaque
+# gray ramp over the white figure. The fill renderers need those two flat
+# colors as *opaque* paint instead, so they can lay a smoothly interpolated
+# color field down first and punch the not-yet-filled region back out on top
+# with a crisp, cell-exact overlay. Deriving them here keeps the two paths
+# from drifting apart if the geometry backdrop is ever retuned.
+_GEOM_ALPHA = 0.35
+_GEOM_VMAX = 1.4
+
+
+def _flatten_on_white(rgb: tuple[float, ...], alpha: float) -> tuple[float, float, float]:
+    return tuple(alpha * c + (1.0 - alpha) * 1.0 for c in rgb[:3])
+
+
+def _cavity_backdrop_colors() -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Opaque (outside-cavity, unfilled-cavity) colors matching ``_draw_geometry``."""
+    gray = plt.get_cmap("gray")
+    outside = _flatten_on_white(gray(1.0 / _GEOM_VMAX), _GEOM_ALPHA)
+    cavity = _flatten_on_white(gray(0.0), _GEOM_ALPHA)
+    return outside, cavity
+
+
+def _nearest_extend(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Replace out-of-cavity values with the nearest in-cavity one.
+
+    Bilinear interpolation reads a half cell past the cavity wall. Without
+    this the boundary cells blend toward whatever ``fill_time_s`` happens to
+    hold outside the mask (NaN, or a zero that colors as "filled first"),
+    drawing a dark rim around the part. Extending the field first makes the
+    interpolation see a continuation of the interior instead — the visible
+    edge stays exact because the overlay, not this layer, defines it.
+    """
+    if mask.all():
+        return values
+    idx = distance_transform_edt(~mask, return_distances=False, return_indices=True)
+    return values[tuple(idx)]
+
+
+def _cell_centers_mm(result: FlowResult) -> tuple[np.ndarray, np.ndarray]:
+    """Cell-center coordinates [mm] on the same origin as ``_base_extent``."""
+    g = result.geometry
+    x0, y0 = g.gate_origin_mm()
+    ny, nx = g.mask.shape
+    xs = (np.arange(nx) + 0.5) * g.cell_size_mm - x0
+    ys = (np.arange(ny) + 0.5) * g.cell_size_mm - y0
+    return xs, ys
+
+
+def _fill_field_rgb(result: FlowResult, cmap: str) -> np.ndarray:
+    """Opaque RGBA of the whole fill-time field, safe to interpolate."""
+    g = result.geometry
+    t_max = fill_time_max(result)
+    field = _nearest_extend(np.nan_to_num(result.fill_time_s, nan=t_max), g.mask)
+    rgba = plt.get_cmap(cmap)(mcolors.Normalize(vmin=0.0, vmax=t_max)(field))
+    rgba[..., 3] = 1.0
+    return rgba
+
+
+def _unfilled_overlay(result: FlowResult, filled: np.ndarray) -> np.ndarray:
+    """Cell-exact paint covering everything that has not filled yet."""
+    g = result.geometry
+    outside, cavity = _cavity_backdrop_colors()
+    overlay = np.zeros((*g.mask.shape, 4))
+    overlay[..., :3] = np.asarray(outside)
+    overlay[g.mask] = (*cavity, 1.0)
+    overlay[..., 3] = np.where(g.mask & filled, 0.0, 1.0)
+    return overlay
+
+
+def fill_time_max(result: FlowResult) -> float:
+    """Total fill time [s] used as the shared color/axis scale."""
+    t_max = float(np.nanmax(result.fill_time_s))
+    if not np.isfinite(t_max) or t_max <= 0:
+        t_max = 1.0
+    return t_max
+
+
+def _draw_fill_state(
+    ax,
+    result: FlowResult,
+    rgba_full: np.ndarray,
+    filled: np.ndarray,
+    *,
+    smooth: bool,
+) -> tuple:
+    """Paint one fill state and return the (field, overlay) image artists."""
+    extent = _base_extent(result)
+    field_im = ax.imshow(
+        rgba_full,
+        origin="lower",
+        extent=extent,
+        interpolation="bilinear" if smooth else "nearest",
+    )
+    overlay_im = ax.imshow(
+        _unfilled_overlay(result, filled),
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+    )
+    return field_im, overlay_im
+
+
+def _draw_isochrones(ax, result: FlowResult, filled: np.ndarray, n_levels: int):
+    """Overlay equal-fill-time contours, clipped to what has filled."""
+    if n_levels < 2:
+        return None
+    g = result.geometry
+    t_max = fill_time_max(result)
+    levels = np.linspace(0.0, t_max, n_levels + 1)[1:-1]
+    field = np.where(g.mask & filled, result.fill_time_s, np.nan)
+    if not np.isfinite(field).any():
+        return None
+    xs, ys = _cell_centers_mm(result)
+    return ax.contour(xs, ys, field, levels=levels, colors="black", linewidths=0.45, alpha=0.35)
 
 
 def fill_frame_times(result: FlowResult, num_frames: int) -> np.ndarray:
@@ -88,26 +237,29 @@ def render_fill_animation(
     output_path: str | Path,
     num_frames: int = 30,
     fps: int = 8,
-    cmap: str = "viridis",
+    cmap: str = FILL_CMAP,
     show_progress_bar: bool = True,
+    isochrone_levels: int = ISOCHRONE_LEVELS,
+    smooth: bool = True,
 ) -> Path:
     """Render filling sequence as animated GIF.
 
-    Each frame shows cells whose fill_time <= t_frame, colored by fill_time.
+    Each frame shows cells whose fill_time <= t_frame, colored by fill_time
+    on a scale fixed over the whole animation. ``isochrone_levels`` draws
+    equal-arrival-time contours over the front; ``smooth`` interpolates the
+    color field between cell centers, which is honest here because the
+    fill-time field is continuous (unlike the thickness field, whose steps
+    are real geometry and must stay blocky).
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     g = result.geometry
     extent = _base_extent(result)
-    x0, y0 = g.gate_origin_mm()
-    t_max = float(np.nanmax(result.fill_time_s))
-    if not np.isfinite(t_max) or t_max <= 0:
-        t_max = 1.0
+    t_max = fill_time_max(result)
     frames_t = fill_frame_times(result, num_frames)
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
-    _draw_geometry(ax, result)
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
@@ -115,23 +267,12 @@ def render_fill_animation(
     ax.set_ylabel("y [mm]")
     title_obj = ax.set_title("")
 
-    norm = mcolors.Normalize(vmin=0, vmax=t_max)
-    rgba_full = plt.get_cmap(cmap)(norm(result.fill_time_s))
-    rgba_full[..., 3] = np.where(g.mask, 1.0, 0.0)
+    rgba_full = _fill_field_rgb(result, cmap)
+    nothing = np.zeros_like(g.mask)
+    _, overlay_im = _draw_fill_state(ax, result, rgba_full, nothing, smooth=smooth)
+    contour_set = None
 
-    image_data = np.zeros_like(rgba_full)
-    im = ax.imshow(
-        image_data,
-        origin="lower",
-        extent=extent,
-        interpolation="nearest",
-    )
-
-    # gate markers
-    for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
-        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
-        ax.plot(gx_mm, gy_mm, marker="o", color="red", markersize=8, markeredgecolor="white")
+    _draw_gate_markers(ax, result, color="red", edgecolor="white", size=8)
 
     # progress bar
     if show_progress_bar:
@@ -148,22 +289,25 @@ def render_fill_animation(
     else:
         bar_rect = None
 
+    norm = mcolors.Normalize(vmin=0, vmax=t_max)
     cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("fill time [s]")
 
     def update(frame_idx):
+        nonlocal contour_set
         t = frames_t[frame_idx]
         filled = result.fill_time_s <= t
-        rgba = rgba_full.copy()
-        rgba[..., 3] = np.where(g.mask & filled, 1.0, 0.0)
-        im.set_array(rgba)
+        overlay_im.set_array(_unfilled_overlay(result, filled))
+        if contour_set is not None:
+            contour_set.remove()
+        contour_set = _draw_isochrones(ax, result, filled, isochrone_levels)
         progress = float(filled[g.mask].sum()) / max(int(g.mask.sum()), 1)
         title_obj.set_text(
             f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress * 100:5.1f} %"
         )
         if bar_rect is not None:
             bar_rect.set_width(progress)
-        return [im, title_obj] + ([bar_rect] if bar_rect else [])
+        return [overlay_im, title_obj] + ([bar_rect] if bar_rect else [])
 
     anim = FuncAnimation(fig, update, frames=num_frames, blit=False)
     writer = PillowWriter(fps=fps)
@@ -710,44 +854,42 @@ def export_frames(
     result: FlowResult,
     output_dir: str | Path,
     num_frames: int = 12,
-    cmap: str = "viridis",
+    cmap: str = FILL_CMAP,
+    isochrone_levels: int = ISOCHRONE_LEVELS,
+    smooth: bool = True,
 ) -> list[Path]:
-    """Export individual PNG snapshots of the fill progression."""
+    """Export individual PNG snapshots of the fill progression.
+
+    These PNGs are what the in-app scrubber and the ZIP's ``player.html``
+    show, so they carry their own colorbar: the player has no surrounding
+    chrome to explain what the colors mean.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     g = result.geometry
     extent = _base_extent(result)
-    x0, y0 = g.gate_origin_mm()
-    t_max = float(np.nanmax(result.fill_time_s))
-    if not np.isfinite(t_max) or t_max <= 0:
-        t_max = 1.0
+    t_max = fill_time_max(result)
     frames_t = fill_frame_times(result, num_frames)
-    norm = mcolors.Normalize(vmin=0, vmax=t_max)
-    rgba_full = plt.get_cmap(cmap)(norm(result.fill_time_s))
+    norm = mcolors.Normalize(vmin=0.0, vmax=t_max)
+    rgba_full = _fill_field_rgb(result, cmap)
 
     out_paths: list[Path] = []
     for k, t in enumerate(frames_t):
         fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
-        _draw_geometry(ax, result)
         filled = result.fill_time_s <= t
-        rgba = rgba_full.copy()
-        rgba[..., 3] = np.where(g.mask & filled, 1.0, 0.0)
-        ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
-        for iy, ix in g.gates:
-            ax.plot(
-                (ix + 0.5) * g.cell_size_mm - x0,
-                (iy + 0.5) * g.cell_size_mm - y0,
-                marker="o",
-                color="red",
-                markersize=7,
-                markeredgecolor="white",
-            )
+        _draw_fill_state(ax, result, rgba_full, filled, smooth=smooth)
+        _draw_isochrones(ax, result, filled, isochrone_levels)
+        _draw_gate_markers(ax, result, color="red", edgecolor="white", size=7)
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
         ax.set_aspect("equal")
         ax.set_title(f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%")
         ax.set_xlabel("x [mm]")
         ax.set_ylabel("y [mm]")
+        cbar = fig.colorbar(
+            plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02
+        )
+        cbar.set_label("fill time [s]")
         path = output_dir / f"frame_{k:03d}.png"
         fig.tight_layout()
         fig.savefig(path)

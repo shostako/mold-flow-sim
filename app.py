@@ -47,7 +47,7 @@ from core import (
 )
 from core.geometry import Geometry
 from core.version import build_label
-from core.visualizer import render_layer_grid, render_short_shot_map
+from core.visualizer import ISOCHRONE_LEVELS, render_layer_grid, render_short_shot_map
 
 DEMO_PROFILE_JSON = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
 
@@ -998,6 +998,29 @@ with st.sidebar:
 
     with st.expander("出力", expanded=False):
         num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
+        # 既定の turbo は商用 CAE と同じ虹配色。色相コントラストで等時線が
+        # 読めるのが狙いで、赤=最後に充填=リスク箇所という意味とも一致する。
+        # 赤緑色覚に配慮するときは cividis / viridis を選ぶ。
+        fill_cmap = st.selectbox(
+            "充填アニメの配色",
+            options=["turbo", "jet", "viridis", "cividis"],
+            index=0,
+            format_func=lambda c: {
+                "turbo": "turbo（既定・虹／偽の縞が出ない）",
+                "jet": "jet（従来の商用 CAE と同じ虹）",
+                "viridis": "viridis（知覚均等・色覚配慮）",
+                "cividis": "cividis（色覚配慮を最優先）",
+            }[c],
+            help="虹系は等時線の形が読みやすく、viridis / cividis は量の大小比較と色覚配慮に向く。",
+        )
+        iso_levels = st.slider(
+            "等時線の本数",
+            0,
+            24,
+            ISOCHRONE_LEVELS,
+            help="同時に充填される位置を結んだ線。線が詰まる=流れが遅い、"
+            "ぶつかる=ウェルド、途切れた先=最後に充填。0 で非表示。",
+        )
 
     # Version / build label.
     # Rendered here (end of the sidebar) rather than at the end of the script
@@ -1258,11 +1281,22 @@ if do_run:
         # rerun が走っても再生成しないよう、すべて session_state に置く。
         _tmp_dir = Path(tempfile.mkdtemp())
         _gif_path = render_fill_animation(
-            result, _tmp_dir / "fill.gif", num_frames=num_frames, fps=8
+            result,
+            _tmp_dir / "fill.gif",
+            num_frames=num_frames,
+            fps=8,
+            cmap=fill_cmap,
+            isochrone_levels=iso_levels,
         )
         # 各フレームの PNG 連番も書き出す。GIF と同じ ZIP に frames/ で同梱して、
         # ユーザーが GIF とフレーム画像を 1 ダウンロードで両取りできるようにする。
-        _frame_paths = export_frames(result, _tmp_dir / "frames", num_frames=num_frames)
+        _frame_paths = export_frames(
+            result,
+            _tmp_dir / "frames",
+            num_frames=num_frames,
+            cmap=fill_cmap,
+            isochrone_levels=iso_levels,
+        )
         # スクラバ用プレイヤーの HTML はここで一度だけ組む。フレーム PNG を
         # data URI で埋め込むので、後段の再生・シーク操作はサーバに戻らない。
         _player_html = build_fill_player_html(

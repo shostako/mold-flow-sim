@@ -92,6 +92,13 @@ FILL_CMAP = "turbo"
 # quantitative read of the plot; the colors only rank them.
 ISOCHRONE_LEVELS = 12
 
+# Explicit stacking for the fill renderers. matplotlib's defaults would
+# put contours (2) above images (0) whatever the call order, so the
+# unfilled overlay could never hide the isochrones behind the melt front.
+_Z_FIELD = 1
+_Z_ISOCHRONE = 2
+_Z_OVERLAY = 3
+
 # ``_draw_geometry`` paints the cavity and its surroundings as a 35 %-opaque
 # gray ramp over the white figure. The fill renderers need those two flat
 # colors as *opaque* paint instead, so they can lay a smoothly interpolated
@@ -176,36 +183,70 @@ def _draw_fill_state(
     filled: np.ndarray,
     *,
     smooth: bool,
-) -> tuple:
-    """Paint one fill state and return the (field, overlay) image artists."""
+    isochrone_levels: int = ISOCHRONE_LEVELS,
+):
+    """Paint one fill state and return the overlay artist that defines it.
+
+    Draw order is the whole point: the color field and the isochrones are
+    drawn for the *entire* cavity, then the not-yet-filled region is painted
+    over both with an opaque, cell-exact overlay. The contours therefore need
+    no per-frame clipping — advancing the front simply uncovers more of a
+    picture that was already there. That keeps the levels identical in every
+    frame (recomputing them per frame makes the contours crawl, which reads
+    as flow that is not happening) and costs one contour pass per render
+    instead of one per frame.
+
+    The stacking is set with explicit ``zorder``, not with call order:
+    matplotlib gives ``imshow`` a default ``zorder`` of 0 and ``contour`` a
+    default of 2, so painting the overlay last still leaves the contours
+    drawn on top of it — isochrones bleed across the unfilled region and the
+    melt front stops being the boundary of the picture.
+    """
     extent = _base_extent(result)
-    field_im = ax.imshow(
+    ax.imshow(
         rgba_full,
         origin="lower",
         extent=extent,
         interpolation="bilinear" if smooth else "nearest",
+        zorder=_Z_FIELD,
     )
+    _draw_isochrones(ax, result, isochrone_levels)
     overlay_im = ax.imshow(
         _unfilled_overlay(result, filled),
         origin="lower",
         extent=extent,
         interpolation="nearest",
+        zorder=_Z_OVERLAY,
     )
-    return field_im, overlay_im
+    return overlay_im
 
 
-def _draw_isochrones(ax, result: FlowResult, filled: np.ndarray, n_levels: int):
-    """Overlay equal-fill-time contours, clipped to what has filled."""
+def _draw_isochrones(ax, result: FlowResult, n_levels: int):
+    """Overlay equal-fill-time contours across the whole cavity.
+
+    Not clipped to the filled region on purpose: the caller paints the
+    unfilled area over these lines afterwards, which hides them exactly at
+    the melt front without recomputing anything.
+    """
     if n_levels < 2:
         return None
     g = result.geometry
     t_max = fill_time_max(result)
     levels = np.linspace(0.0, t_max, n_levels + 1)[1:-1]
-    field = np.where(g.mask & filled, result.fill_time_s, np.nan)
+    field = np.where(g.mask, result.fill_time_s, np.nan)
     if not np.isfinite(field).any():
         return None
     xs, ys = _cell_centers_mm(result)
-    return ax.contour(xs, ys, field, levels=levels, colors="black", linewidths=0.45, alpha=0.35)
+    return ax.contour(
+        xs,
+        ys,
+        field,
+        levels=levels,
+        colors="black",
+        linewidths=0.45,
+        alpha=0.35,
+        zorder=_Z_ISOCHRONE,
+    )
 
 
 def fill_frame_times(result: FlowResult, num_frames: int) -> np.ndarray:
@@ -268,9 +309,14 @@ def render_fill_animation(
     title_obj = ax.set_title("")
 
     rgba_full = _fill_field_rgb(result, cmap)
-    nothing = np.zeros_like(g.mask)
-    _, overlay_im = _draw_fill_state(ax, result, rgba_full, nothing, smooth=smooth)
-    contour_set = None
+    overlay_im = _draw_fill_state(
+        ax,
+        result,
+        rgba_full,
+        np.zeros_like(g.mask),
+        smooth=smooth,
+        isochrone_levels=isochrone_levels,
+    )
 
     _draw_gate_markers(ax, result, color="red", edgecolor="white", size=8)
 
@@ -294,13 +340,9 @@ def render_fill_animation(
     cbar.set_label("fill time [s]")
 
     def update(frame_idx):
-        nonlocal contour_set
         t = frames_t[frame_idx]
         filled = result.fill_time_s <= t
         overlay_im.set_array(_unfilled_overlay(result, filled))
-        if contour_set is not None:
-            contour_set.remove()
-        contour_set = _draw_isochrones(ax, result, filled, isochrone_levels)
         progress = float(filled[g.mask].sum()) / max(int(g.mask.sum()), 1)
         title_obj.set_text(
             f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress * 100:5.1f} %"
@@ -877,8 +919,9 @@ def export_frames(
     for k, t in enumerate(frames_t):
         fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
         filled = result.fill_time_s <= t
-        _draw_fill_state(ax, result, rgba_full, filled, smooth=smooth)
-        _draw_isochrones(ax, result, filled, isochrone_levels)
+        _draw_fill_state(
+            ax, result, rgba_full, filled, smooth=smooth, isochrone_levels=isochrone_levels
+        )
         _draw_gate_markers(ax, result, color="red", edgecolor="white", size=7)
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])

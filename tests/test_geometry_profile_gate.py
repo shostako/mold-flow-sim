@@ -242,6 +242,104 @@ def test_island_is_shallower_and_ends_at_end_dist() -> None:
     assert (g.thickness_mm[past] > 2.0).all()
 
 
+def _weld_spec(**weld_overrides) -> GateProfileSpec:
+    """Demo spec plus a welded dam over the downstream half of the island."""
+    d = _demo_spec().to_dict()
+    weld = {"t_range": [6.0, 14.0], "depth": 0.1}
+    weld.update(weld_overrides)
+    d["island"]["weld"] = weld
+    return GateProfileSpec.from_dict(d)
+
+
+def test_island_weld_overrides_depth_inside_band_only() -> None:
+    spec = _weld_spec()
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.5)
+    yy, xx = _grid(g)
+    t = 5.0 + spec.t_max() - yy
+    wa = np.abs(xx - (5.0 + 150.0))
+    tan_isl = math.tan(math.radians(spec.island.angle_deg))
+    # inside the weld band: constant weld depth
+    banded = g.mask & (np.abs(t - 10.0) < 0.3) & (wa < 5.0)
+    assert banded.any()
+    np.testing.assert_allclose(g.thickness_mm[banded], 0.1, rtol=1e-9)
+    # upstream of the band but still on the island: untouched island ramp
+    before = g.mask & (np.abs(t - 4.0) < 0.3) & (wa < 5.0)
+    assert before.any()
+    d_isl = spec.land.depth + tan_isl * (t[before] - spec.land.length)
+    np.testing.assert_allclose(g.thickness_mm[before], d_isl, rtol=1e-9)
+
+
+def test_island_weld_does_not_touch_the_main_ramp() -> None:
+    """At the same t, cells outside the island boundary keep the main ramp."""
+    spec = _weld_spec()
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.5)
+    base = build_profile_gate_geometry(_demo_spec(), _plate(), cell_size_mm=0.5)
+    yy, xx = _grid(g)
+    t = 5.0 + spec.t_max() - yy
+    wa = np.abs(xx - (5.0 + 150.0))
+    # island boundary at t=10 is w=20 → w=30 is main ramp, both before and after
+    outside = g.mask & (np.abs(t - 10.0) < 0.3) & (np.abs(wa - 30.0) < 1.0)
+    assert outside.any()
+    np.testing.assert_allclose(g.thickness_mm[outside], base.thickness_mm[outside], rtol=1e-12)
+    assert (g.thickness_mm[outside] > 0.5).all()
+
+
+def test_island_weld_volume_drop_matches_quadrature() -> None:
+    plate = _plate()
+    base = build_profile_gate_geometry(_demo_spec(), plate, cell_size_mm=0.25)
+    welded = build_profile_gate_geometry(_weld_spec(), plate, cell_size_mm=0.25)
+    removed = (base.volume_cm3() - welded.volume_cm3()) * 1000.0
+    # analytic: 2 * integral over the band of (island depth - weld depth) * half width
+    tan_isl = math.tan(math.radians(2.5))
+    tt = np.linspace(6.0, 14.0, 20001)
+    half_w = 40.0 - 2.5 * (tt - 2.0)
+    depth = 0.4 + tan_isl * (tt - 2.0)
+    expected = np.trapezoid(2.0 * half_w * (depth - 0.1), tt)
+    assert expected == pytest.approx(198.5, rel=1e-3)
+    assert removed == pytest.approx(expected, rel=0.03)
+
+
+def test_island_weld_absent_is_byte_identical_to_legacy() -> None:
+    plate = _plate()
+    a = build_profile_gate_geometry(_demo_spec(), plate, cell_size_mm=0.5)
+    d = _demo_spec().to_dict()
+    assert "weld" not in d["island"]  # omitted, not serialized as null
+    b = build_profile_gate_geometry(GateProfileSpec.from_dict(d), plate, cell_size_mm=0.5)
+    np.testing.assert_array_equal(a.thickness_mm, b.thickness_mm)
+    np.testing.assert_array_equal(a.mask, b.mask)
+
+
+def test_island_weld_json_roundtrip() -> None:
+    spec = _weld_spec()
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again.island is not None and again.island.weld is not None
+    assert again.island.weld.t_range == (6.0, 14.0)
+    assert again.island.weld.depth == 0.1
+
+
+def test_island_weld_validation() -> None:
+    # weld metal can only make the channel shallower
+    with pytest.raises(ValueError, match="weld.depth"):
+        _weld_spec(depth=0.6)
+    with pytest.raises(ValueError, match="weld.depth"):
+        _weld_spec(depth=0.0)
+    # band must lie inside [land.length, end_dist]
+    with pytest.raises(ValueError, match="weld.t_range"):
+        _weld_spec(t_range=[6.0, 15.0])
+    with pytest.raises(ValueError, match="weld.t_range"):
+        _weld_spec(t_range=[1.0, 10.0])
+    with pytest.raises(ValueError, match="weld.t_range"):
+        _weld_spec(t_range=[10.0, 6.0])
+    # typo protection reaches into the nested section
+    d = _demo_spec().to_dict()
+    d["island"]["weld"] = {"t_range": [6.0, 14.0], "depth": 0.1, "dpeth": 0.2}
+    with pytest.raises(ValueError, match="island.weld"):
+        GateProfileSpec.from_dict(d)
+    d["island"]["weld"] = 0.1
+    with pytest.raises(ValueError, match="weld"):
+        GateProfileSpec.from_dict(d)
+
+
 def test_outer_wall_excludes_cells() -> None:
     spec = _demo_spec()
     g = build_profile_gate_geometry(spec, _plate())

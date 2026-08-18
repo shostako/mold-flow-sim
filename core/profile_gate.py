@@ -16,6 +16,10 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    island angle and the island ends at ``end_dist``. The steep (~60°)
    island edge/end walls are approximated as sharp cuts — at the intended
    cell resolution (~1 mm) the horizontal wall extent is about one cell.
+   An optional ``weld`` sub-section models a **welded-in dam**: within
+   ``t_range`` the island depth is overridden by a constant ``depth``
+   (metal deposited on the pocket floor, so ``depth ≤ land.depth``). Its
+   entry/exit steps are sharp cuts like the island's own walls.
 4. **Outer wall** — a straight line in the (t, w) plane beyond which the
    pocket (cavity) ends. For ``t`` before the line's first point the pocket
    spans the full gate width.
@@ -70,12 +74,26 @@ class MainRampSpec:
 
 
 @dataclass(frozen=True)
+class WeldSpec:
+    """Welded-in dam inside the island.
+
+    Weld metal deposited on the island floor over ``t_range``, leaving a
+    constant channel thickness ``depth``. Since it fills the pocket it can
+    only make the channel shallower (``depth ≤ land.depth``).
+    """
+
+    t_range: tuple[float, float]
+    depth: float
+
+
+@dataclass(frozen=True)
 class IslandSpec:
     """Shallow central island (flow restrictor)."""
 
     angle_deg: float
     boundary_line: tuple[tuple[float, float], tuple[float, float]]  # ((t1,w1),(t2,w2))
     end_dist: float
+    weld: WeldSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -238,11 +256,20 @@ class GateProfileSpec:
         island: IslandSpec | None = None
         isl_d = _section(d, "island", required=False)
         if isl_d is not None:
-            _check_unknown(isl_d, {"angle_deg", "boundary_line", "end_dist"}, "island")
+            _check_unknown(isl_d, {"angle_deg", "boundary_line", "end_dist", "weld"}, "island")
+            weld: WeldSpec | None = None
+            weld_d = _section(isl_d, "weld", required=False)
+            if weld_d is not None:
+                _check_unknown(weld_d, {"t_range", "depth"}, "island.weld")
+                weld = WeldSpec(
+                    t_range=_pair(weld_d, "t_range", "island.weld."),
+                    depth=_num(weld_d, "depth", "island.weld."),
+                )
             island = IslandSpec(
                 angle_deg=_num(isl_d, "angle_deg", "island."),
                 boundary_line=_line(isl_d, "boundary_line", "island."),
                 end_dist=_num(isl_d, "end_dist", "island."),
+                weld=weld,
             )
 
         outer_wall_line = _line(d, "outer_wall_line", "")
@@ -325,6 +352,11 @@ class GateProfileSpec:
                 "boundary_line": [list(p) for p in self.island.boundary_line],
                 "end_dist": self.island.end_dist,
             }
+            if self.island.weld is not None:
+                d["island"]["weld"] = {
+                    "t_range": list(self.island.weld.t_range),
+                    "depth": self.island.weld.depth,
+                }
         if self.well is not None:
             d["well"] = {
                 "shape": self.well.shape,
@@ -409,6 +441,24 @@ class GateProfileSpec:
                 raise ValueError(
                     f"island.end_dist ({isl.end_dist}) must be > land.length ({self.land.length})"
                 )
+            if isl.weld is not None:
+                wl, wh = isl.weld.t_range
+                if wh <= wl + _EPS:
+                    raise ValueError(
+                        f"island.weld.t_range must be increasing, got {isl.weld.t_range}"
+                    )
+                if wl < self.land.length - _EPS or wh > isl.end_dist + _EPS:
+                    raise ValueError(
+                        f"island.weld.t_range ({isl.weld.t_range}) must lie within "
+                        f"[land.length ({self.land.length}), island.end_dist ({isl.end_dist})]"
+                    )
+                if isl.weld.depth <= 0:
+                    raise ValueError(f"island.weld.depth must be positive, got {isl.weld.depth}")
+                if isl.weld.depth > self.land.depth + _EPS:
+                    raise ValueError(
+                        f"island.weld.depth ({isl.weld.depth}) must be ≤ land.depth "
+                        f"({self.land.depth}); weld metal fills the pocket, it cannot deepen it"
+                    )
 
         if self.well is not None:
             w = self.well
@@ -613,6 +663,10 @@ def build_profile_gate_geometry(
         w_bound = _line_eval(isl.boundary_line, t, before_value=isl.boundary_line[0][1])
         in_island = (t > land_len) & (t <= isl.end_dist) & (wa <= w_bound) & (wa >= 0)
         d_base = np.where(in_island, land_depth + tan_isl * (t - land_len), d_base)
+        if isl.weld is not None:
+            wt_lo, wt_hi = isl.weld.t_range
+            in_weld = in_island & (t >= wt_lo) & (t <= wt_hi)
+            d_base = np.where(in_weld, isl.weld.depth, d_base)
 
     # --- outer wall (pocket silhouette) ---
     w_wall = _line_eval(spec.outer_wall_line, t, before_value=full_half_width)

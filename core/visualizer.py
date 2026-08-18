@@ -164,23 +164,51 @@ def _cell_centers_mm(result: FlowResult) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _fill_field_rgb(result: FlowResult, cmap: str) -> np.ndarray:
-    """Opaque RGBA of the whole fill-time field, safe to interpolate."""
+    """Opaque RGBA of the whole fill-time field, safe to interpolate.
+
+    The field is extended from the cells that *have* a fill time, not from
+    the cavity mask: cells the melt never reaches carry NaN, and letting the
+    interpolation read them would bleed a late-fill color into the live cells
+    beside them.
+    """
     g = result.geometry
     t_max = fill_time_max(result)
-    field = _nearest_extend(np.nan_to_num(result.fill_time_s, nan=t_max), g.mask)
+    valid = g.mask & np.isfinite(result.fill_time_s)
+    if not valid.any():
+        return np.zeros((*g.mask.shape, 4))
+    field = _nearest_extend(np.nan_to_num(result.fill_time_s, nan=0.0), valid)
     rgba = plt.get_cmap(cmap)(mcolors.Normalize(vmin=0.0, vmax=t_max)(field))
     rgba[..., 3] = 1.0
     return rgba
 
 
+#: Cells the melt never reaches. Read against the two grays of
+#: ``_cavity_backdrop_colors``, this has to say "this does not fill" rather
+#: than "not yet" -- the same red the short-shot map uses.
+SHORT_SHOT_RGB = (0.75, 0.22, 0.17)
+
+
 def _unfilled_overlay(result: FlowResult, filled: np.ndarray) -> np.ndarray:
-    """Cell-exact paint covering everything that has not filled yet."""
+    """Cell-exact paint covering everything that has not filled yet.
+
+    Cells that never fill keep their own color for the whole animation, so a
+    short shot does not read as a region that is merely late.
+    """
     g = result.geometry
     outside, cavity = _cavity_backdrop_colors()
     overlay = np.zeros((*g.mask.shape, 4))
     overlay[..., :3] = np.asarray(outside)
     overlay[g.mask] = (*cavity, 1.0)
-    overlay[..., 3] = np.where(g.mask & filled, 0.0, 1.0)
+    dead = getattr(result, "unfillable_mask", None)
+    revealed = g.mask & filled
+    if dead is not None:
+        overlay[g.mask & dead] = (*SHORT_SHOT_RGB, 1.0)
+        # Never uncover them, whatever ``filled`` says. Today NaN <= t is
+        # False so they would stay covered anyway -- but that is a property of
+        # NaN comparison, not a decision, and it would quietly stop holding if
+        # the fill test ever changed.
+        revealed = revealed & ~dead
+    overlay[..., 3] = np.where(revealed, 0.0, 1.0)
     return overlay
 
 
@@ -190,6 +218,25 @@ def fill_time_max(result: FlowResult) -> float:
     if not np.isfinite(t_max) or t_max <= 0:
         t_max = 1.0
     return t_max
+
+
+def _fill_title(result: FlowResult, t: float, progress: float, *, long: bool = False) -> str:
+    """Frame title. Names the cells that never fill, when there are any.
+
+    Without the count the reader sees "filled = 100.0 %" -- the percentage
+    rounds up long before the last handful of cells, and a short shot is
+    exactly the thing that must not disappear into a rounding.
+    """
+    t_max = fill_time_max(result)
+    if long:
+        head = f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress * 100:5.1f} %"
+    else:
+        head = f"t={t:.3f}s  filled={progress * 100:.1f}%"
+    dead = getattr(result, "unfillable_mask", None)
+    n_dead = int(dead.sum()) if dead is not None else 0
+    if n_dead:
+        head += f"   short shot: {n_dead} cells"
+    return head
 
 
 def _draw_fill_state(
@@ -366,9 +413,7 @@ def render_fill_animation(
         filled = result.fill_time_s <= t
         overlay_im.set_array(_unfilled_overlay(result, filled))
         progress = float(filled[g.mask].sum()) / max(int(g.mask.sum()), 1)
-        title_obj.set_text(
-            f"t = {t:.3f} s  /  T_fill = {t_max:.3f} s   filled = {progress * 100:5.1f} %"
-        )
+        title_obj.set_text(_fill_title(result, t, progress, long=True))
         if bar_rect is not None:
             bar_rect.set_width(progress)
         return [overlay_im, title_obj] + ([bar_rect] if bar_rect else [])
@@ -966,7 +1011,7 @@ def export_frames(
             filled = result.fill_time_s <= t
             overlay_im.set_array(_unfilled_overlay(result, filled))
             title_obj.set_text(
-                f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%"
+                _fill_title(result, t, filled[g.mask].sum() / max(int(g.mask.sum()), 1))
             )
             path = output_dir / f"frame_{k:03d}.png"
             fig.savefig(path)

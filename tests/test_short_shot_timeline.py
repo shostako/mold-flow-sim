@@ -126,13 +126,43 @@ def test_a_frozen_gate_makes_the_whole_cavity_unfillable():
     assert solver._unfillable_cells(frozen)[geom.mask].all()
 
 
-def test_the_tau_reference_falls_back_when_no_cell_is_left():
-    """Reducing over an empty selection would be a NaN, and NaN divides badly."""
+def test_the_tau_reference_reports_when_nothing_flows():
+    """No usable reference must say so, not hand back the global maximum.
+
+    The global maximum in a short shot *is* the dead-cell tau this exists to
+    exclude, so a fallback to it would quietly undo the whole change.
+    """
     solver = HeleShawSolver(_strip(np.full(4, 1.0)), MaterialDB()["PP"])
     tau = np.array([[0.0, 1.0, 2.0, 3.0]])
-    assert solver._tau_reference(tau, np.zeros_like(tau, dtype=bool), 7.0) == 7.0
-    # a selection that only holds zeros is just as unusable as an empty one
-    assert solver._tau_reference(tau, np.array([[True, False, False, False]]), 7.0) == 7.0
+    assert solver._tau_reference(tau, np.zeros_like(tau, dtype=bool)) is None
+    # a selection holding nothing but the gate's zero is just as unusable
+    assert solver._tau_reference(tau, np.array([[True, False, False, False]])) is None
+    assert solver._tau_reference(tau, np.ones_like(tau, dtype=bool)) == 3.0
+
+
+def test_a_part_where_only_the_gate_fills_reports_the_baseline_time():
+    """Nothing flows, so there is no resistance to inflate the time with.
+
+    The old fallback took the global tau_max -- the frozen cells' own tau --
+    and reported a total fill time tens of times the geometric baseline, while
+    the animation independently fell back to a flat 1 s. Two contradictory
+    timelines for a part that does not fill at all.
+    """
+    r = _solve(_sealed_plate())
+    md = r.metadata
+    assert md["no_flow"] is True
+    assert r.total_fill_time_s == pytest.approx(md["T_fill_baseline_s"], rel=1e-9)
+    assert md["T_fill_inflation"] == pytest.approx(1.0, rel=1e-9)
+    finite = r.fill_time_s[np.isfinite(r.fill_time_s)]
+    assert finite.size and np.all(finite == 0.0)
+
+
+def test_the_color_axis_agrees_with_the_reported_time_when_nothing_flows():
+    """One run, one timeline."""
+    from core.visualizer import fill_time_max
+
+    r = _solve(_sealed_plate())
+    assert fill_time_max(r) == pytest.approx(r.total_fill_time_s, rel=1e-9)
 
 
 def test_metadata_separates_frozen_cells_from_the_ones_they_sealed_off():

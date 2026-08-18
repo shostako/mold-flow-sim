@@ -351,3 +351,40 @@ def test_the_pressure_map_colors_dead_cells_instead_of_leaving_them_black(tmp_pa
     n_bottom = int((np.abs(px - bottom).max(axis=2) < 6).sum())
     assert n_short > 1000, "dead cells are not marked"
     assert n_short > n_bottom, "dead cells still read as lowest pressure"
+
+
+def test_every_renderer_reads_the_same_time_axis():
+    """One run, one timeline -- checked across all three consumers.
+
+    The color scale, the titles and the frame schedule each used to derive the
+    axis themselves, so fixing one of them left the others reporting a
+    different total. Asserted together because the defect is the duplication,
+    not any single copy of it.
+    """
+    from core.visualizer import fill_frame_times, fill_time_max
+
+    r = _solve(_sealed_plate())
+    assert fill_time_max(r) == pytest.approx(r.total_fill_time_s, rel=1e-9)
+    assert fill_frame_times(r, 60)[-1] == pytest.approx(r.total_fill_time_s, rel=1e-9)
+    assert fill_frame_times(r, 1)[-1] == pytest.approx(r.total_fill_time_s, rel=1e-9)
+
+
+@pytest.mark.parametrize("max_iterations", [3, 5, 8])
+def test_freezing_everything_mid_iteration_does_not_crash(max_iterations):
+    """The fixed-point loop must survive losing its tau reference.
+
+    Once every cell outside the gate has frozen there is no reference left,
+    and the next pass divided by it -- ``TypeError: unsupported operand
+    type(s) for /: 'float' and 'NoneType'``, on a run that had already
+    produced its answer. Parametrized over the iteration cap because whether
+    the loop took another pass depended on it.
+    """
+    n = 12
+    thk = np.full((n, n), 0.03)
+    thk[3, 3] = 2.0  # the gate stays open, everything else closes
+    geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
+    geom.gates = [(3, 3)]
+    r = _solve(geom, skin_growth_constant=3.0, skin_max_iterations=max_iterations)
+    assert r.metadata["no_flow"] is True
+    assert r.total_fill_time_s == pytest.approx(r.metadata["T_fill_baseline_s"], rel=1e-9)
+    assert r.metadata["skin_iterations"] <= max_iterations

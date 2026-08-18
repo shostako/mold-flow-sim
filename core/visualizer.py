@@ -335,9 +335,10 @@ def fill_frame_times(result: FlowResult, num_frames: int) -> np.ndarray:
     """
     if num_frames < 1:
         raise ValueError(f"num_frames must be >= 1, got {num_frames}")
-    t_max = float(np.nanmax(result.fill_time_s))
-    if not np.isfinite(t_max) or t_max <= 0:
-        t_max = 1.0
+    # Same axis as the color scale and the titles. Computing it here as well
+    # is how a part that does not fill ended up with a 1-second animation over
+    # a 0.023-second headline.
+    t_max = fill_time_max(result)
     return np.linspace(t_max / num_frames, t_max, num_frames)
 
 

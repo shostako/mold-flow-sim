@@ -1,5 +1,6 @@
 """mold-flow-sim core package."""
 
+from .fill_player import CONTROLS_HEIGHT_PX, build_fill_player_html
 from .geometry import (
     DirectGateConfig,
     FilmGate2Config,
@@ -26,6 +27,8 @@ from .profile_gate import (
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
     export_frames,
+    fill_frame_fractions,
+    fill_frame_times,
     render_core_layer_map,
     render_fill_animation,
     render_pressure_map,
@@ -68,6 +71,10 @@ __all__ = [
     "render_skin_layer_map",
     "render_core_layer_map",
     "export_frames",
+    "fill_frame_times",
+    "fill_frame_fractions",
+    "build_fill_player_html",
+    "CONTROLS_HEIGHT_PX",
     "render_3d_thickness_map",
     "render_3d_fill_time",
     "render_3d_pressure",

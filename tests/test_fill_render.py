@@ -16,6 +16,7 @@ from core import HeleShawSolver, MaterialDB, build_demo_geometry, export_frames
 from core.visualizer import (
     FILL_CMAP,
     _draw_fill_state,
+    _draw_gate_markers,
     _draw_isochrones,
     _fill_field_rgb,
     _nearest_extend,
@@ -196,7 +197,8 @@ def test_isochrones_can_be_switched_off(result):
 
     fig, ax = plt.subplots()
     assert _draw_isochrones(ax, result, 0) is None
-    assert _draw_isochrones(ax, result, 1) is None
+    assert _draw_isochrones(ax, result, -1) is None
+    assert _draw_isochrones(ax, result, 1) is not None  # 1 means one line, not none
     plt.close(fig)
 
 
@@ -229,3 +231,83 @@ def test_frames_carry_their_own_colorbar(result, tmp_path):
         w, h = im.width, im.height
     assert w > h  # 7x5 figure plus the colorbar stays landscape
     assert len(paths) == 2
+
+
+# --- Codex review follow-ups ------------------------------------------------
+
+
+@pytest.mark.parametrize("requested", [1, 3, 12, 24])
+def test_isochrone_count_matches_the_request(result, requested):
+    """Asking for N lines puts N lines on the plot.
+
+    The UI labels this "等時線の本数", so an off-by-one here is a lie to the
+    reader — and the earlier guard silently drew nothing for a request of 1.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    cs = _draw_isochrones(ax, result, requested)
+    assert len(cs.levels) == requested
+    plt.close(fig)
+
+
+def test_isochrones_skip_a_cavity_too_narrow_to_contour(result):
+    """A one-cell-wide cavity solves fine; it must not kill the render.
+
+    ``contour`` needs a 2x2 neighbourhood. An uploaded image a single pixel
+    across produces a valid geometry, and throwing away a finished analysis
+    over a decoration would be the wrong trade. The slice keeps a row that
+    actually contains cavity cells — an empty row would hit the all-NaN
+    guard instead and never exercise this one.
+    """
+    import dataclasses
+
+    import matplotlib.pyplot as plt
+
+    g = result.geometry
+    row = int(np.argmax(g.mask.sum(axis=1)))
+    sl = slice(row, row + 1)
+    assert g.mask[sl].any(), "the sliced row must contain cavity cells"
+    thin = dataclasses.replace(
+        result,
+        geometry=dataclasses.replace(g, mask=g.mask[sl], thickness_mm=g.thickness_mm[sl]),
+        fill_time_s=result.fill_time_s[sl],
+    )
+    assert np.isfinite(thin.fill_time_s[thin.geometry.mask]).any(), (
+        "the row must carry finite fill times, or the all-NaN guard fires first"
+    )
+    fig, ax = plt.subplots()
+    assert _draw_isochrones(ax, thin, 12) is None
+    plt.close(fig)
+
+
+def test_gate_marker_sits_above_the_unfilled_overlay(result, tmp_path):
+    """A boundary gate must stay visible in the very first frame.
+
+    The marker is drawn several cells wide, so with matplotlib's default line
+    z-order of 2 the opaque overlay (3) eats everything outside the single
+    filled gate cell — worst exactly when the animation starts.
+
+    Checked without passing ``zorder``: it is the helper's default, so a
+    renderer cannot forget it. An earlier version of this test passed the
+    value in itself and therefore proved nothing about the call sites.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.image import AxesImage
+    from matplotlib.lines import Line2D
+
+    fig, ax = plt.subplots()
+    _draw_fill_state(
+        ax,
+        result,
+        _fill_field_rgb(result, FILL_CMAP),
+        np.zeros_like(result.geometry.mask),
+        smooth=True,
+        isochrone_levels=8,
+    )
+    _draw_gate_markers(ax, result)
+    overlay_z = max(im.get_zorder() for im in ax.get_children() if isinstance(im, AxesImage))
+    markers = [c for c in ax.get_children() if isinstance(c, Line2D) and c.get_marker() == "o"]
+    assert markers, "expected at least one gate marker"
+    assert all(m.get_zorder() > overlay_z for m in markers)
+    plt.close(fig)

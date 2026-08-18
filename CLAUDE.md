@@ -305,7 +305,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 15 ファイル、合計 **286 テスト** (285 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 15 ファイル、合計 **293 テスト** (292 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -319,7 +319,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_multilayer_solver.py` — 42件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / 短ショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認)
 - `test_multilayer_thermal.py` — 22件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証) / **剪断発熱段階1** (shape & 非負、γ̇=0 で ΔT=0、γ̇² スケーリング、t≫τ_thermal で頭打ち、極薄 PP の桁感、shape 不整合検出) / **Brinkman 数** (shape & 非負、γ̇=0 でゼロ、極薄高速で Br>1、k と ΔT の非正検出)
 - `test_visualizer_3d.py` — 12件: block anatomy（**3トレースとも flat-top Mesh3d**、天面=各 cavity セル2三角形＝面数 2×cavity・`intensitymode="cell"`）、天面が全 cavity セルを覆う（面数=2×cavity＝侵食ゼロ・天面 Z 有限正・床 Z=0）、**flat-top が対角境界を塞ぐ**（対角バンドで面数=2×cavity）、頂点がゲート中心座標（セル端の隅）、境界壁が PL〜天面を覆う、`aspectmode='data'` で等倍、天面=面ごと/側壁=頂点ごと intensity で coloraxis 共有、**厚み段差が縦の段差として描かれる**（段差プレートで天面 z が両厚みを保持＋PL非接触の段差壁が立つ）、**天面ホバーが場の値を露出**（fill/pressure で per-vertex customdata が読める）
-- `test_fill_render.py` — 16件: 既定配色が turbo であること / 色スケールが 0..T_fill 固定 / 色の層が完全不透明（アルファに mask を持たせない）/ キャビティ外に NaN が残らない / `_nearest_extend` の3挙動 / **オーバーレイが露出するセルが `mask & filled` と完全一致**（侵食も滲みもゼロ）/ 外側とキャビティ内未充填が別の灰色 / 等時線のレベルが T_fill 固定でフレーム間不変 / 等時線 OFF と空フレーム / 全配色でのレンダリング / フレーム PNG が自前のカラーバーを持つこと
+- `test_fill_render.py` — 23件: 既定配色が turbo であること / 色スケールが 0..T_fill 固定 / 色の層が完全不透明（アルファに mask を持たせない）/ キャビティ外に NaN が残らない / `_nearest_extend` の3挙動 / **オーバーレイが露出するセルが `mask & filled` と完全一致**（侵食も滲みもゼロ）/ 外側とキャビティ内未充填が別の灰色 / 等時線のレベルが T_fill 固定でフレーム間不変 / 等時線 OFF と空フレーム / 全配色でのレンダリング / フレーム PNG が自前のカラーバーを持つこと / **等時線が一度だけ描かれ zorder でオーバーレイの下に入ること**（呼び出し順ではなく zorder で検証。matplotlib は imshow=0 / contour=2 なので、後から呼ぶだけでは隠れない）/ 要求した本数ちょうどが描かれること / 1セル幅キャビティで等時線を諦めること / ゲートマーカーがオーバーレイより上に来ること
 - `test_fill_player.py` — 18件: フレーム時刻の単一ソース契約（GIF・PNG 連番・プレイヤーの三者一致）/ 充填率の単調性と末尾 1.0 / payload の埋め込みとデコード / オフライン自己完結（`http(s)://` を含まない）/ 入力検証 / ネイティブ幅キャップと component 高さの導出 / **単体 HTML 化**（`<meta charset>` が最初の非 ASCII バイトより前、文書完全性、フラグメント同一性、title/note のエスケープ）
 - `test_visualizer_layer.py` — 13件 (1 skip): `render_layer_map` 4 field smoke / 不正 field / 範囲外 layer_idx / thermal_off で field 別動作 / `render_layer_grid` / `render_short_shot_map` (flagged あり/なし、後者は skip 想定可) / `_scalar_layer_field` helper / ζ レンジが metadata に乗ること
 

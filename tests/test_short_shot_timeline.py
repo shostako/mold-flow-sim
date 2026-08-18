@@ -506,3 +506,94 @@ def test_the_default_rate_is_unchanged_on_a_part_that_fills():
     # the baseline, not the total: the skin still inflates the reported time,
     # and folding that in would make this test pass for the wrong reason
     assert r.metadata["T_fill_baseline_s"] == pytest.approx(DEFAULT_FILL_TIME_S, rel=1e-9)
+
+
+# --- the domain and the skin field settle together -----------------------------
+
+
+def _band_sealed(n_dead: int, live_thk: float = 1.0, n_live: int = 20):
+    """Live run of ``n_live`` cells, a band thin enough to close, then dead material.
+
+    The live half is identical whatever ``n_dead`` is, so anything that differs
+    between two of these came out of material the melt never reaches.
+    """
+    return _strip(
+        np.concatenate([np.full(n_live, live_thk), np.full(6, 0.04), np.full(n_dead, live_thk)])
+    )
+
+
+def test_the_live_region_does_not_care_how_much_is_sealed_off_behind_it():
+    """Dead volume must not reach the answer -- not even through the skin field.
+
+    The skin thickness is driven by arrival times, and the arrival times of a
+    cavity that still carries a sealed-off region are set partly by volume that
+    never moves. Solving the skin fixed point once on the full cavity and then
+    re-solving tau on the live part removes the dead cells from the final
+    equation but keeps the core they carved: the same live geometry behind a
+    small dead tail and a large one reported fill times 3.9x apart.
+    """
+    small = _solve(_band_sealed(20))
+    large = _solve(_band_sealed(100))
+    assert small.unfillable_mask is not None and small.unfillable_mask.any()
+    assert large.unfillable_mask is not None and large.unfillable_mask.any()
+
+    shared = 26  # the live run plus the band; past it the two cavities differ
+    live_s = ~small.unfillable_mask[0, :shared]
+    live_l = ~large.unfillable_mask[0, :shared]
+    assert live_s.any()
+    assert np.array_equal(live_s, live_l), "the live cavity itself depends on dead material"
+
+    assert small.total_fill_time_s == pytest.approx(large.total_fill_time_s, rel=1e-9)
+    assert small.core_thickness_mm[0, :shared][live_s] == pytest.approx(
+        large.core_thickness_mm[0, :shared][live_l], rel=1e-9
+    )
+    assert small.fill_time_s[0, :shared][live_s] == pytest.approx(
+        large.fill_time_s[0, :shared][live_l], rel=1e-9
+    )
+
+
+def test_the_reported_run_is_a_fixed_point_of_the_cavity_it_reports():
+    """Hand the live cavity back to a fresh solver and nothing may move.
+
+    That is the whole claim of a short-shot result: *this* is the part that
+    fills, and these are its times. If solving that part on its own gives a
+    different answer, the reported one was still carrying the dead region.
+    """
+    run = _solve(_band_sealed(100))
+    assert run.unfillable_mask is not None and run.unfillable_mask.any()
+    live = run.geometry.mask & ~run.unfillable_mask
+    assert live.sum() >= 2
+
+    reported = Geometry(
+        mask=live.copy(),
+        thickness_mm=run.geometry.thickness_mm.copy(),
+        cell_size_mm=run.geometry.cell_size_mm,
+    )
+    reported.gates = [(iy, ix) for iy, ix in run.geometry.gates if live[iy, ix]]
+    again = _solve(reported)
+
+    assert again.total_fill_time_s == pytest.approx(run.total_fill_time_s, rel=1e-9)
+    assert again.core_thickness_mm[live] == pytest.approx(run.core_thickness_mm[live], rel=1e-9)
+    assert again.fill_time_s[live] == pytest.approx(run.fill_time_s[live], rel=1e-9)
+
+
+def test_the_restricted_solver_keeps_the_rate_it_was_running_at():
+    """The restriction changes the cavity, not the machine.
+
+    With no rate given, one is derived from the geometry -- so a restricted
+    copy left to derive its own would divide the shrunken volume by a rate read
+    off that same shrunken volume, and every short shot would report the
+    default fill time no matter how little of it filled.
+    """
+    geom = _strip(np.full(40, 1.0))
+    solver = HeleShawSolver(geom, MaterialDB()["PP"])  # no injection rate given
+    assert solver.injection_volume_flow_cm3s is None
+    rate = solver._effective_flow_rate_cm3s()
+
+    live = geom.mask.copy()
+    live[0, 20:] = False
+    sub = solver._restricted_to(live)
+    assert sub._effective_flow_rate_cm3s() == pytest.approx(rate, rel=1e-12)
+    assert sub._baseline_fill_time(sub.geometry) == pytest.approx(
+        solver._baseline_fill_time(sub.geometry), rel=1e-12
+    )

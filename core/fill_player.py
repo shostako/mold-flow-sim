@@ -18,6 +18,7 @@ what happened on the first headless check.
 from __future__ import annotations
 
 import base64
+import html
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -198,3 +199,54 @@ _TEMPLATE = """
 })();
 </script>
 """
+
+
+_STANDALONE_TEMPLATE = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  body { padding:16px; box-sizing:border-box; }
+  #page { max-width:1100px; margin:0 auto; }
+  #hd { font:600 14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",
+        "Hiragino Sans","Yu Gothic UI",Meiryo,sans-serif;
+        margin:0 0 10px; opacity:.85; }
+  #hd small { font-weight:400; opacity:.65; margin-left:8px; }
+</style>
+</head>
+<body>
+<div id="page">
+<p id="hd">__HEADING__</p>
+__BODY__
+</div>
+</body>
+</html>
+"""
+
+
+def wrap_standalone_html(body_html: str, *, title: str, note: str | None = None) -> str:
+    """Wrap the embed fragment into a complete document for offline viewing.
+
+    ``build_fill_player_html`` returns a fragment (``<style>`` + markup +
+    ``<script>``) because ``st.components.v1.html`` supplies the document
+    around it. Shipping that fragment as a ``.html`` file needs a real
+    document: without ``<meta charset="utf-8">`` a browser opening it over
+    ``file://`` falls back to the platform's legacy encoding — CP932 on a
+    Japanese Windows box — and the button labels come out as mojibake.
+
+    The wrapper only adds the document shell, a page heading and outer
+    padding; it never edits the fragment, so the in-app player and the
+    downloadable file stay byte-identical where it matters.
+    """
+    if not title:
+        raise ValueError("title must not be empty")
+    heading = html.escape(title)
+    if note:
+        heading += f"<small>{html.escape(note)}</small>"
+    return (
+        _STANDALONE_TEMPLATE.replace("__TITLE__", html.escape(title))
+        .replace("__HEADING__", heading)
+        .replace("__BODY__", body_html)
+    )

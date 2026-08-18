@@ -401,6 +401,12 @@ class HeleShawSolver:
                 skin_thk_mm = s_mm_new
                 h_core_mm = h_core_new
                 skin_iters_done = it + 1
+                if tau_max_flow is None:
+                    # Nothing outside the gates is still open. Another pass
+                    # would divide by this None, and there is nothing left for
+                    # it to change: the arrival times it would compute are the
+                    # input to a field that no longer flows.
+                    break
                 if rel < tol:
                     skin_converged = True
                     break

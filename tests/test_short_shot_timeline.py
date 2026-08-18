@@ -463,3 +463,46 @@ def test_the_inflation_compares_two_states_of_the_same_region():
     )
     # the cavity-wide solve is orders away; it must not be what fed the ratio
     assert md["tau_max_cavity"] / md["tau_max_flow"] > 100.0
+
+
+def test_the_default_rate_scales_with_the_live_volume_too():
+    """No explicit rate still means a rate, not a fixed duration.
+
+    ``injection_volume_flow_cm3s=None`` documents a 1.5 s fill of the cavity as
+    drawn. Read as a duration it hands the same 1.5 s to a part where a tenth
+    of the volume is left -- the live-volume scaling silently stops working on
+    the default path, which is the one every other test avoids by passing a
+    rate explicitly.
+    """
+    from core.solver import DEFAULT_FILL_TIME_S
+
+    geom = _sealed_strip()
+    r = HeleShawSolver(
+        geom,
+        MaterialDB()["PP"],
+        melt_temperature_K=523.15,
+        mold_temperature_K=323.15,
+        injection_velocity_mms=200.0,
+        injection_volume_flow_cm3s=None,
+        skin_layer_enabled=True,
+        skin_growth_constant=1.5,
+    ).solve(num_frames=6)
+    live = geom.mask & ~r.unfillable_mask
+    share = float(geom.thickness_mm[live].sum()) / float(geom.thickness_mm[geom.mask].sum())
+    assert share < 0.9  # the case is worth testing
+    assert r.metadata["T_fill_baseline_s"] == pytest.approx(DEFAULT_FILL_TIME_S * share, rel=1e-9)
+
+
+def test_the_default_rate_is_unchanged_on_a_part_that_fills():
+    """Backward compatibility: no freezing, no restriction, still 1.5 s."""
+    from core.solver import DEFAULT_FILL_TIME_S
+
+    r = _solve(
+        _strip(np.full(20, 2.0)),
+        injection_volume_flow_cm3s=None,
+        skin_growth_constant=0.2,
+    )
+    assert r.unfillable_mask is None
+    # the baseline, not the total: the skin still inflates the reported time,
+    # and folding that in would make this test pass for the wrong reason
+    assert r.metadata["T_fill_baseline_s"] == pytest.approx(DEFAULT_FILL_TIME_S, rel=1e-9)

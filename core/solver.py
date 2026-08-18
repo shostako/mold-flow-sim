@@ -77,6 +77,35 @@ from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 #: Fill time assumed when no injection rate is given, for the cavity as drawn.
 DEFAULT_FILL_TIME_S = 1.5
 
+#: How many times the cavity may be re-solved after shedding cells that never
+#: fill. The domain only ever shrinks, so this is a safety stop, not the
+#: convergence criterion -- in practice one extra pass settles it.
+MAX_DOMAIN_PASSES = 4
+
+
+@dataclass
+class _DomainSolution:
+    """The skin fixed point solved on one candidate cavity.
+
+    A short shot has two cavities: the one that was drawn and the part of it
+    the melt can reach. Which cells belong to the second depends on where the
+    skins close, and where they close depends on the arrival times -- which
+    are solved on a cavity. The two define each other, so each candidate gets
+    its own complete solution and ``solve`` iterates on the domain itself.
+    """
+
+    tau: np.ndarray
+    tau_max: float
+    tau_max_flow: float | None
+    T_fill: float
+    T_fill_baseline: float
+    tau_max_baseline: float
+    skin_thk_mm: np.ndarray | None
+    h_core_mm: np.ndarray | None
+    frozen_mask: np.ndarray | None
+    iterations: int
+    converged: bool
+
 
 def check_gate_reachability(geometry: Geometry) -> None:
     """Reject cavity components that no gate can reach (Issue #58).
@@ -318,10 +347,10 @@ class HeleShawSolver:
         reach. The time to fill is the second one's -- melt does not spend
         time on volume it never occupies.
 
-        Call this on the solver that owns the *full* cavity and pass the
-        restricted geometry in. The flow rate comes from ``self``, and with no
-        rate given it is derived from ``self.geometry`` -- so a restricted
-        solver asking itself would cancel the two and return the default.
+        The rate comes from ``self``. A restricted solver carries the rate
+        pinned by ``_restricted_to``, so it can ask itself; deriving one from
+        its own shrunken volume would cancel against the numerator and hand
+        back the default 1.5 s no matter how little is left.
         """
         base = geom.volume_cm3() / self._effective_flow_rate_cm3s()
         if not self.compression_molding:
@@ -348,7 +377,13 @@ class HeleShawSolver:
         )
 
     def _restricted_to(self, live: np.ndarray) -> HeleShawSolver:
-        """A copy of this solver whose cavity is only the cells that fill."""
+        """A copy of this solver whose cavity is only the cells that fill.
+
+        The injection rate is pinned to the value ``self`` is running at, so
+        the copy is a solver for the same machine on a smaller cavity. Without
+        that, an implicit rate would be re-derived from the shrunken volume
+        and the restriction would quietly cancel itself out.
+        """
         geom = self.geometry
         sub_geom = Geometry(
             mask=live.copy(),
@@ -360,7 +395,11 @@ class HeleShawSolver:
                 None if geom.compression_mask is None else geom.compression_mask & live
             ),
         )
-        return replace(self, geometry=sub_geom)
+        return replace(
+            self,
+            geometry=sub_geom,
+            injection_volume_flow_cm3s=self._effective_flow_rate_cm3s(),
+        )
 
     def _unfillable_cells(self, frozen: np.ndarray) -> np.ndarray:
         """Cells the melt cannot fill: the frozen ones and everything they seal off.
@@ -400,21 +439,23 @@ class HeleShawSolver:
         value = float(np.nanmax(tau[sel]))
         return value if value > 0 else None
 
-    def solve(self, num_frames: int = 24) -> FlowResult:
-        if not self.geometry.gates:
-            raise ValueError("Geometry has no gates")
-        check_gate_reachability(self.geometry)
+    def _solve_domain(self, eta: float) -> _DomainSolution:
+        """Solve tau, the skin fixed point and the fill time on *this* cavity.
 
-        eta = self._effective_viscosity()
-
+        Everything here reads ``self.geometry.mask`` and ``self.geometry.gates``,
+        so a restricted copy solves its own cavity rather than inheriting one.
+        That matters: the skin thickness is driven by arrival times, and the
+        arrival times of a region that has been sealed off are set by volume
+        that never moves. Reusing them would leave the reported skin, core and
+        fill time depending on material the melt never reaches.
+        """
+        cavity_mask = self.geometry.mask
         dirichlet = np.zeros(self.geometry.shape, dtype=bool)
         for iy, ix in self.geometry.gates:
             dirichlet[iy, ix] = True
 
         h_open = self._open_thickness_field()  # mm
-        cavity_mask = self.geometry.mask
 
-        V_cm3 = self.geometry.volume_cm3()
         T_fill_baseline = self._baseline_fill_time(self.geometry)
 
         # baseline solve (no skin) — also serves as the tau_max reference
@@ -428,7 +469,7 @@ class HeleShawSolver:
 
         skin_thk_mm: np.ndarray | None = None
         h_core_mm: np.ndarray | None = None
-        short_shot_mask: np.ndarray | None = None
+        frozen_mask: np.ndarray | None = None
         skin_iters_done = 0
         skin_converged = False
 
@@ -439,7 +480,7 @@ class HeleShawSolver:
             tol = max(float(self.skin_convergence_tol), 0.0)
 
             skin_thk_mm = np.zeros_like(h_open)
-            h_core_mm = h_open.copy()
+            h_core_mm = np.where(cavity_mask, h_open, 0.0)
 
             for it in range(int(max(self.skin_max_iterations, 1))):
                 msk = cavity_mask & ~np.isnan(tau)
@@ -496,6 +537,7 @@ class HeleShawSolver:
                 T_fill = T_fill_new
                 skin_thk_mm = s_mm_new
                 h_core_mm = h_core_new
+                frozen_mask = frozen_new
                 skin_iters_done = it + 1
                 if tau_max_flow is None:
                     # Nothing outside the gates is still open. Another pass
@@ -507,54 +549,88 @@ class HeleShawSolver:
                     skin_converged = True
                     break
 
-            short_shot_mask = (
-                cavity_mask
-                & ((h_open - 2.0 * skin_thk_mm) <= min_core + 1e-9)
-                & (h_open > min_core + 1e-9)  # ignore cells whose open gap is already tiny
-            )
+        return _DomainSolution(
+            tau=tau,
+            tau_max=tau_max,
+            tau_max_flow=tau_max_flow,
+            T_fill=T_fill,
+            T_fill_baseline=T_fill_baseline,
+            tau_max_baseline=tau_max_baseline,
+            skin_thk_mm=skin_thk_mm,
+            h_core_mm=h_core_mm,
+            frozen_mask=frozen_mask,
+            iterations=skin_iters_done,
+            converged=skin_converged,
+        )
 
-        # Which cells actually fill. Frozen cells seal their neighbours off, so
-        # this is a connectivity question, not a per-cell one.
-        unfillable_mask: np.ndarray | None = None
-        tau_max_cavity = tau_max
-        if short_shot_mask is not None and short_shot_mask.any():
-            unfillable_mask = self._unfillable_cells(short_shot_mask)
-            tau_max_cavity = tau_max  # whole-cavity solve, kept as evidence
-            live = cavity_mask & ~unfillable_mask
-            sub = self._restricted_to(live) if live.any() else None
-            if sub is not None and sub.geometry.gates:
-                # Re-solve on the cells that fill. The first solve ran over the
-                # whole cavity, where a sealed-off region still contributed its
-                # unit source and the frozen band still conducted through the
-                # numerical floor -- so its volume was pushed through the live
-                # cells upstream and inflated their tau (measured 3.3x on a
-                # strip sealed by a frozen band). That flow does not happen:
-                # the melt never goes there.
-                dirichlet_live = np.zeros(self.geometry.shape, dtype=bool)
-                for iy, ix in sub.geometry.gates:
-                    dirichlet_live[iy, ix] = True
-                h_core_live = h_core_mm if h_core_mm is not None else h_open
-                tau, tau_max = sub._solve_tau_field(
-                    sub._conductance_field(eta, h_core_live), dirichlet_live
-                )
-                tau_open, tau_max_open = sub._solve_tau_field(
-                    sub._conductance_field(eta, sub._open_thickness_field()), dirichlet_live
-                )
-                # Both references now live on the same domain, so the ratio is
-                # "how much did freezing slow the region that still flows".
-                # ``self``, not ``sub``: the implicit flow rate is defined by
-                # the cavity as drawn. Asking the restricted solver would make
-                # it divide the live volume by a rate derived from that same
-                # live volume, handing back the default 1.5 s unchanged.
-                T_fill_baseline = self._baseline_fill_time(sub.geometry)
-                tau_max_baseline = tau_max_open
-                tau_max_flow = self._tau_reference(tau, live)
-            else:
-                tau_max_flow = None
-            if tau_max_flow is None or tau_max_baseline <= 0:
-                T_fill = T_fill_baseline
-            else:
-                T_fill = T_fill_baseline * (tau_max_flow / tau_max_baseline)
+    def solve(self, num_frames: int = 24) -> FlowResult:
+        if not self.geometry.gates:
+            raise ValueError("Geometry has no gates")
+        check_gate_reachability(self.geometry)
+
+        eta = self._effective_viscosity()
+        cavity_mask = self.geometry.mask
+        V_cm3 = self.geometry.volume_cm3()
+
+        sol = self._solve_domain(eta)
+        # The cavity-wide tau_max, frozen cells and all. Kept as evidence: the
+        # gap between this and tau_max_flow is the error that would land in the
+        # reported time if the dead cells were left in.
+        tau_max_cavity = sol.tau_max
+
+        # Shed the cells that never fill and solve again on what is left.
+        # Removing them changes the arrival times of the cells that remain,
+        # which changes where the skins close -- so the domain and the skin
+        # field have to be settled together, not once each. The domain only
+        # ever loses cells, so this terminates; ``MAX_DOMAIN_PASSES`` is a stop
+        # for pathological cases, not the convergence test.
+        domain_solver = self
+        skin_thk_mm = sol.skin_thk_mm
+        h_core_mm = sol.h_core_mm
+        short_shot_mask = None if sol.frozen_mask is None else sol.frozen_mask.copy()
+        no_flow_forced = False
+        domain_passes = 0
+
+        for _ in range(MAX_DOMAIN_PASSES):
+            frozen = sol.frozen_mask
+            if frozen is None or not frozen.any():
+                break
+            dead = domain_solver._unfillable_cells(frozen)
+            live = domain_solver.geometry.mask & ~dead
+            sub = domain_solver._restricted_to(live) if live.any() else None
+            if sub is None or not sub.geometry.gates:
+                # Every gate is behind a closed core. There is no live cavity
+                # to solve, so the last solution stands with its time pinned to
+                # the geometric baseline rather than inflated off dead cells.
+                no_flow_forced = True
+                break
+            domain_solver = sub
+            sol = sub._solve_domain(eta)
+            domain_passes += 1
+            # The sub-solution only writes the cells it owns; the rest keep the
+            # values from the pass that last had them live.
+            if sol.skin_thk_mm is not None and skin_thk_mm is not None:
+                skin_thk_mm = np.where(live, sol.skin_thk_mm, skin_thk_mm)
+            if sol.h_core_mm is not None and h_core_mm is not None:
+                h_core_mm = np.where(live, sol.h_core_mm, h_core_mm)
+            if sol.frozen_mask is not None and short_shot_mask is not None:
+                short_shot_mask = short_shot_mask | sol.frozen_mask
+
+        # Every gate closed: nothing at all fills, so the live cavity is empty
+        # rather than "whatever the last pass was still solving".
+        live_mask = np.zeros_like(cavity_mask) if no_flow_forced else domain_solver.geometry.mask
+        dead_cells = cavity_mask & ~live_mask
+        unfillable_mask = dead_cells if dead_cells.any() else None
+
+        tau = sol.tau
+        tau_max = sol.tau_max
+        tau_max_flow = None if no_flow_forced else sol.tau_max_flow
+        T_fill_baseline = sol.T_fill_baseline
+        tau_max_baseline = sol.tau_max_baseline
+        if tau_max_flow is None or tau_max_baseline <= 0:
+            T_fill = T_fill_baseline
+        else:
+            T_fill = T_fill_baseline * (tau_max_flow / tau_max_baseline)
 
         # Nothing beyond the gates flows. Every time here is zero, so the
         # divisor only has to be positive -- what matters is that the reported
@@ -611,8 +687,8 @@ class HeleShawSolver:
                 {
                     "skin_growth_constant": self.skin_growth_constant,
                     "thermal_diffusivity_m2_s": self.material.thermal_diffusivity_m2_s,
-                    "skin_iterations": skin_iters_done,
-                    "skin_converged": skin_converged,
+                    "skin_iterations": sol.iterations,
+                    "skin_converged": sol.converged,
                     "min_core_thickness_mm": self.min_core_thickness_mm,
                     "T_fill_baseline_s": T_fill_baseline,
                     "T_fill_inflation": (T_fill / T_fill_baseline if T_fill_baseline > 0 else 1.0),
@@ -633,6 +709,9 @@ class HeleShawSolver:
                     # the reported time if the dead cells were left in.
                     "tau_max_cavity": tau_max_cavity,
                     "no_flow": no_flow,
+                    # How many times the cavity had to be re-solved after
+                    # shedding cells. 0 means nothing froze.
+                    "domain_passes": domain_passes,
                 }
             )
 

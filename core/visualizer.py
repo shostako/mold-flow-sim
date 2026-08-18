@@ -937,27 +937,40 @@ def export_frames(
     norm = mcolors.Normalize(vmin=0.0, vmax=t_max)
     rgba_full = _fill_field_rgb(result, cmap)
 
+    # One figure for the whole sequence, as the GIF renderer does. Rebuilding
+    # it per frame would re-contour the cavity once per PNG -- 60 passes at
+    # the UI default, on a cavity the UI allows up to 500k cells.
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+    overlay_im = _draw_fill_state(
+        ax,
+        result,
+        rgba_full,
+        np.zeros_like(g.mask),
+        smooth=smooth,
+        isochrone_levels=isochrone_levels,
+    )
+    _draw_gate_markers(ax, result, color="red", edgecolor="white", size=7)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    title_obj = ax.set_title("")
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("fill time [s]")
+    fig.tight_layout()
+
     out_paths: list[Path] = []
-    for k, t in enumerate(frames_t):
-        fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
-        filled = result.fill_time_s <= t
-        _draw_fill_state(
-            ax, result, rgba_full, filled, smooth=smooth, isochrone_levels=isochrone_levels
-        )
-        _draw_gate_markers(ax, result, color="red", edgecolor="white", size=7)
-        ax.set_xlim(extent[0], extent[1])
-        ax.set_ylim(extent[2], extent[3])
-        ax.set_aspect("equal")
-        ax.set_title(f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%")
-        ax.set_xlabel("x [mm]")
-        ax.set_ylabel("y [mm]")
-        cbar = fig.colorbar(
-            plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02
-        )
-        cbar.set_label("fill time [s]")
-        path = output_dir / f"frame_{k:03d}.png"
-        fig.tight_layout()
-        fig.savefig(path)
+    try:
+        for k, t in enumerate(frames_t):
+            filled = result.fill_time_s <= t
+            overlay_im.set_array(_unfilled_overlay(result, filled))
+            title_obj.set_text(
+                f"t={t:.3f}s  filled={filled[g.mask].sum() / max(g.mask.sum(), 1) * 100:.1f}%"
+            )
+            path = output_dir / f"frame_{k:03d}.png"
+            fig.savefig(path)
+            out_paths.append(path)
+    finally:
         plt.close(fig)
-        out_paths.append(path)
     return out_paths

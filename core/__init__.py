@@ -4,6 +4,7 @@ from .fill_player import (
     CONTROLS_HEIGHT_PX,
     build_fill_player_html,
     fill_player_height_px,
+    wrap_standalone_html,
 )
 from .geometry import (
     DirectGateConfig,
@@ -80,6 +81,7 @@ __all__ = [
     "build_fill_player_html",
     "CONTROLS_HEIGHT_PX",
     "fill_player_height_px",
+    "wrap_standalone_html",
     "render_3d_thickness_map",
     "render_3d_fill_time",
     "render_3d_pressure",

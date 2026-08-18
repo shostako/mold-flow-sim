@@ -26,6 +26,7 @@ from core import (
     fill_frame_fractions,
     fill_frame_times,
     fill_player_height_px,
+    wrap_standalone_html,
 )
 
 
@@ -165,3 +166,74 @@ def test_player_height_covers_image_plus_controls(result, tmp_path):
 def test_player_height_rejects_empty_input():
     with pytest.raises(ValueError, match="must not be empty"):
         fill_player_height_px([])
+
+
+# --- wrap_standalone_html ---------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def fragment(result, tmp_path_factory):
+    paths = export_frames(result, tmp_path_factory.mktemp("frames"), num_frames=6)
+    return build_fill_player_html(
+        paths, fill_frame_times(result, 6), fill_frame_fractions(result, 6)
+    )
+
+
+def test_standalone_declares_utf8_before_any_japanese_text(fragment):
+    """The charset declaration must precede the first non-ASCII byte.
+
+    A browser opening the file over ``file://`` has no HTTP header to go on.
+    Without an early ``<meta charset>`` it falls back to the platform legacy
+    encoding (CP932 on a Japanese Windows box) and the button labels turn
+    into mojibake — the whole reason the fragment cannot be shipped as-is.
+    """
+    doc = wrap_standalone_html(fragment, title="充填アニメーション")
+    raw = doc.encode("utf-8")
+    charset_at = raw.index(b'<meta charset="utf-8">')
+    first_non_ascii = next(i for i, b in enumerate(raw) if b > 0x7F)
+    assert charset_at < first_non_ascii
+    # and the declaration sits inside the first 1024 bytes browsers sniff
+    assert charset_at < 1024
+
+
+def test_standalone_is_a_complete_document_containing_the_fragment(fragment):
+    doc = wrap_standalone_html(fragment, title="充填アニメーション")
+    assert doc.startswith("<!doctype html>")
+    assert '<html lang="ja">' in doc
+    assert doc.rstrip().endswith("</html>")
+    # the fragment is embedded verbatim: the shipped player is the same player
+    assert fragment in doc
+
+
+def test_standalone_stays_offline_self_contained(fragment):
+    """No network reference may sneak in via the wrapper."""
+    doc = wrap_standalone_html(fragment, title="充填アニメーション", note="v0.0.0")
+    body = re.sub(r"data:image/png;base64,[A-Za-z0-9+/=]+", "", doc)
+    assert "http://" not in body
+    assert "https://" not in body
+
+
+def test_standalone_note_is_optional_and_rendered(fragment):
+    with_note = wrap_standalone_html(fragment, title="T", note="v0.15.0 (abc1234)")
+    assert "v0.15.0 (abc1234)" in with_note
+    without = wrap_standalone_html(fragment, title="T")
+    assert "<small>" not in without
+
+
+def test_standalone_escapes_title_and_note(fragment):
+    doc = wrap_standalone_html(fragment, title="a<b>&c", note="<script>x</script>")
+    assert "<title>a&lt;b&gt;&amp;c</title>" in doc
+    assert "<script>x</script>" not in doc.replace(fragment, "")
+    assert "&lt;script&gt;x&lt;/script&gt;" in doc
+
+
+def test_standalone_rejects_empty_title(fragment):
+    with pytest.raises(ValueError, match="title must not be empty"):
+        wrap_standalone_html(fragment, title="")
+
+
+def test_standalone_leaves_no_template_placeholder(fragment):
+    doc = wrap_standalone_html(fragment, title="充填アニメーション", note="v0")
+    assert "__TITLE__" not in doc
+    assert "__HEADING__" not in doc
+    assert "__BODY__" not in doc

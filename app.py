@@ -43,6 +43,7 @@ from core import (
     render_pressure_map,
     render_skin_layer_map,
     render_weldlines,
+    wrap_standalone_html,
 )
 from core.geometry import Geometry
 from core.version import build_label
@@ -1309,6 +1310,18 @@ if do_run:
             for _fp in _frame_paths:
                 if _fp.exists():
                     _zf_run.write(_fp, f"frames/{_fp.name}")
+            # ZIP を渡された相手が、Streamlit も追加ソフトも無しに
+            # 画面と同じコマ送りを使えるようプレイヤーを単体 HTML で同梱する。
+            # フレームは data URI で埋まっているのでオフラインで完結し、
+            # HTML が受信側のフィルタで弾かれても frames/ の連番 PNG が残る。
+            _zf_run.writestr(
+                "player.html",
+                wrap_standalone_html(
+                    _player_html,
+                    title="充填アニメーション",
+                    note=build_label(),
+                ),
+            )
             _zf_run.writestr(
                 "metadata.json",
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),

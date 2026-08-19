@@ -44,11 +44,14 @@ def relative_luminance(rgb: tuple[float, float, float]) -> float:
     luminance, and the two disagree in sign when a palette trades intensity
     between channels: ``rgb(205,78,46) -> rgb(242,34,36)`` reads as *darker*
     under the naive sum (0.403 -> 0.307) and as *lighter* once linearized
-    (0.186 -> 0.202). No Plotly built-in currently flips its monotonicity
-    verdict between the two formulas, so this is not a live bug — but these
-    tests exist to judge *replacement* palettes, hand-authored warm ramps
-    included, and that is precisely where the wrong formula would wave through
-    a ramp that actually gets lighter.
+    (0.186 -> 0.202). The naive sum is wrong by definition, not merely
+    imprecise, so do not swap it back on the grounds that no palette currently
+    exposes the difference — a measurement of today's built-ins is not a
+    licence. (It is true that none of them flip their monotonicity verdict
+    between the two formulas as measured; that is a statement about which
+    palettes ship, not about which formula is right. These tests exist to
+    judge *replacement* palettes, hand-authored warm ramps included, and that
+    is exactly where the difference bites.)
     """
     return 0.2126 * _linearize(rgb[0]) + 0.7152 * _linearize(rgb[1]) + 0.0722 * _linearize(rgb[2])
 

@@ -80,7 +80,15 @@ DEFAULT_FILL_TIME_S = 1.5
 #: How many times the cavity may be re-solved after shedding cells that never
 #: fill. The domain only ever shrinks, so this is a safety stop, not the
 #: convergence criterion -- in practice one extra pass settles it.
-MAX_DOMAIN_PASSES = 4
+# Safety valve for the domain loop in ``HeleShawSolver.solve``. The domain
+# strictly loses at least one cell per pass, so the loop terminates on its
+# own; this cap only guards against a pathological one-cell-per-pass trickle
+# turning into thousands of full skin fixed points. When it trips, the
+# leftover frozen cells are marked dead without another re-solve and
+# ``metadata["domain_converged"]`` is False (Codex P2 on PR #60: exiting with
+# them still live handed finite fill times to cells that do not fill, and let
+# ``short_shot_cells`` exceed ``unfillable_cells``).
+MAX_DOMAIN_PASSES = 64
 
 
 @dataclass
@@ -710,6 +718,17 @@ class HeleShawSolver:
         # Every gate closed: nothing at all fills, so the live cavity is empty
         # rather than "whatever the last pass was still solving".
         live_mask = np.zeros_like(cavity_mask) if no_flow_forced else domain_solver.geometry.mask
+        # Safety valve tripped: the final pass froze cells the loop never got
+        # to process. They do not fill, so they must not stay live -- mark
+        # them (and whatever they seal off) dead without another re-solve.
+        # The final solution already excluded them from its own time scale
+        # (``tau_max_flow`` and the inflation set both drop frozen cells), so
+        # the reported T_fill stands; only the cell bookkeeping needed fixing.
+        domain_converged = True
+        leftover = sol.frozen_mask
+        if not no_flow_forced and leftover is not None and leftover.any():
+            domain_converged = False
+            live_mask = live_mask & ~domain_solver._unfillable_cells(leftover)
         dead_cells = cavity_mask & ~live_mask
         unfillable_mask = dead_cells if dead_cells.any() else None
 
@@ -812,6 +831,7 @@ class HeleShawSolver:
                     # How many times the cavity had to be re-solved after
                     # shedding cells. 0 means nothing froze.
                     "domain_passes": domain_passes,
+                    "domain_converged": domain_converged,
                 }
             )
 

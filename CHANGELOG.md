@@ -35,6 +35,11 @@
   ショットされ、ほぼ凍結しなくなった。物理的にはゲート近傍こそ充填の間ずっと老化し続ける
   （露光時計 s(T_fill − t_arr) が正しい向き）。旧線形写像はこれを偶然保守側に誤魔化して
   いた。別 issue で追跡。
+- **ドメインループの安全弁を graceful に**（Codex P2）: `MAX_DOMAIN_PASSES`（4→64、
+  領域は毎パス厳密に縮むので本来は不要な暴走止め）に当たって残った凍結セルは、
+  解き直しなしで unfillable 側に落とし、`metadata["domain_converged"]=False` を立てる。
+  旧実装は残った凍結セルが live のまま有限の充填時刻を持ち、`short_shot_cells` が
+  `unfillable_cells` を超え得た。
 
 ## [0.24.1] — 2026-08-19
 

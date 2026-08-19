@@ -42,7 +42,7 @@ PR #19 〜 PR #25 を 1 日で集中マージ。詳細は `logs/2026-05.md` 参�
 - **3D 層境界 surface renderer**: PR-D で先送り。`render_3d_layered_section(result, x_slice_mm)` 等。Plotly Surface trace を N-1 本追加、coloraxis 共有。Plan ファイル `~/.claude/plans/cuddly-coalescing-kazoo.md` に元設計あり。
 - **層中央バルク温度の対流項**: 現状は純粋拡散 (1D Neumann)。流れに伴う熱輸送は無視。極厚プレート (h>4mm) や非常に遅い充填で破綻可能。CLAUDE.md に運用範囲を明記済み。
 - **局所粘度反復**: V_local の局所評価を `V_avg = injection_velocity_mms` (定数) で代替している。`V_local = (S_total · |∇τ|) / h_total · (1/T_fill)` 形式で導入する余地あり。
-- **材料 DB の固化温度フィールド**: 現状は `T_solid = T_mold + 0.3·(T_melt - T_mold)` で派生。材料毎に Tg / 結晶化温度を持たせれば短ショット判定の精度向上。
+- **材料 DB の固化温度フィールド**: 現状は `T_solid = T_mold + 0.3·(T_melt - T_mold)` で派生。材料毎に Tg / 結晶化温度を持たせればショートショット判定の精度向上。
 
 ### 長期 (別ロードマップ)
 
@@ -62,7 +62,7 @@ PR #19 〜 PR #25 を 1 日で集中マージ。詳細は `logs/2026-05.md` 参�
 ## セッション固有のメモ
 
 - gokuusu STEP4 打合せは 2026-05-13 (本日)。打合せ前の準備は完了状態でクローズ。打合せ後のフィードバック反映は次セッション以降。
-- 層別ソルバーの数値挙動 (T_fill_inflation < 1) は物理的に「中央層 ζ=0.5 が高温で η₀ 寄り、ベースライン T_bulk=446K より粘度が低い」現象。実機の固化遅延効果は別途短ショット判定で扱う設計。
+- 層別ソルバーの数値挙動 (T_fill_inflation < 1) は物理的に「中央層 ζ=0.5 が高温で η₀ 寄り、ベースライン T_bulk=446K より粘度が低い」現象。実機の固化遅延効果は別途ショートショット判定で扱う設計。
 - Streamlit Cloud デプロイは main 追従の自動再デプロイ。ローカル変更を見るには PR を main にマージするか、ローカル `streamlit run app.py` で確認。
 
 ## 関連リンク

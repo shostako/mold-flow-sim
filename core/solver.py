@@ -1,9 +1,15 @@
 """Hele-Shaw fill-time solver (Pseudo Conduction method).
 
 Reference idea: solve the elliptic problem
-    div( S * grad(tau) ) = 1   in cavity Omega
+    -div( S * grad(tau) ) = 1  in cavity Omega
     tau = 0                    at gates (Dirichlet)
     S * grad(tau) . n = 0      at cavity walls (Neumann, no flux)
+
+The leading minus is the form actually assembled: the diagonal carries
++sum(coeff), the off-diagonals -coeff, and the right-hand side +1, which
+is the positive-definite discretisation. Written without it (continuous
+form: div(S grad tau) = -1) the signs of the docstring and the matrix
+disagree, which they did until v0.24.0.
 
 where S = h^3 / (12 * eta_eff) is the Hele-Shaw flow conductance,
 h is local cavity thickness, and eta_eff is an effective viscosity

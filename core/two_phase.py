@@ -304,3 +304,76 @@ def solve_two_phase_short_shot(
         viscosity_Pa_s=eta,
         metadata=metadata,
     )
+
+
+@dataclass
+class TwoPhaseFrame:
+    """One animation frame of the two-phase history — pure data, no rendering.
+
+    ``phase`` is ``"injection"`` or ``"compression"``. During injection
+    ``value`` is the real elapsed time [s]; during compression it is the
+    normalized advance fraction (0..1] — the model has no compression
+    timescale, only an order.
+    """
+
+    phase: str
+    value: float
+    injection_filled: np.ndarray
+    compression_filled: np.ndarray
+
+
+def frame_states(result: TwoPhaseShortShotResult, num_frames: int = 24) -> list[TwoPhaseFrame]:
+    """Frame sequence for the two-phase animation.
+
+    Frames are split between the phases in proportion to the cell count each
+    phase fills (minimum 3 per active phase). Injection frames advance in
+    real arrival time from 0 to ``injection_time_s``; compression frames
+    advance in normalized order. The filled sets grow monotonically and the
+    last frame covers exactly ``final_mask``.
+    """
+    if num_frames < 2:
+        raise ValueError("num_frames must be at least 2")
+    inj = result.injection_mask
+    adv = result.final_mask & ~inj
+    n_inj_cells = int(inj.sum())
+    n_adv_cells = int(adv.sum())
+    total = max(n_inj_cells + n_adv_cells, 1)
+
+    if n_adv_cells == 0:
+        n1, n2 = num_frames, 0
+    else:
+        # both phases active: reserve at least ``lo`` frames for each side
+        # (3 when the budget allows, 1 when num_frames is very small)
+        lo = 3 if num_frames >= 6 else 1
+        n1 = int(round(num_frames * n_inj_cells / total))
+        n1 = min(max(n1, lo), num_frames - lo)
+        n2 = num_frames - n1
+
+    t_arr = result.injection_fill_time_s
+    T_inj = result.injection_time_s
+    none_yet = np.zeros(result.geometry.shape, dtype=bool)
+    frames: list[TwoPhaseFrame] = []
+    for t in np.linspace(0.0, T_inj, n1):
+        filled = inj & (np.nan_to_num(t_arr, nan=np.inf) <= t * (1.0 + _REL_EPS))
+        frames.append(
+            TwoPhaseFrame(
+                phase="injection",
+                value=float(t),
+                injection_filled=filled,
+                compression_filled=none_yet,
+            )
+        )
+    if n2:
+        prog = np.nan_to_num(result.compression_progress, nan=np.inf)
+        # start strictly after 0 — frame n1 already shows the full pool
+        for p in np.linspace(1.0 / n2, 1.0, n2):
+            filled = adv & (prog <= p * (1.0 + _REL_EPS))
+            frames.append(
+                TwoPhaseFrame(
+                    phase="compression",
+                    value=float(p),
+                    injection_filled=inj,
+                    compression_filled=filled,
+                )
+            )
+    return frames

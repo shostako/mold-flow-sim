@@ -447,3 +447,108 @@ def test_the_melt_pool_is_an_equipotential_source():
     assert np.nanmax(np.abs(res.tau2[res.injection_mask])) == pytest.approx(0.0, abs=1e-12)
     beyond = geom.mask & ~res.injection_mask
     assert (res.tau2[beyond] > 0).all()
+
+
+# ---------------------------------------------------------------------------
+# animation frame states and figure layout
+# ---------------------------------------------------------------------------
+
+
+def _stroked_strip_result(n=40, h=1.0, stroke=1.0, cells=10):
+    geom = _strip(n, h)
+    solver = _solver(geom, stroke=stroke)
+    return solve_two_phase_short_shot(solver, cells * (h + stroke) / 1000.0)
+
+
+def test_frame_states_grow_monotonically_to_the_final_mask():
+    from core.two_phase import frame_states
+
+    res = _stroked_strip_result()
+    frames = frame_states(res, num_frames=24)
+    assert len(frames) == 24
+    prev = np.zeros(res.geometry.shape, dtype=bool)
+    for fr in frames:
+        filled = fr.injection_filled | fr.compression_filled
+        assert (prev <= filled).all(), "a frame lost previously filled cells"
+        prev = filled
+    assert (prev == res.final_mask).all(), "last frame must cover exactly final_mask"
+    first = frames[0].injection_filled | frames[0].compression_filled
+    assert first.sum() < res.final_mask.sum() / 4, "first frame should be nearly empty"
+
+
+def test_frame_states_split_the_phases():
+    from core.two_phase import frame_states
+
+    res = _stroked_strip_result()
+    frames = frame_states(res, num_frames=24)
+    phases = [fr.phase for fr in frames]
+    n_inj = phases.count("injection")
+    n_comp = phases.count("compression")
+    assert n_inj >= 3 and n_comp >= 3
+    assert phases == ["injection"] * n_inj + ["compression"] * n_comp
+    # injection frames advance the real clock to T_inj; compression to 1.0
+    inj_vals = [fr.value for fr in frames if fr.phase == "injection"]
+    assert inj_vals[0] == 0.0
+    assert inj_vals[-1] == pytest.approx(res.injection_time_s)
+    comp_vals = [fr.value for fr in frames if fr.phase == "compression"]
+    assert comp_vals[-1] == pytest.approx(1.0)
+    # compression frames never touch cells outside the advance zone
+    adv = res.final_mask & ~res.injection_mask
+    for fr in frames:
+        assert not (fr.compression_filled & ~adv).any()
+
+
+def test_frame_states_without_advance_are_injection_only():
+    from core.two_phase import frame_states
+
+    geom = _strip(40)
+    solver = _solver(geom, stroke=None)
+    res = solve_two_phase_short_shot(solver, 15 * 1.0 / 1000.0)
+    frames = frame_states(res, num_frames=12)
+    assert all(fr.phase == "injection" for fr in frames)
+    assert not any(fr.compression_filled.any() for fr in frames)
+
+
+def test_frame_states_validate_num_frames_and_survive_small_budgets():
+    from core.two_phase import frame_states
+
+    res = _stroked_strip_result()
+    with pytest.raises(ValueError, match="num_frames"):
+        frame_states(res, num_frames=1)
+    frames = frame_states(res, num_frames=4)  # both phases active, tiny budget
+    assert len(frames) == 4
+    filled_last = frames[-1].injection_filled | frames[-1].compression_filled
+    assert (filled_last == res.final_mask).all()
+
+
+def test_the_map_legend_sits_outside_the_axes():
+    """The plates are wide and shallow: an in-axes legend lands on the part
+    (it covered the far corner of the first real render). The legend must be
+    a figure-level artist whose box does not overlap the axes box."""
+    import matplotlib.pyplot as plt
+
+    from core.visualizer import _build_two_phase_figure
+
+    res = _stroked_strip_result()
+    fig, ax = _build_two_phase_figure(res)
+    try:
+        assert not ax.get_legend(), "legend must not be attached to the axes"
+        assert fig.legends, "figure-level legend missing"
+        fig.canvas.draw()
+        leg_box = fig.legends[0].get_window_extent()
+        ax_box = ax.get_window_extent()
+        assert not leg_box.overlaps(ax_box), "legend overlaps the plot area"
+    finally:
+        plt.close(fig)
+
+
+def test_the_animation_renders_the_requested_frames(tmp_path):
+    from PIL import Image
+
+    from core.visualizer import render_two_phase_animation
+
+    res = _stroked_strip_result()
+    path = render_two_phase_animation(res, tmp_path / "two_phase.gif", num_frames=10, fps=8)
+    assert path.exists() and path.stat().st_size > 0
+    with Image.open(path) as im:
+        assert im.n_frames == 10

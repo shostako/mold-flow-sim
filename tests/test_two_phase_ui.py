@@ -59,7 +59,10 @@ def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
     with zipfile.ZipFile(io.BytesIO(at.session_state["mfs_zip_bytes"])) as zf:
         names = set(zf.namelist())
     assert "two_phase_short_shot.png" in names
+    assert "two_phase.gif" in names
     assert "two_phase_metadata.json" in names
+    assert at.session_state["mfs_two_phase_gif_path"] is not None
+    assert at.session_state["mfs_two_phase_skip"] is None
 
 
 def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
@@ -94,9 +97,17 @@ def test_a_wall_cooling_model_skips_two_phase_with_a_warning():
     at = _app()
     at.radio(key="wall_model").set_value("skin")
     at.checkbox(key="two_phase_on").set_value(True).run()
+    # The interference must be visible in the sidebar BEFORE any run — the
+    # run-time warning alone washes away on the next rerun and the toggle
+    # looks like it silently does nothing (the exact complaint that
+    # motivated this: the default wall model is 層別, so out of the box the
+    # checkbox appeared dead).
+    assert "現在の設定では二相解析はスキップされる" in _texts(at)
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_two_phase_result"] is None
     assert at.session_state["mfs_two_phase_path"] is None
     assert "壁面冷却モデル『なし』専用" in _texts(at)
+    # the skip reason survives in session_state for the results pane
+    assert "併用不可" in at.session_state["mfs_two_phase_skip"]
     assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {"enabled": False}

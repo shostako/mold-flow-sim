@@ -1067,7 +1067,7 @@ def export_frames(
 
 
 # ---------------------------------------------------------------------------
-# Two-phase (injection + compression) short-shot map
+# Two-phase (injection + compression) short-shot map and animation
 # ---------------------------------------------------------------------------
 
 # Categorical, not a ramp: the two regions answer "which phase put melt
@@ -1077,6 +1077,62 @@ def export_frames(
 # shot), so no interpolation, no alpha.
 TWO_PHASE_INJECTION_RGB = (0.22, 0.49, 0.72)
 TWO_PHASE_COMPRESSION_RGB = (0.95, 0.61, 0.15)
+
+
+def _two_phase_legend(fig) -> None:
+    """Legend BELOW the axes, never inside them.
+
+    The plates this tool draws are wide and shallow, so any in-axes corner
+    the legend could pick sits on top of the part (an in-axes upper-right
+    legend covered the far corner of the first real render). A figure-level
+    legend under the plot cannot collide with the cavity at any aspect
+    ratio.
+    """
+    handles = [
+        Patch(facecolor=TWO_PHASE_INJECTION_RGB, label="filled during injection"),
+        Patch(facecolor=TWO_PHASE_COMPRESSION_RGB, label="advanced by compression"),
+        Patch(facecolor=_cavity_backdrop_colors()[1], label="unfilled"),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=3,
+        fontsize=8,
+        frameon=False,
+    )
+
+
+def _build_two_phase_figure(result):
+    """Figure + axes with the backdrop, extent and out-of-axes legend set up.
+
+    Returns ``(fig, ax)``. Shared by the static map and the animation so a
+    layout fix lands in both.
+    """
+    extent = _base_extent(result)
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    _two_phase_legend(fig)
+    return fig, ax
+
+
+def _two_phase_finalize_layout(fig) -> None:
+    """Apply the layout AFTER the title exists — tight_layout measures the
+    artists present at call time, so calling it from the builder (before the
+    renderer sets its title) left the title clipped at the top edge."""
+    # leave a strip at the bottom for the figure-level legend
+    fig.tight_layout(rect=(0.0, 0.07, 1.0, 1.0))
+
+
+def _two_phase_rgba(result, injection_filled, compression_filled) -> np.ndarray:
+    rgba = np.zeros((*result.geometry.shape, 4))
+    rgba[injection_filled] = (*TWO_PHASE_INJECTION_RGB, 1.0)
+    rgba[compression_filled] = (*TWO_PHASE_COMPRESSION_RGB, 1.0)
+    return rgba
 
 
 def render_two_phase_map(
@@ -1094,16 +1150,12 @@ def render_two_phase_map(
     extent = _base_extent(result)
     g = result.geometry
 
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
-    _draw_geometry(ax, result)
+    fig, ax = _build_two_phase_figure(result)
 
     omega1 = result.injection_mask
     omega2 = result.final_mask
-    rgba = np.zeros((*g.shape, 4))
-    rgba[omega1] = (*TWO_PHASE_INJECTION_RGB, 1.0)
-    rgba[omega2 & ~omega1] = (*TWO_PHASE_COMPRESSION_RGB, 1.0)
     ax.imshow(
-        rgba,
+        _two_phase_rgba(result, omega1, omega2 & ~omega1),
         origin="lower",
         extent=extent,
         interpolation="nearest",
@@ -1129,12 +1181,6 @@ def render_two_phase_map(
 
     _draw_gate_markers(ax, result)
 
-    ax.set_xlim(extent[0], extent[1])
-    ax.set_ylim(extent[2], extent[3])
-    ax.set_aspect("equal")
-    ax.set_xlabel("x [mm]")
-    ax.set_ylabel("y [mm]")
-
     md = result.metadata
     ax.set_title(
         "Two-phase short shot — shot {v:.1f} cm3, "
@@ -1145,14 +1191,55 @@ def render_two_phase_map(
         )
     )
 
-    handles = [
-        Patch(facecolor=TWO_PHASE_INJECTION_RGB, label="filled during injection"),
-        Patch(facecolor=TWO_PHASE_COMPRESSION_RGB, label="advanced by compression"),
-        Patch(facecolor=_cavity_backdrop_colors()[1], label="unfilled"),
-    ]
-    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
-
-    fig.tight_layout()
+    _two_phase_finalize_layout(fig)
     fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_two_phase_animation(
+    result,
+    output_path: str | Path,
+    num_frames: int = 24,
+    fps: int = 8,
+) -> Path:
+    """GIF of the two-phase history: the pool grows through injection in
+    real arrival time, then the compression advance sweeps forward in
+    normalized order (the model has no compression timescale — the frame
+    titles say which clock is running)."""
+    from .two_phase import frame_states
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    frames = frame_states(result, num_frames=num_frames)
+
+    fig, ax = _build_two_phase_figure(result)
+    im = ax.imshow(
+        _two_phase_rgba(result, frames[0].injection_filled, frames[0].compression_filled),
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        zorder=_Z_FIELD,
+    )
+    _draw_gate_markers(ax, result)
+    T_inj = result.injection_time_s
+
+    def _title(fr) -> str:
+        if fr.phase == "injection":
+            return f"Injection  t = {fr.value:.3f} s / {T_inj:.3f} s"
+        return f"Compression (order only)  advance = {fr.value:.0%}"
+
+    ax.set_title(_title(frames[0]))
+    _two_phase_finalize_layout(fig)
+
+    def _update(i):
+        fr = frames[i]
+        im.set_data(_two_phase_rgba(result, fr.injection_filled, fr.compression_filled))
+        ax.set_title(_title(fr))
+        return [im]
+
+    anim = FuncAnimation(fig, _update, frames=len(frames), blit=False)
+    anim.save(output_path, writer=PillowWriter(fps=fps))
     plt.close(fig)
     return output_path

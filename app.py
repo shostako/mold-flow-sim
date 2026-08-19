@@ -62,6 +62,7 @@ from core.visualizer import (
     THICKNESS_CMAP,
     render_layer_grid,
     render_short_shot_map,
+    render_two_phase_animation,
     render_two_phase_map,
 )
 
@@ -1092,6 +1093,13 @@ with st.sidebar:
                 "（体積律速のショートショットは凍結の物理を含まない）。"
             ),
         )
+        if two_phase_on and wall_model != "none":
+            # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
+            # 出ない」に見える。設定と同じ場所に常時出す。
+            st.warning(
+                "壁面冷却モデルが『なし』のときだけ実行される。"
+                "現在の設定では二相解析はスキップされる。"
+            )
         if two_phase_on:
             shot_volume_cm3 = st.number_input(
                 "計量体積 V_shot [cm³]",
@@ -1104,6 +1112,14 @@ with st.sidebar:
                     "実行後の結果ペインに出る。"
                 ),
             )
+            _hint_geom = st.session_state.get("mfs_geom")
+            if _hint_geom is not None:
+                _v_fin = _hint_geom.volume_cm3()
+                _hint = f"参考（前回実行の形状）: 最終キャビティ体積 {_v_fin:.2f} cm³"
+                if icm and comp_stroke:
+                    _v_open = _v_fin + comp_stroke * _hint_geom.compression_area_mm2() / 1000.0
+                    _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
+                st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
         else:
             shot_volume_cm3 = None
 
@@ -1407,8 +1423,10 @@ if do_run:
         # 二相ショートショット。プレーンな HeleShawSolver 専用 —
         # 体積律速の短絡は凍結を含まないので、壁面冷却モデルとは組まない。
         two_phase_result = None
+        two_phase_skip_reason: str | None = None
         if two_phase_on:
             if skin_on or multilayer_on:
+                two_phase_skip_reason = "壁面冷却モデルが『なし』以外に設定されている（併用不可）"
                 st.warning(
                     "二相ショートショット解析は壁面冷却モデル『なし』専用です。"
                     "今回はスキップしました。"
@@ -1421,6 +1439,7 @@ if do_run:
                     # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
                     # 含まない。
                     two_phase_result = None
+                    two_phase_skip_reason = str(e)
                     st.warning(f"二相ショートショット解析をスキップしました: {e}")
 
         # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
@@ -1528,9 +1547,16 @@ if do_run:
             )
 
         _two_phase_path: Path | None = None
+        _two_phase_gif_path: Path | None = None
         if two_phase_result is not None:
             _two_phase_path = render_two_phase_map(
                 two_phase_result, _tmp_dir / "two_phase_short_shot.png"
+            )
+            _two_phase_gif_path = render_two_phase_animation(
+                two_phase_result,
+                _tmp_dir / "two_phase.gif",
+                num_frames=num_frames,
+                fps=8,
             )
 
         _zip_buf_run = io.BytesIO()
@@ -1545,6 +1571,7 @@ if do_run:
                 _layer_eta_grid_path,
                 _layer_short_shot_path,
                 _two_phase_path,
+                _two_phase_gif_path,
             ):
                 if _p is not None and _p.exists():
                     _zf_run.write(_p, _p.name)
@@ -1597,7 +1624,9 @@ if do_run:
         st.session_state["mfs_layer_eta_grid_path"] = _layer_eta_grid_path
         st.session_state["mfs_layer_short_shot_path"] = _layer_short_shot_path
         st.session_state["mfs_two_phase_path"] = _two_phase_path
+        st.session_state["mfs_two_phase_gif_path"] = _two_phase_gif_path
         st.session_state["mfs_two_phase_result"] = two_phase_result
+        st.session_state["mfs_two_phase_skip"] = two_phase_skip_reason
         st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
 
 # 結果が session_state にある間は、do_run=False のときも（3D 倍率スライダー
@@ -1619,7 +1648,9 @@ if "mfs_result" in st.session_state:
     layer_eta_grid_path = st.session_state.get("mfs_layer_eta_grid_path")
     layer_short_shot_path = st.session_state.get("mfs_layer_short_shot_path")
     two_phase_path = st.session_state.get("mfs_two_phase_path")
+    two_phase_gif_path = st.session_state.get("mfs_two_phase_gif_path")
     two_phase_result = st.session_state.get("mfs_two_phase_result")
+    two_phase_skip = st.session_state.get("mfs_two_phase_skip")
     _zip_bytes = st.session_state["mfs_zip_bytes"]
 
     with col_right:
@@ -1670,6 +1701,10 @@ if "mfs_result" in st.session_state:
             st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
             _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
 
+        if two_phase_skip is not None:
+            # 実行時の警告は rerun で流れるので、結果ペイン側にも理由を残す
+            st.info(f"二相ショートショット解析はスキップされました: {two_phase_skip}")
+
         if two_phase_path is not None and two_phase_result is not None:
             with st.expander("二相ショートショット（計量制限 + 圧縮前進）", expanded=True):
                 md2 = two_phase_result.metadata
@@ -1691,12 +1726,26 @@ if "mfs_result" in st.session_state:
                 )
                 if md2["final_complete"]:
                     st.info("この計量では圧縮後に完全充填する（ショートショットにならない）。")
+                if two_phase_gif_path is not None:
+                    st.markdown("**二相アニメーション**")
+                    st.image(str(two_phase_gif_path))
+                    st.caption(
+                        "射出相は実時間で進む。圧縮相は前進の順序のみ"
+                        "（モデルは圧縮の時間スケールを持たない）。"
+                    )
                 _download(
                     "⬇ PNGをダウンロード",
                     two_phase_path,
                     "image/png",
                     "dl_two_phase_png",
                 )
+                if two_phase_gif_path is not None:
+                    _download(
+                        "⬇ GIFをダウンロード",
+                        two_phase_gif_path,
+                        "image/gif",
+                        "dl_two_phase_gif",
+                    )
 
         if skin_path is not None and core_path is not None:
             with st.expander("スキン層 / コア層 / ショートショット"):

@@ -43,7 +43,12 @@ from core import (
     render_weldlines,
 )
 from core.two_phase import solve_two_phase_short_shot
-from core.visualizer import render_layer_grid, render_short_shot_map, render_two_phase_map
+from core.visualizer import (
+    render_layer_grid,
+    render_short_shot_map,
+    render_two_phase_animation,
+    render_two_phase_map,
+)
 
 
 def _solve_and_export(
@@ -165,6 +170,7 @@ def _solve_and_export(
             f"after compression {md['final_fill_fraction'] * 100:.1f}%"
         )
         render_two_phase_map(tp, out_dir / "two_phase_short_shot.png")
+        render_two_phase_animation(tp, out_dir / "two_phase.gif", num_frames=num_frames, fps=8)
     export_frames(result, out_dir / "frames", num_frames=8)
 
 

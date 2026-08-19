@@ -29,6 +29,7 @@ not exposed for cell-by-cell comparison here).
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import scipy.sparse.linalg as spla
 
 from core import HeleShawSolver, MaterialDB
@@ -236,30 +237,18 @@ def test_the_system_without_the_pinned_unknowns_is_spd() -> None:
     assert float(np.linalg.eigvalsh(interior).min()) > 0.0, "reduced block is not positive definite"
 
 
-def test_a_component_with_no_gate_forfeits_the_guarantee() -> None:
-    """The SPD guarantee holds per connected component that reaches a gate.
-
-    A region cut off from every gate has no pinned value, so its block is a
-    pure Neumann Laplacian with a zero eigenvalue and no unique solution. The
-    customer-facing Q&A states this precondition, so the boundary is asserted
-    and not merely described.
-
-    Written as an "either" on purpose: today the assembly happily produces a
-    singular block and ``spsolve`` returns astronomically large tau instead of
-    failing. If that is ever fixed by rejecting such geometry up front, this
-    test still passes -- it asks that the case not be silently trustworthy,
-    not that it keep failing the way it currently does.
-    """
+def _gateless_island_solver() -> HeleShawSolver:
+    """A strip whose far half is severed from the gate edge."""
     ny, nx = 6, 20
     mask = np.ones((ny, nx), dtype=bool)
-    mask[:, 9:11] = False  # a gap that severs the far half from the gate edge
+    mask[:, 9:11] = False
     g = Geometry(
         mask=mask,
         thickness_mm=np.full((ny, nx), 2.0, dtype=float),
         cell_size_mm=1.0,
     )
     g.gates = [(iy, 0) for iy in range(ny)]
-    solver = HeleShawSolver(
+    return HeleShawSolver(
         geometry=g,
         material=MaterialDB()["PP"],
         melt_temperature_K=503.15,
@@ -268,17 +257,30 @@ def test_a_component_with_no_gate_forfeits_the_guarantee() -> None:
         injection_volume_flow_cm3s=20.0,
     )
 
-    try:
-        S = solver._conductance_field(solver._effective_viscosity(), solver._open_thickness_field())
-        dirichlet = np.zeros(g.shape, dtype=bool)
-        for iy, ix in g.gates:
-            dirichlet[iy, ix] = True
-        A, _b, _ = solver._build_linear_system(S, dirichlet)
-    except ValueError:
-        return  # rejected up front: the guarantee is enforced, not just claimed
+
+def test_a_component_with_no_gate_has_no_unique_solution() -> None:
+    """The SPD guarantee holds per connected component that reaches a gate.
+
+    A region cut off from every gate has no pinned value, so its block is a
+    pure Neumann Laplacian with a zero eigenvalue. The customer-facing Q&A
+    states this precondition, so the boundary is asserted, not just described.
+
+    This is a statement about the *mathematics*, which does not change however
+    Issue #58 is resolved: a gate-less block is singular whether the solver
+    goes on to reject it, exclude it, or (as today) solve it anyway. What the
+    solver should *do* about it is the separate test below.
+    """
+    solver = _gateless_island_solver()
+    g = solver.geometry
+    S = solver._conductance_field(solver._effective_viscosity(), solver._open_thickness_field())
+    dirichlet = np.zeros(g.shape, dtype=bool)
+    for iy, ix in g.gates:
+        dirichlet[iy, ix] = True
+    A, _b, _ = solver._build_linear_system(S, dirichlet)
 
     dense = A.toarray()
-    flat = np.where(mask.ravel())[0]
+    flat = np.where(g.mask.ravel())[0]
+    nx = g.shape[1]
     gate_rows = {int(np.flatnonzero(flat == iy * nx + ix)[0]) for iy, ix in g.gates}
     keep = np.array([k for k in range(dense.shape[0]) if k not in gate_rows])
     interior = dense[np.ix_(keep, keep)]
@@ -288,6 +290,37 @@ def test_a_component_with_no_gate_forfeits_the_guarantee() -> None:
     assert ev.min() / abs(ev).max() < 1e-12, (
         "a gate-less component still looks positive definite; "
         "the documented precondition would be unnecessary"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Issue #58: solve() invents a fill time for gate-less regions instead of "
+    "rejecting them or marking them unfillable",
+)
+def test_solve_does_not_invent_a_fill_time_for_a_gateless_region() -> None:
+    """What the solver *should* do with geometry it cannot uniquely solve.
+
+    Marked ``xfail(strict=True)`` rather than asserting today's behaviour. An
+    "either the old way or the new way" assertion would have passed under both
+    the bug and its fix, which makes it worthless as a signal; encoding the bug
+    directly would have to be deleted to land the fix. Strict xfail does the
+    right thing in both directions -- it passes now, and the moment Issue #58
+    is fixed it reports XPASS and fails, which is the prompt to drop the marker.
+
+    Either resolution in that issue satisfies this: rejecting the geometry
+    raises, and excluding the component leaves its cells without a fill time.
+    """
+    solver = _gateless_island_solver()
+    try:
+        result = solver.solve(num_frames=2)
+    except ValueError:
+        return  # rejected up front
+
+    far = result.fill_time_s[:, 11:]
+    assert np.all(np.isnan(far)), (
+        "cells unreachable from any gate were given a finite fill time: "
+        f"{np.nanmin(far):.4g}..{np.nanmax(far):.4g}"
     )
 
 

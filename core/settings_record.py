@@ -39,20 +39,27 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def config_settings(source: str, cfg: Any = None, **extra: Any) -> dict[str, Any]:
+def config_settings(source: str, cfg: Any, **extra: Any) -> dict[str, Any]:
     """Describe the geometry input: which builder, and with what parameters.
 
-    ``cfg`` is the geometry config dataclass (``FilmGateConfig`` etc.).
-    ``extra`` carries anything that is not a config field -- the cell size of
-    the image importer, a spec fingerprint, the uploaded file name.
+    ``cfg`` is the geometry config dataclass (``FilmGateConfig`` etc.) and is
+    required. It used to default to ``None`` for the image importer, which
+    described itself with loose keyword arguments; that input was removed in
+    v0.23.0 and every remaining caller passes a dataclass. Keeping the default
+    would leave a record shape -- one with no ``config`` key -- that nothing
+    produces and therefore nothing checks.
+
+    ``extra`` carries what is not a config field: the builder's cell size, a
+    spec fingerprint.
     """
     if not source:
         raise ValueError("source must not be empty")
-    record: dict[str, Any] = {"input": source}
-    if cfg is not None:
-        if not is_dataclass(cfg) or isinstance(cfg, type):
-            raise TypeError("cfg must be a dataclass instance")
-        record["config"] = {k: _jsonable(v) for k, v in asdict(cfg).items()}
+    if not is_dataclass(cfg) or isinstance(cfg, type):
+        raise TypeError("cfg must be a dataclass instance")
+    record: dict[str, Any] = {
+        "input": source,
+        "config": {k: _jsonable(v) for k, v in asdict(cfg).items()},
+    }
     for key, value in extra.items():
         record[key] = _jsonable(value)
     return record

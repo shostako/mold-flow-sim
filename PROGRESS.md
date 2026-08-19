@@ -35,7 +35,7 @@ PR #19 〜 PR #25 を 1 日で集中マージ。詳細は `logs/2026-05.md` 参�
 
 | # | タスク | 所要 | メモ |
 |---|---|---|---|
-| 6 | **tempfile 掃除** | 0.5h | `app.py:579` (画像アップロード) は `with tempfile.TemporaryDirectory()` で置換可能。`app.py:670` は session_state 経由で widget 操作後も参照されるので単純な with 文では壊れる。session cleanup フックか `weakref.finalize` での遅延削除が必要。 |
+| 6 | **tempfile 掃除** | 0.5h | 結果用 tempdir (`app.py` の `tempfile.mkdtemp()`) は session_state 経由で widget 操作後も参照されるので、単純な `with tempfile.TemporaryDirectory()` では壊れる。session cleanup フックか `weakref.finalize` での遅延削除が必要。画像アップロード側の tempfile は v0.23.0 の画像入力撤去で消滅した。 |
 
 ### 層別ソルバーの拡張余地 (今回先送り)
 

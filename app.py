@@ -203,7 +203,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         r"$\tau \to t_{\text{arr}} \to T_k \to \eta_k \to S_{\text{total}} \to \tau_{\text{new}}$"
         " を $\\|\\Delta\\tau\\|_2 / \\|\\tau\\|_2 < $ tol まで反復。"
-        "発散時のみ $\\omega = 0.7$ で適応的 damping。**短ショット判定**は最終 iteration の中央層温度ベース:"
+        "発散時のみ $\\omega = 0.7$ で適応的 damping。**ショートショット判定**は最終 iteration の中央層温度ベース:"
         r" $T_{\text{solid}} = T_{\text{mold}} + f_{\text{solid}} (T_{\text{melt}} - T_{\text{mold}})$。"
     )
 
@@ -928,7 +928,7 @@ with st.sidebar:
             help=(
                 "なし: 既存 HeleShawSolver 相当、温度結合なし。\n"
                 "スキン層: 壁面で固化するスキン層を s(t)=c_skin·√(αt) で取り込み、"
-                "コア層 h_core=h-2s だけが流れる。短ショットも検出。\n"
+                "コア層 h_core=h-2s だけが流れる。ショートショットも検出。\n"
                 "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
                 "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
                 "極薄プレート (t<0.5mm) では層別を推奨。"
@@ -983,7 +983,7 @@ with st.sidebar:
                 9,
                 7,
                 help=(
-                    "厚み方向の離散化数。奇数で中央層が短ショット判定の代表セルに。"
+                    "厚み方向の離散化数。奇数で中央層がショートショット判定の代表セルに。"
                     "極薄プレートでは壁勾配が急なので N=7 を推奨。"
                 ),
             )
@@ -1613,7 +1613,7 @@ if "mfs_result" in st.session_state:
                     f"反復={md.get('multilayer_iterations')}, "
                     f"収束={md.get('multilayer_converged')}, "
                     f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
-                    f"短ショット率={md.get('short_shot_fraction', 0.0):.3f}"
+                    f"ショートショット率={md.get('short_shot_fraction', 0.0):.3f}"
                 )
                 _br_max = md.get("brinkman_number_max", 0.0)
                 _br_mean = md.get("brinkman_number_mean", 0.0)
@@ -1655,10 +1655,12 @@ if "mfs_result" in st.session_state:
                         "dl_layer_eta_png",
                     )
                 if layer_short_shot_path is not None:
-                    st.markdown("**短ショット予測** — 中央層温度が T_solid を切ったセルを赤マーク")
+                    st.markdown(
+                        "**ショートショット予測** — 中央層温度が T_solid を切ったセルを赤マーク"
+                    )
                     st.image(str(layer_short_shot_path))
                     _download(
-                        "⬇ 短ショット PNG",
+                        "⬇ ショートショット PNG",
                         layer_short_shot_path,
                         "image/png",
                         "dl_layer_short_png",

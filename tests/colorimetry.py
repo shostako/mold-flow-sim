@@ -78,8 +78,12 @@ def sample_ramp(
     tests claimed it did — true only while the luminance formula was itself a
     plain weighted sum of the encoded channels, and quietly false the moment
     that formula was corrected to linearize first.) Sampling removes the
-    argument entirely. It is not hypothetical: ``bluered_r`` passes a
-    stops-only check while reversing by 0.0023 inside a segment.
+    argument entirely. The transfer function is convex, so luminance along a
+    segment is convex too and may sag below the darker endpoint before
+    climbing back — a reversal the endpoints cannot show. That is a property
+    of the color space, not of any one palette: ``bluered_r`` merely happens
+    to exhibit it today (by 0.0023). If it stops, the reason for sampling is
+    unchanged.
     """
     out: list[tuple[float, float, float]] = []
     colors = [css_rgb(color) for _offset, color in stops]

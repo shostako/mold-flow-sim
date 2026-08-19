@@ -705,3 +705,39 @@ def test_solver_runs_on_profile_gate() -> None:
     res = solver.solve(num_frames=8)
     assert res.total_fill_time_s > 0
     assert np.isfinite(res.fill_time_s[g.mask]).all()
+
+
+# ----------------------- gate land wall vs mesh (Issue #58) ------------------
+
+
+def test_exit_width_below_the_mesh_spacing_is_rejected_not_severed() -> None:
+    """A gate exit narrower than the mesh must not silently sever the plate.
+
+    At ``gate_exit_width=0.5`` and the default ``cell_size_mm=1.0`` the land
+    wall used to close every column of the plate-bottom row, cutting the
+    whole plate off from the gate block; the solver then filled the orphaned
+    plate with a plausible-looking uniform fill time and no visible cue that
+    it was garbage (Issue #58). The builder now rejects the combination and
+    names the knob. Asserted on the demo spec so the reproduction stays the
+    one actually observed, not a synthetic corner.
+    """
+    d = _demo_spec().to_dict()
+    d["gate_exit_width"] = 0.5
+    narrow = GateProfileSpec.from_dict(d)
+    with pytest.raises(ValueError, match="gate_exit_width"):
+        build_profile_gate_geometry(narrow, _plate(), cell_size_mm=1.0)
+
+
+def test_exit_width_wider_than_the_mesh_still_builds_connected() -> None:
+    """The rejection must not fire for a healthy exit width.
+
+    Also asserts the built mask is one connected component, because that is
+    the property the rejection exists to protect -- a builder change that
+    kept the error message but started producing severed masks elsewhere
+    would still be caught here.
+    """
+    import scipy.ndimage as ndi
+
+    g = build_profile_gate_geometry(_demo_spec(), _plate(), cell_size_mm=1.0)
+    _labels, n = ndi.label(g.mask)
+    assert n == 1

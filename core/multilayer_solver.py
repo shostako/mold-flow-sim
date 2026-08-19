@@ -53,7 +53,7 @@ from .multilayer_thermal import (
     poiseuille_shear_rates,
     shear_heating_temperature_rise,
 )
-from .solver import FlowResult, HeleShawSolver
+from .solver import FlowResult, HeleShawSolver, check_gate_reachability
 
 
 @dataclass
@@ -337,6 +337,7 @@ class MultilayerHeleShawSolver:
         """
         if not self.geometry.gates:
             raise ValueError("Geometry has no gates")
+        check_gate_reachability(self.geometry)
 
         base = self._base
         eta_baseline = base._effective_viscosity()

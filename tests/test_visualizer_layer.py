@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import pytest
 
 from core import (
@@ -11,6 +13,7 @@ from core import (
     build_film_gate_geometry,
 )
 from core.visualizer import (
+    THICKNESS_CMAP,
     _scalar_layer_field,
     render_layer_grid,
     render_layer_map,
@@ -154,3 +157,33 @@ def test_render_layer_map_uses_zeta_in_title(tmp_path) -> None:
     # is present.
     assert "layer_zeta" in r.metadata
     assert len(r.metadata["layer_zeta"]) == 6  # N+1
+
+
+def test_thickness_ramp_runs_light_to_dark() -> None:
+    """Thickness maps must paint thin regions light and thick regions dark:
+    ink density reads as material quantity, and a thicker transparent part
+    really does look darker. The map is also required to keep the thin end
+    *saturated* — a low end that approaches white washes out the product
+    plate (the thinnest region and the only one anyone looks at) and lets the
+    3D ceiling blend into the pale-gray parting-line floor."""
+    cmap = plt.get_cmap(THICKNESS_CMAP)
+
+    def luminance(x: float) -> float:
+        r, g, b = cmap(x)[:3]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    assert luminance(0.0) > luminance(1.0), "thin end must be the lighter one"
+
+    thin_rgb = cmap(0.0)[:3]
+    _h, thin_sat, _v = mcolors.rgb_to_hsv(thin_rgb)
+    assert thin_sat > 0.5, (
+        f"thin end must stay saturated so it survives a white background; saturation={thin_sat:.2f}"
+    )
+
+
+def test_layer_thickness_field_uses_the_shared_thickness_ramp() -> None:
+    """The per-layer thickness panel plots the same quantity as the design
+    map, so it must not drift onto a different ramp."""
+    r = _solve()
+    _arr, cmap, _label = _scalar_layer_field(r, "thickness", 0)
+    assert cmap == THICKNESS_CMAP

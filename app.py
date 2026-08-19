@@ -47,6 +47,15 @@ from core import (
 )
 from core.geometry import Geometry
 from core.settings_record import config_settings, file_fingerprint, settings_json
+from core.spec_source import (
+    SPEC_LINK_NAME,
+    SpecMode,
+    SpecOrigin,
+    choose_spec_origin,
+    list_spec_files,
+    spec_link_exists,
+    spec_root,
+)
 from core.version import build_label
 from core.visualizer import (
     ISOCHRONE_LEVELS,
@@ -55,7 +64,24 @@ from core.visualizer import (
     render_short_shot_map,
 )
 
-DEMO_PROFILE_JSON = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
+APP_DIR = Path(__file__).parent
+DEMO_PROFILE_JSON = APP_DIR / "data" / "gate_profiles" / "demo_profile_gate.json"
+
+# Radio labels live here, next to the rest of the UI text; the logic in
+# ``core.spec_source`` switches on :class:`SpecMode` so that rewording one of
+# these cannot change which source a run reads from.
+SPEC_MODE_LABELS = {
+    SpecMode.DEMO: "デモプリセット（架空寸法）",
+    SpecMode.LOCAL: "ローカルから読込",
+    SpecMode.PASTE: "JSON貼り付け",
+}
+SPEC_MODE_BY_LABEL = {v: k for k, v in SPEC_MODE_LABELS.items()}
+#: Sentinel occupying index 0 of the spec dropdown. See
+#: ``choose_spec_origin`` for why the list does not default to a real file.
+SPEC_UNSELECTED = "— 未選択 —"
+#: Widget key for the spec uploader. Needed so the dropdown above it can
+#: read the dropped file from session state in the same run it lands.
+SPEC_UPLOAD_KEY = "spec_upload_pg"
 
 st.set_page_config(page_title="極薄プレート 簡易流動解析", layout="wide")
 st.title("極薄プレート 簡易流動解析")
@@ -320,6 +346,7 @@ with st.sidebar:
             "画像から生成 (PNG/JPG)",
         ],
         index=1,
+        key="geom_source",
     )
 
     if geom_source.startswith("Direct gate"):
@@ -744,25 +771,84 @@ with st.sidebar:
         upload = None
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
-            spec_source_pg = st.radio(
-                "スペック入力",
-                ["デモプリセット（架空寸法）", "JSONアップロード", "JSON貼り付け"],
-                horizontal=True,
-                help=(
-                    "図面から抽出したゲートブロック深さ場の JSON スペックを読み込む。"
-                    "実図面由来のスペックはリポジトリに含めず、ここでローカル読込する運用。"
-                ),
-            )
+            spec_mode_pg = SPEC_MODE_BY_LABEL[
+                st.radio(
+                    "スペック入力",
+                    list(SPEC_MODE_LABELS.values()),
+                    horizontal=True,
+                    key="spec_mode_pg",
+                    help=(
+                        "図面から抽出したゲートブロック深さ場の JSON スペックを読み込む。"
+                        "実図面由来のスペックはリポジトリに含めず、ここでローカル読込する運用。"
+                    ),
+                )
+            ]
             upload_pg = None
             json_text_pg = ""
-            if spec_source_pg.startswith("JSONアップロード"):
-                upload_pg = st.file_uploader("スペック JSON", type=["json"])
-            elif spec_source_pg.startswith("JSON貼り付け"):
+            local_spec_pg = None
+
+            if spec_mode_pg is SpecMode.LOCAL:
+                spec_root_pg = spec_root(APP_DIR)
+                # Read the uploader out of session state *before* drawing it, so
+                # the dropdown can be disabled in the same run the file lands
+                # rather than one rerun later. Streamlit writes widget state
+                # before rerunning the script, so this is the current value, not
+                # a stale one.
+                dropped_pg = st.session_state.get(SPEC_UPLOAD_KEY)
+                if spec_root_pg is not None:
+                    try:
+                        found_pg = list_spec_files(spec_root_pg)
+                    except OSError:
+                        # Never render the exception: its message carries the
+                        # absolute path, which names the customer and the job.
+                        found_pg = []
+                        st.error("スペックフォルダを読めない（権限またはマウント切れ）。")
+                    picked_pg = st.selectbox(
+                        "スペック",
+                        [SPEC_UNSELECTED] + [f.name for f in found_pg],
+                        index=0,
+                        disabled=dropped_pg is not None,
+                        key="spec_pick_pg",
+                        help="リポジトリ外のローカルフォルダにあるスペック。",
+                    )
+                    if picked_pg != SPEC_UNSELECTED:
+                        local_spec_pg = spec_root_pg / picked_pg
+                elif spec_link_exists(APP_DIR):
+                    # Something is at the link path but does not resolve to a
+                    # directory. Staying silent here would look identical to the
+                    # feature simply not existing, which is what the person who
+                    # set it up would least expect.
+                    st.caption(f"{SPEC_LINK_NAME} がディレクトリとして解決できない（リンク切れ）。")
+                upload_pg = st.file_uploader(
+                    "またはスペック JSON をドロップ", type=["json"], key=SPEC_UPLOAD_KEY
+                )
+            elif spec_mode_pg is SpecMode.PASTE:
                 json_text_pg = st.text_area(
                     "スペック JSON を貼り付け", height=240, placeholder='{\n  "name": ...\n}'
                 )
             else:
                 st.caption(f"同梱デモ: {DEMO_PROFILE_JSON.name}（架空寸法）")
+
+            spec_origin_pg = choose_spec_origin(
+                spec_mode_pg,
+                has_upload=upload_pg is not None,
+                has_local=local_spec_pg is not None,
+                has_paste=bool(json_text_pg.strip()),
+            )
+            # Say which source won, here in the sidebar where the controls are.
+            # The geometry is built in the main column, so a notice raised there
+            # would sit far from the two widgets that disagree. Only file names
+            # are ever shown -- the directory above them names the customer.
+            if spec_origin_pg is SpecOrigin.UPLOAD:
+                if local_spec_pg is not None:
+                    st.info(
+                        f"読込元: アップロード **{upload_pg.name}**"
+                        "（一覧の選択は使わない。解除はアップロード欄の ✕）"
+                    )
+                else:
+                    st.caption(f"読込元: アップロード {upload_pg.name}")
+            elif spec_origin_pg is SpecOrigin.LOCAL:
+                st.caption(f"読込元: {local_spec_pg.name}")
 
         with st.expander("製品形状", expanded=False):
             plate_w_pg = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
@@ -1123,17 +1209,22 @@ def build_geometry() -> tuple[Geometry, dict]:
             st.stop()
     if geom_source.startswith("Profile gate"):
         try:
-            if upload_pg is not None:
+            if spec_origin_pg is SpecOrigin.UPLOAD:
                 _spec_text = upload_pg.read().decode("utf-8")
                 _spec_fp = file_fingerprint(upload_pg.name, _spec_text)
-            elif json_text_pg.strip():
+            elif spec_origin_pg is SpecOrigin.LOCAL:
+                _spec_text = local_spec_pg.read_text(encoding="utf-8")
+                # File name only. The directory holding it names the customer
+                # and the job, and this record travels inside the results ZIP.
+                _spec_fp = file_fingerprint(local_spec_pg.name, _spec_text)
+            elif spec_origin_pg is SpecOrigin.PASTE:
                 _spec_text = json_text_pg
                 _spec_fp = file_fingerprint("(貼り付け)", _spec_text)
-            elif spec_source_pg.startswith("デモプリセット"):
+            elif spec_origin_pg is SpecOrigin.DEMO:
                 _spec_text = DEMO_PROFILE_JSON.read_text(encoding="utf-8")
                 _spec_fp = file_fingerprint(DEMO_PROFILE_JSON.name, _spec_text)
             else:
-                st.warning("スペック JSON をアップロードまたは貼り付けてください。")
+                st.warning("スペック JSON を一覧から選ぶか、アップロード／貼り付けしてください。")
                 st.stop()
             spec_pg = GateProfileSpec.from_json(_spec_text)
             plate_pg = ProfilePlateConfig(
@@ -1159,6 +1250,17 @@ def build_geometry() -> tuple[Geometry, dict]:
             )
         except json.JSONDecodeError as exc:
             st.error(f"JSON構文エラー: {exc}")
+            st.stop()
+        except UnicodeDecodeError:
+            # Before ValueError, which it subclasses.
+            st.error("スペックファイルを UTF-8 として読めない。")
+            st.stop()
+        except OSError:
+            # Deliberately drops the exception. Its message carries the absolute
+            # path, and ``client.showErrorDetails`` defaults to "full", so an
+            # uncaught OSError would print that path plus a traceback into the
+            # page -- the same directory name the fingerprint is careful to omit.
+            st.error("スペックファイルを読めない（権限またはマウント切れ）。")
             st.stop()
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")

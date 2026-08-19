@@ -20,6 +20,13 @@ env/
 # Generated demo outputs (reproducible via run_demo.py)
 outputs/
 
+# Local gate profile specs (traced off customer drawings -- never in this
+# public repo). ``core/spec_source.py`` shows the local-load UI only when
+# this path resolves to a directory, so this ignore rule is what keeps the
+# feature from ever existing on a deployed instance. Do not remove it.
+local_specs
+local_specs/
+
 # External tool markers
 .codex
 

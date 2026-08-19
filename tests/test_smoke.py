@@ -16,7 +16,6 @@ def test_core_imports() -> None:
         build_demo_geometry,
         cross_wlf_viscosity,
         export_frames,
-        geometry_from_image,
         render_fill_animation,
         render_pressure_map,
         render_weldlines,

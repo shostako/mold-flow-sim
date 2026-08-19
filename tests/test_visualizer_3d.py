@@ -281,8 +281,11 @@ def test_thickness_colorscale_matches_the_2d_map(small_result):
     # Sampled between the stops, not only at them: Plotly interpolates in
     # gamma-encoded sRGB while relative luminance linearizes first, so
     # luminance is not linear along a segment and stop-only monotonicity does
-    # not imply monotonicity between stops. ``bluered_r`` is the live proof —
-    # it passes a stops-only check and still reverses by 0.0023 inside one.
+    # not imply monotonicity between stops: the transfer function is convex, so
+    # luminance can sag below the darker endpoint and climb back inside a
+    # segment. ``bluered_r`` exhibits it today (0.0023), and
+    # ``test_stop_only_check_misses_a_within_segment_reversal`` pins a
+    # constructed witness that does not depend on any palette staying put.
     ramp = sample_ramp(list(fig.layout.coloraxis.colorscale))
     lums = [relative_luminance(rgb) for rgb in ramp]
     drops = [b - a for a, b in zip(lums, lums[1:])]
@@ -333,19 +336,33 @@ def test_ramp_criteria_discriminate_known_scales(scale, monotone, separable):
     assert (contrast_ratio(ramp[0], ramp[-1]) >= 3.0) is separable
 
 
-def test_stops_only_check_would_miss_bluered_r():
-    """The evidence for sampling rather than reading the stops.
+def test_stop_only_check_misses_a_within_segment_reversal():
+    """Why the ramp is sampled rather than read at its stops.
 
-    If this ever starts failing because ``Bluered_r`` became monotone when
-    sampled, the sampling in the thickness test is no longer earning its keep
-    and the simpler stops-only form is fine again.
+    The need is mathematical, not empirical: Plotly interpolates linearly
+    between stops in *gamma-encoded* sRGB, while relative luminance applies
+    the (convex) sRGB transfer function first. Luminance along a segment is
+    therefore a sum of convex functions of a linear argument — convex, not
+    linear — so it can dip below the darker endpoint and climb back up while
+    the two endpoints still read light-to-dark.
+
+    The witness here is **constructed** from that fact rather than borrowed
+    from a built-in palette, so it cannot rot: green -> magenta reads 0.377 ->
+    0.285 at the stops and sags to 0.142 in between. ``Bluered_r`` happens to
+    do the same thing in the wild today (by 0.0023) and is pinned in the
+    discrimination table above, but if Plotly ever redefines it, that only
+    retires one example — it does not make sampling unnecessary. Do not delete
+    ``sample_ramp`` on the strength of a palette changing.
     """
-    fig = go.Figure()
-    fig.update_layout(coloraxis=dict(colorscale="Bluered_r"))
-    stops = list(fig.layout.coloraxis.colorscale)
+    scale = [(0.0, "rgb(0,192,0)"), (1.0, "rgb(255,0,255)")]
 
-    at_stops = [relative_luminance(css_rgb(color)) for _offset, color in stops]
-    sampled = [relative_luminance(rgb) for rgb in sample_ramp(stops)]
+    at_stops = [relative_luminance(css_rgb(color)) for _offset, color in scale]
+    sampled = [relative_luminance(rgb) for rgb in sample_ramp(scale)]
 
-    assert all(b < a for a, b in zip(at_stops, at_stops[1:])), "stops-only check accepts it"
-    assert not all(b < a for a, b in zip(sampled, sampled[1:])), "sampled check must reject it"
+    assert all(b < a for a, b in zip(at_stops, at_stops[1:])), (
+        "the endpoints must look monotone, or this witness proves nothing"
+    )
+    assert min(sampled) < at_stops[-1], "luminance must sag below the darker endpoint"
+    assert not all(b < a for a, b in zip(sampled, sampled[1:])), (
+        "sampling must reject what the stops accept"
+    )

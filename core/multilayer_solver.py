@@ -385,6 +385,9 @@ class MultilayerHeleShawSolver:
         )
         tau, tau_max = base._solve_tau_field(S_baseline, dirichlet)
         tau_max_baseline = tau_max
+        tau_baseline = tau.copy()
+        dx = float(self.geometry.cell_size_mm)
+        cell_volume = dx * dx * h_open  # mm^3, what each cell adds when swept
         T_fill = T_fill_baseline
 
         layer_T_K: np.ndarray | None = None
@@ -397,6 +400,8 @@ class MultilayerHeleShawSolver:
         converged = False
         damping_events = 0
         T_fill_inflation = 1.0
+        tau_rep_flow: float | None = None
+        tau_rep_baseline: float | None = None
         T_solid_K = self.mold_temperature_K + float(self.solidification_temperature_fraction) * (
             self.melt_temperature_K - self.mold_temperature_K
         )
@@ -426,8 +431,13 @@ class MultilayerHeleShawSolver:
             prev_rel: float | None = None
             for it in range(1, max_iters + 1):
                 msk = ~np.isnan(tau)
-                t_arr = np.zeros_like(tau)
-                t_arr[msk] = (tau[msk] / tau_max) * T_fill
+                # Arrival time through the volume CDF -- the same map as
+                # HeleShawSolver (Issue #52): at constant rate a cell arrives
+                # when the volume at or below its tau has been injected. The
+                # old linear map reported the tau profile as if it were time,
+                # and its single-cell denominator let one pathological cell
+                # rescale every Neumann temperature in the cavity.
+                t_arr = base._arrival_time_field(tau, msk, cell_volume, T_fill)
                 # outside the cavity → tiny ε so neumann_layer_temperatures
                 # does not see zero (it has its own floor too).
                 t_arr = np.where(np.isnan(t_arr), 0.0, t_arr)
@@ -513,8 +523,19 @@ class MultilayerHeleShawSolver:
                     tau_new = tau_solved
                     tau_max_new = tau_max_solved
 
-                # Constant-pressure proxy: T_fill scales with τ_max growth.
-                T_fill_new = T_fill_baseline * (tau_max_new / max(tau_max_baseline, 1e-12))
+                # Constant-pressure proxy: T_fill scales with the growth of
+                # the volume-weighted mean τ over the cavity -- a resistance
+                # representative no single cell can own (Issue #52). On a
+                # uniform inflation (τ scaling by one factor everywhere) it
+                # reproduces the old max-ratio exactly.
+                rep_new = base._tau_volume_mean(tau_new, cavity_mask, cell_volume)
+                rep_base = base._tau_volume_mean(tau_baseline, cavity_mask, cell_volume)
+                if rep_new is None or rep_base is None:
+                    T_fill_new = T_fill_baseline
+                else:
+                    T_fill_new = T_fill_baseline * (rep_new / rep_base)
+                tau_rep_flow = rep_new
+                tau_rep_baseline = rep_base
 
                 tau = tau_new
                 tau_max = tau_max_new
@@ -554,8 +575,9 @@ class MultilayerHeleShawSolver:
 
         # Standard post-processing (mirrors HeleShawSolver.solve).
         msk = ~np.isnan(tau)
-        fill_time_s = np.full_like(tau, np.nan)
-        fill_time_s[msk] = (tau[msk] / tau_max) * T_fill
+        # Volume-CDF map, same as HeleShawSolver: the two solver modes must
+        # not disagree about what "fill time at a cell" means.
+        fill_time_s = base._arrival_time_field(tau, msk, cell_volume, T_fill)
         pressure_norm = np.full_like(tau, np.nan)
         pressure_norm[msk] = 1.0 - tau[msk] / tau_max
         weld_score = base._compute_weld_score(tau)
@@ -591,6 +613,8 @@ class MultilayerHeleShawSolver:
             "multilayer_convergence_tol": float(self.convergence_tol),
             "T_fill_baseline_s": T_fill_baseline,
             "T_fill_inflation": T_fill_inflation,
+            "tau_rep_flow": tau_rep_flow,
+            "tau_rep_baseline": tau_rep_baseline,
             "damping_factor": float(self.damping_factor),
             "damping_events": int(damping_events),
             "T_solid_K": float(T_solid_K),

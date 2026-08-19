@@ -120,8 +120,15 @@ S∇τ·n = 0        (壁面, Neumann)
 S = h³ / (12·η_eff)
 ```
 
-符号は実装の離散化に合わせてある（対角 `+Σcoeff` / 非対角 `−coeff` / 右辺 `+1` の
-正定値形）。連続形で書けば `∇·(S∇τ) = −1`。
+符号は実装の離散化に合わせてある（対角 `+Σcoeff` / 非対角 `−coeff` / 右辺 `+1`）。
+連続形で書けば `∇·(S∇τ) = −1`。
+
+この符号の取り方で**制約前の**作用素は対称かつ半正定値になる（面コンダクタンスを
+両隣で共有するため）。ただし**組み上がった `A` は対称でも正定値でもない** — Dirichlet を
+行にしか適用しておらず、ゲート行を単位行に潰す一方で、隣接する内部行はゲート列の
+`−coeff` を残したままだからだ。ロードマップの CG / AMG 化は、先にゲート列を消去する
+必要がある。消去自体は近似ではなく厳密（ゲートで `τ = 0` なので右辺に移る項がゼロ）だが、
+`spsolve` が対称性を要求しないので現状は手つかず。
 
 - `τ` は擬似到達時間場（ゲートからの "距離" の単調関数）
 - 絶対時間スケーリング：`fill_time(x,y) = (τ/τ_max) × (V_cavity / Q)`
@@ -148,7 +155,7 @@ T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(α
 S_total(x,y) = (h³/2) · Σ_k m_k / η_k                         # Σ m_k = 1/6
 ```
 
-`τ ↔ T_k ↔ η_k ↔ S_total` を fixed-point で結合、`τ_max` 比で `T_fill` をスケール。中央層温度が固化しきい値を切ったセルを short shot にマーク。`MultilayerHeleShawSolver(num_layers=5, layer_distribution="wall_refined", thermal_coupling=True)` から呼ぶ。`num_layers=1` + `thermal_coupling=False` で既存 `HeleShawSolver` と数値同一 (テスト担保)。
+`τ ↔ T_k ↔ η_k ↔ S_total` を fixed-point で結合、`τ_max` 比で `T_fill` をスケール。中央層温度が固化しきい値を切ったセルをショートショットにマーク。`MultilayerHeleShawSolver(num_layers=5, layer_distribution="wall_refined", thermal_coupling=True)` から呼ぶ。`num_layers=1` + `thermal_coupling=False` で既存 `HeleShawSolver` と数値同一 (テスト担保)。
 
 詳細・限界 (面内コーナー効果は依然として捕捉不可) は `CLAUDE.md` 参照。
 

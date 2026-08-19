@@ -300,45 +300,37 @@ def test_a_component_with_no_gate_has_no_unique_solution() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Issue #58: solve() invents a fill time for gate-less regions instead of "
-    "rejecting them or marking them unfillable",
-)
-def test_solve_does_not_invent_a_fill_time_for_a_gateless_region() -> None:
-    """What the solver *should* do with geometry it cannot uniquely solve.
+def test_solve_rejects_a_gateless_region() -> None:
+    """Issue #58, fixed: a severed component is rejected at the entrance.
 
-    Marked ``xfail(strict=True)`` rather than asserting today's behaviour. An
-    "either the old way or the new way" assertion would have passed under both
-    the bug and its fix, which makes it worthless as a signal; encoding the bug
-    directly would have to be deleted to land the fix. Strict xfail does the
-    right thing in both directions -- it passes now, and the moment Issue #58
-    is fixed it reports XPASS and fails, which is the prompt to drop the marker.
+    This test previously carried ``xfail(strict=True)`` while the solver
+    still ran ``spsolve`` over the singular block and returned garbage; the
+    fix made it XPASS, which is what prompted this rewrite.
 
-    Either resolution in that issue satisfies this: rejecting the geometry
-    raises, and excluding the component leaves its cells without a fill time.
-
-    ``raises=AssertionError`` narrows the expectation to the failure actually
-    predicted. Without it, any exception counts as the expected failure, so an
-    unrelated ``RuntimeError`` or ``IndexError`` from a future regression would
-    be recorded as a tidy XFAIL and never surface. It also keeps the XPASS
-    signal honest in the other direction: a fix that rejects the geometry with
-    something other than ``ValueError`` escapes the ``except`` below, and
-    should be reported as a plain failure telling us to widen it -- not
-    silently absorbed as "still broken, as expected".
+    Rejection (not ``unfillable_mask``) is asserted deliberately: a
+    component no gate can reach is a geometry specification mistake, and
+    routing it through the unfillable machinery would relabel "your input
+    is wrong" as "the model predicts a short shot". The match string pins
+    the reachability message, so the generic "Geometry has no gates" guard
+    cannot satisfy this test by accident.
     """
     solver = _gateless_island_solver()
-    try:
-        result = solver.solve(num_frames=2)
-    except ValueError:
-        return  # rejected up front
+    with pytest.raises(ValueError, match="cannot be .*reached from any gate"):
+        solver.solve(num_frames=2)
 
-    far = result.fill_time_s[:, 11:]
-    assert np.all(np.isnan(far)), (
-        "cells unreachable from any gate were given a finite fill time: "
-        f"{np.nanmin(far):.4g}..{np.nanmax(far):.4g}"
-    )
+
+def test_solve_rejects_gates_that_all_sit_outside_the_mask() -> None:
+    """Gates exist but none lands on a cavity cell: reject, do not solve.
+
+    Distinct from the empty-gates guard (which this geometry passes) and
+    from the severed-component case (every cavity cell is orphaned here,
+    not just an island). Without the check, the whole cavity is one pure
+    Neumann block and ``spsolve`` returns garbage for all of it.
+    """
+    solver = _gateless_island_solver()
+    solver.geometry.gates = [(0, 9)]  # inside the punched hole -> mask False
+    with pytest.raises(ValueError, match="no gate lies inside"):
+        solver.solve(num_frames=2)
 
 
 def test_eliminating_the_gate_columns_does_not_move_the_solution() -> None:
@@ -365,3 +357,33 @@ def test_eliminating_the_gate_columns_does_not_move_the_solution() -> None:
     scale = float(np.max(np.abs(tau_raw)))
     assert scale > 0
     assert float(np.max(np.abs(tau_sym - tau_raw))) / scale < 1e-10
+
+
+def test_a_diagonal_touch_does_not_count_as_reachable() -> None:
+    """The reachability check must use 4-connectivity, like the stencil.
+
+    Two regions that touch only at a corner exchange no flux in the 5-point
+    discretisation, so the far region is still a singular Neumann block. An
+    8-connected labelling would call this geometry connected and wave the
+    garbage through -- which is why the connectivity choice is asserted
+    here rather than trusted to a comment.
+    """
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[:2, :2] = True  # gate-side block
+    mask[2:, 2:] = True  # far block, touching only at the (1,1)/(2,2) corner
+    g = Geometry(
+        mask=mask,
+        thickness_mm=np.where(mask, 2.0, 0.0),
+        cell_size_mm=1.0,
+    )
+    g.gates = [(0, 0)]
+    solver = HeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+    )
+    with pytest.raises(ValueError, match="cannot be .*reached from any gate"):
+        solver.solve(num_frames=2)

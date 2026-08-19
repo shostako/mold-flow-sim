@@ -806,3 +806,38 @@ def test_shear_heating_metadata_contains_material_thermal_fields() -> None:
     assert r.metadata["thermal_conductivity_W_mK"] == pytest.approx(
         db["PP"].thermal_conductivity_W_mK
     )
+
+
+# --------------------------------------------------------------------------
+# Gate reachability (Issue #58)
+# --------------------------------------------------------------------------
+
+
+def test_multilayer_rejects_a_gateless_region() -> None:
+    """The reachability guard covers this solver too, not just the base one.
+
+    ``MultilayerHeleShawSolver.solve`` does not call ``HeleShawSolver.solve``
+    -- it drives ``_solve_tau_field`` directly -- so a check living only in
+    the base ``solve()`` would leave the layered path solving the same
+    singular Neumann block. The severed strip here is the Issue #58
+    reproduction, and the match string pins the reachability message.
+    """
+    from core.geometry import Geometry
+
+    ny, nx = 6, 20
+    mask = np.ones((ny, nx), dtype=bool)
+    mask[:, 9:11] = False  # sever the far half from the gate edge
+    g = Geometry(
+        mask=mask,
+        thickness_mm=np.full((ny, nx), 2.0, dtype=float),
+        cell_size_mm=1.0,
+    )
+    g.gates = [(iy, 0) for iy in range(ny)]
+    solver = MultilayerHeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        num_layers=3,
+        **_solver_kwargs(),
+    )
+    with pytest.raises(ValueError, match="cannot be .*reached from any gate"):
+        solver.solve(num_frames=2)

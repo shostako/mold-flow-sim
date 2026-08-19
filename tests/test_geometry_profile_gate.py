@@ -189,6 +189,40 @@ def test_direct_construction_rejects_non_finite(mutate) -> None:
         bad.validate()
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int64])
+def test_numpy_scalar_fields_are_walked(dtype) -> None:
+    """A spec can hold NumPy scalars — the walk must not skip them.
+
+    ``np.float32`` / ``np.int64`` are not subclasses of the builtin
+    ``float`` / ``int``, so a type gate written as ``(int, float)`` drops
+    them without a trace: the leaf count falls and the value reaches the
+    rasterizer unchecked. (``np.float64`` does subclass ``float``, so it
+    would pass either gate — which is exactly why testing only that one
+    would prove nothing.)
+    """
+    spec = _weld_spec()
+    n_plain = len(list(_iter_numbers(spec, "")))
+    swapped = dataclasses.replace(
+        spec,
+        island=dataclasses.replace(spec.island, weld=WeldSpec(t_range=(dtype(6), 14.0), depth=0.1)),
+    )
+    assert len(list(_iter_numbers(swapped, ""))) == n_plain
+    swapped.validate()  # finite NumPy values stay acceptable
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_numpy_nan_is_rejected(dtype) -> None:
+    bad = _weld_spec()
+    bad = dataclasses.replace(
+        bad,
+        island=dataclasses.replace(
+            bad.island, weld=WeldSpec(t_range=(6.0, 14.0), depth=dtype("nan"))
+        ),
+    )
+    with pytest.raises(ValueError, match="finite"):
+        bad.validate()
+
+
 def test_json_nan_literal_is_rejected() -> None:
     """json.loads accepts the bare NaN literal — the parser must not."""
     text = _weld_spec().to_json().replace('"depth": 0.1', '"depth": NaN')

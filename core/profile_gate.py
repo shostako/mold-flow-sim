@@ -42,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import numbers
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,10 +197,19 @@ def _iter_numbers(obj: Any, path: str) -> Iterator[tuple[str, float]]:
 
     Walks dataclass fields and sequences, so a numeric field added later is
     covered without touching the check that consumes this.
+
+    The scalar test is ``numbers.Real``, not ``(int, float)``: a spec built
+    from NumPy-derived values (an optimizer sweep, a value read off an
+    array) can hold ``np.float32`` / ``np.int64``, and those are *not*
+    subclasses of the builtins — they would be skipped silently, which is
+    the one failure mode this walk exists to prevent. ``np.float64`` happens
+    to subclass ``float`` and would have been caught either way; relying on
+    that is an accident, not a guarantee. ``bool`` is a ``Real`` too, so it
+    is filtered out first.
     """
     if obj is None or isinstance(obj, (bool, str)):
         return
-    if isinstance(obj, (int, float)):
+    if isinstance(obj, numbers.Real):
         yield path, float(obj)
     elif dataclasses.is_dataclass(obj):
         for f in dataclasses.fields(obj):

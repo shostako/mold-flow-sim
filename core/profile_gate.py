@@ -39,8 +39,10 @@ specs must stay outside the repo and be loaded locally at runtime.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,26 +137,11 @@ def _req(d: dict, key: str, path: str) -> Any:
     return d[key]
 
 
-def _finite(val: float, label: str) -> float:
-    """Reject NaN / ±Infinity at the parsing boundary.
-
-    ``json.loads`` accepts the ``NaN`` / ``Infinity`` literals, and every
-    comparison against NaN is False — so a NaN would slip through *both*
-    sides of every range check in :meth:`GateProfileSpec.validate` and reach
-    the rasterizer. There it either poisons the depth field (NaN volume, NaN
-    solve) or, in a mask test, silently drops the feature it was meant to
-    describe. Catching it here covers every numeric field at once.
-    """
-    if not math.isfinite(val):
-        raise ValueError(f"gate profile JSON: '{label}' must be a finite number, got {val!r}")
-    return val
-
-
 def _num(d: dict, key: str, path: str) -> float:
     val = _req(d, key, path)
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise ValueError(f"gate profile JSON: '{path}{key}' must be a number, got {val!r}")
-    return _finite(float(val), f"{path}{key}")
+    return float(val)
 
 
 def _line(d: dict, key: str, path: str) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -166,9 +153,6 @@ def _line(d: dict, key: str, path: str) -> tuple[tuple[float, float], tuple[floa
         raise ValueError(
             f"gate profile JSON: '{path}{key}' must be [[t1, w1], [t2, w2]], got {val!r}"
         ) from exc
-    for pt in pts:
-        for v in pt:
-            _finite(v, f"{path}{key}")
     return pts
 
 
@@ -179,8 +163,6 @@ def _pair(d: dict, key: str, path: str) -> tuple[float, float]:
         pair = (float(a), float(b))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"gate profile JSON: '{path}{key}' must be [a, b], got {val!r}") from exc
-    for v in pair:
-        _finite(v, f"{path}{key}")
     return pair
 
 
@@ -207,6 +189,25 @@ def _check_unknown(d: dict, known: set[str], path: str) -> None:
 # ---------------------------------------------------------------------------
 # top-level spec
 # ---------------------------------------------------------------------------
+
+
+def _iter_numbers(obj: Any, path: str) -> Iterator[tuple[str, float]]:
+    """Yield ``(dotted path, value)`` for every number reachable from ``obj``.
+
+    Walks dataclass fields and sequences, so a numeric field added later is
+    covered without touching the check that consumes this.
+    """
+    if obj is None or isinstance(obj, (bool, str)):
+        return
+    if isinstance(obj, (int, float)):
+        yield path, float(obj)
+    elif dataclasses.is_dataclass(obj):
+        for f in dataclasses.fields(obj):
+            child = getattr(obj, f.name)
+            yield from _iter_numbers(child, f"{path}.{f.name}" if path else f.name)
+    elif isinstance(obj, (tuple, list)):
+        for i, v in enumerate(obj):
+            yield from _iter_numbers(v, f"{path}[{i}]")
 
 
 @dataclass(frozen=True)
@@ -419,6 +420,17 @@ class GateProfileSpec:
     # ---- validation ----
 
     def validate(self) -> None:
+        # Non-finite values first: every range check below is a comparison,
+        # and every comparison against NaN is False — so a NaN slips through
+        # *both* sides of a bounds test. Downstream it either poisons the
+        # depth field (NaN volume, NaN solve) or, in a mask test, silently
+        # drops the feature it was meant to describe (worse: the geometry is
+        # wrong with no diagnostic). Walking the dataclass instead of listing
+        # fields keeps this closed when new fields are added, and covers
+        # direct construction as well as the JSON path.
+        for label, val in _iter_numbers(self, ""):
+            if not math.isfinite(val):
+                raise ValueError(f"{label} must be a finite number, got {val!r}")
         if self.units != "mm":
             raise ValueError(f"units must be 'mm', got {self.units!r}")
         for label, val in (

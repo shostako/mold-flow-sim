@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 from pathlib import Path
 
@@ -12,10 +13,13 @@ import pytest
 from core import (
     GateProfileSpec,
     HeleShawSolver,
+    LandSpec,
     MaterialDB,
     ProfilePlateConfig,
+    WeldSpec,
     build_profile_gate_geometry,
 )
+from core.profile_gate import _iter_numbers
 
 DEMO_JSON = Path(__file__).parent.parent / "data" / "gate_profiles" / "demo_profile_gate.json"
 
@@ -129,6 +133,60 @@ def test_every_numeric_field_rejects_non_finite() -> None:
             _set_at(d, path, bad)
             with pytest.raises(ValueError, match="finite"):
                 GateProfileSpec.from_dict(d)
+
+
+def test_validate_walk_sees_every_numeric_leaf() -> None:
+    """The non-finite check walks the dataclass, so it must reach everything.
+
+    This is the load-bearing half of the guarantee: ``validate`` runs one
+    loop over ``_iter_numbers``, so if the walk reaches every numeric leaf,
+    every leaf is checked — including fields added after this was written.
+    """
+    spec = _weld_spec()
+    walked = {label for label, _ in _iter_numbers(spec, "")}
+    from_json = {".".join(str(x) for x in path) for path in _numeric_slots(spec.to_dict())}
+    assert len(walked) == 28, sorted(walked)
+    # same leaf count as the serialized form (paths differ: [i] vs .i)
+    assert len(walked) == len(from_json)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda s: dataclasses.replace(s, gate_exit_width=float("nan")), id="top"),
+        pytest.param(
+            lambda s: dataclasses.replace(s, land=LandSpec(depth=float("nan"), length=1.0)),
+            id="nested",
+        ),
+        pytest.param(
+            lambda s: dataclasses.replace(
+                s,
+                island=dataclasses.replace(
+                    s.island, weld=WeldSpec(t_range=(6.0, 14.0), depth=float("nan"))
+                ),
+            ),
+            id="twice-nested",
+        ),
+        pytest.param(
+            lambda s: dataclasses.replace(
+                s,
+                island=dataclasses.replace(
+                    s.island, weld=WeldSpec(t_range=(float("nan"), 14.0), depth=0.1)
+                ),
+            ),
+            id="tuple-element",
+        ),
+    ],
+)
+def test_direct_construction_rejects_non_finite(mutate) -> None:
+    """The spec dataclasses are exported and can be built without the parser.
+
+    Guarding only ``_num`` / ``_pair`` would leave this path open, and a
+    NaN there reaches the rasterizer exactly the same way.
+    """
+    bad = mutate(_weld_spec())
+    with pytest.raises(ValueError, match="finite"):
+        bad.validate()
 
 
 def test_json_nan_literal_is_rejected() -> None:

@@ -236,6 +236,61 @@ def test_the_system_without_the_pinned_unknowns_is_spd() -> None:
     assert float(np.linalg.eigvalsh(interior).min()) > 0.0, "reduced block is not positive definite"
 
 
+def test_a_component_with_no_gate_forfeits_the_guarantee() -> None:
+    """The SPD guarantee holds per connected component that reaches a gate.
+
+    A region cut off from every gate has no pinned value, so its block is a
+    pure Neumann Laplacian with a zero eigenvalue and no unique solution. The
+    customer-facing Q&A states this precondition, so the boundary is asserted
+    and not merely described.
+
+    Written as an "either" on purpose: today the assembly happily produces a
+    singular block and ``spsolve`` returns astronomically large tau instead of
+    failing. If that is ever fixed by rejecting such geometry up front, this
+    test still passes -- it asks that the case not be silently trustworthy,
+    not that it keep failing the way it currently does.
+    """
+    ny, nx = 6, 20
+    mask = np.ones((ny, nx), dtype=bool)
+    mask[:, 9:11] = False  # a gap that severs the far half from the gate edge
+    g = Geometry(
+        mask=mask,
+        thickness_mm=np.full((ny, nx), 2.0, dtype=float),
+        cell_size_mm=1.0,
+    )
+    g.gates = [(iy, 0) for iy in range(ny)]
+    solver = HeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+    )
+
+    try:
+        S = solver._conductance_field(solver._effective_viscosity(), solver._open_thickness_field())
+        dirichlet = np.zeros(g.shape, dtype=bool)
+        for iy, ix in g.gates:
+            dirichlet[iy, ix] = True
+        A, _b, _ = solver._build_linear_system(S, dirichlet)
+    except ValueError:
+        return  # rejected up front: the guarantee is enforced, not just claimed
+
+    dense = A.toarray()
+    flat = np.where(mask.ravel())[0]
+    gate_rows = {int(np.flatnonzero(flat == iy * nx + ix)[0]) for iy, ix in g.gates}
+    keep = np.array([k for k in range(dense.shape[0]) if k not in gate_rows])
+    interior = dense[np.ix_(keep, keep)]
+
+    # Scale-free: the zero mode is zero relative to the block's own magnitude.
+    ev = np.linalg.eigvalsh((interior + interior.T) / 2)
+    assert ev.min() / abs(ev).max() < 1e-12, (
+        "a gate-less component still looks positive definite; "
+        "the documented precondition would be unnecessary"
+    )
+
+
 def test_eliminating_the_gate_columns_does_not_move_the_solution() -> None:
     """Zeroing the gate columns is exact, not an approximation.
 

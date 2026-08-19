@@ -6,10 +6,20 @@ Reference idea: solve the elliptic problem
     S * grad(tau) . n = 0      at cavity walls (Neumann, no flux)
 
 The leading minus is the form actually assembled: the diagonal carries
-+sum(coeff), the off-diagonals -coeff, and the right-hand side +1, which
-is the positive-definite discretisation. Written without it (continuous
-form: div(S grad tau) = -1) the signs of the docstring and the matrix
-disagree, which they did until v0.24.0.
++sum(coeff), the off-diagonals -coeff, and the right-hand side +1.
+Written without it (continuous form: div(S grad tau) = -1) the signs of
+the docstring and the matrix disagree, which they did until v0.24.0.
+
+That sign convention makes the *unconstrained* operator symmetric and
+positive semi-definite (face conductances are shared by both neighbours).
+The assembled ``A`` is neither, because Dirichlet is applied to rows only:
+a gate row is overwritten with the identity while the interior rows next
+to it keep their -coeff in the gate column. Do not read "SPD" into this
+docstring and reach for a symmetric-only solver -- the CG/AMG item on the
+README roadmap needs the gate columns eliminated first. That elimination
+is exact rather than an approximation, since tau = 0 at gates means the
+term moved to the right-hand side is zero; it is simply not done yet,
+because ``spsolve`` does not care.
 
 where S = h^3 / (12 * eta_eff) is the Hele-Shaw flow conductance,
 h is local cavity thickness, and eta_eff is an effective viscosity

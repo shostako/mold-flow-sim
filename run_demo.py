@@ -42,7 +42,8 @@ from core import (
     render_skin_layer_map,
     render_weldlines,
 )
-from core.visualizer import render_layer_grid, render_short_shot_map
+from core.two_phase import solve_two_phase_short_shot
+from core.visualizer import render_layer_grid, render_short_shot_map, render_two_phase_map
 
 
 def _solve_and_export(
@@ -70,11 +71,17 @@ def _solve_and_export(
     multilayer_convergence_tol: float = 1e-3,
     solidification_temperature_fraction: float = 0.3,
     shear_heating_enabled: bool = False,
+    two_phase_shot_volume_cm3: float | None = None,
     num_frames: int = 30,
 ) -> None:
     if skin_layer and multilayer:
         raise ValueError(
             "skin_layer and multilayer are mutually exclusive — choose one wall-cooling model"
+        )
+    if two_phase_shot_volume_cm3 is not None and (skin_layer or multilayer):
+        raise ValueError(
+            "two_phase_shot_volume_cm3 needs the plain isothermal solver — "
+            "a metering-limited short stops on volume, not on freeze-off"
         )
     db = MaterialDB()
     if multilayer:
@@ -149,6 +156,15 @@ def _solve_and_export(
         render_layer_grid(result, out_dir / "layer_temperature_grid.png", field="temperature")
         render_layer_grid(result, out_dir / "layer_viscosity_grid.png", field="viscosity")
         render_short_shot_map(result, out_dir / "multilayer_short_shot.png")
+    if two_phase_shot_volume_cm3 is not None:
+        tp = solve_two_phase_short_shot(solver, two_phase_shot_volume_cm3)
+        md = tp.metadata
+        print(
+            f"[{label}] two-phase short shot: V_shot={two_phase_shot_volume_cm3:.2f} cm^3  "
+            f"injection {md['injection_fill_fraction'] * 100:.1f}% -> "
+            f"after compression {md['final_fill_fraction'] * 100:.1f}%"
+        )
+        render_two_phase_map(tp, out_dir / "two_phase_short_shot.png")
     export_frames(result, out_dir / "frames", num_frames=8)
 
 
@@ -450,6 +466,23 @@ FILM_GATE_CASES: dict[str, dict] = {
         compression=True,
         compression_stroke_mm=0.70,
         compression_fraction=0.95,
+    ),
+    # Metering-limited (staged) short shot on the stepped plate with ICM:
+    # the metered 4.5 cm^3 fills ~66% of the open-gap cavity during
+    # injection, then the 0.70 mm closing stroke squeezes the pool forward.
+    # The two_phase_short_shot.png map is the deliverable to hold against a
+    # physical staged short — real machine parameters, no reverse-fitting.
+    "FilmGate_PP_two_phase_short": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+        compression=True,
+        compression_stroke_mm=0.70,
+        compression_fraction=0.95,
+        two_phase_shot_volume_cm3=4.5,
     ),
     # Same stepped-plate baseline as above, but driven by the multilayer
     # solver with N=5 wall-refined layers. Per-layer Neumann temperature

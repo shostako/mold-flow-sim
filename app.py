@@ -55,12 +55,14 @@ from core.spec_source import (
     spec_link_exists,
     spec_root,
 )
+from core.two_phase import solve_two_phase_short_shot
 from core.version import build_label
 from core.visualizer import (
     ISOCHRONE_LEVELS,
     THICKNESS_CMAP,
     render_layer_grid,
     render_short_shot_map,
+    render_two_phase_map,
 )
 
 APP_DIR = Path(__file__).parent
@@ -920,6 +922,7 @@ with st.sidebar:
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
             index=2,
+            key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
                 "skin": "スキン層 (1層 + Stefan/Neumann)",
@@ -1043,7 +1046,7 @@ with st.sidebar:
             shear_heating_enabled = False
 
     with st.expander("射出圧縮成形 (ICM)", expanded=False):
-        icm = st.checkbox("圧縮成形ON", value=False)
+        icm = st.checkbox("圧縮成形ON", value=False, key="icm_on")
         if icm:
             # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
             # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
@@ -1072,6 +1075,37 @@ with st.sidebar:
             comp_factor = 1.0
             comp_stroke = None
             comp_frac = 0.0
+
+    with st.expander("ショートショット（計量制限）", expanded=False):
+        # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
+        # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
+        # 線形求解2回・時間積分なし。実機の計量値をそのまま入れて
+        # 段階ショートショットの現物形状と直接比較する用途。
+        two_phase_on = st.checkbox(
+            "二相ショートショット解析ON",
+            value=False,
+            key="two_phase_on",
+            help=(
+                "計量を意図的に絞ったショートショットの最終形状を予測する。"
+                "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
+                "溶融プールを前進、体積保存）の二相。壁面冷却モデル『なし』専用"
+                "（体積律速のショートショットは凍結の物理を含まない）。"
+            ),
+        )
+        if two_phase_on:
+            shot_volume_cm3 = st.number_input(
+                "計量体積 V_shot [cm³]",
+                min_value=0.01,
+                value=5.0,
+                step=0.1,
+                key="two_phase_shot_volume",
+                help=(
+                    "実機の計量値（ショット体積）。キャビティ体積との比較は"
+                    "実行後の結果ペインに出る。"
+                ),
+            )
+        else:
+            shot_volume_cm3 = None
 
     with st.expander("出力", expanded=False):
         num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
@@ -1370,6 +1404,18 @@ if do_run:
             )
         result = solver.solve(num_frames=num_frames)
 
+        # 二相ショートショット。プレーンな HeleShawSolver 専用 —
+        # 体積律速の短絡は凍結を含まないので、壁面冷却モデルとは組まない。
+        two_phase_result = None
+        if two_phase_on:
+            if skin_on or multilayer_on:
+                st.warning(
+                    "二相ショートショット解析は壁面冷却モデル『なし』専用です。"
+                    "今回はスキップしました。"
+                )
+            else:
+                two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
+
         # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
         # ダウンロードした ZIP から設定を復元できない (画像から寸法を測って
         # 体積と tau_max で逆算する羽目になる)。
@@ -1411,6 +1457,11 @@ if do_run:
                     "fraction": comp_frac,
                 }
                 if icm
+                else {"enabled": False}
+            ),
+            "two_phase_short_shot": (
+                {"enabled": True, "shot_volume_cm3": shot_volume_cm3}
+                if two_phase_result is not None
                 else {"enabled": False}
             ),
             "output": {
@@ -1469,6 +1520,12 @@ if do_run:
                 result, _tmp_dir / "multilayer_short_shot.png"
             )
 
+        _two_phase_path: Path | None = None
+        if two_phase_result is not None:
+            _two_phase_path = render_two_phase_map(
+                two_phase_result, _tmp_dir / "two_phase_short_shot.png"
+            )
+
         _zip_buf_run = io.BytesIO()
         with zipfile.ZipFile(_zip_buf_run, "w", zipfile.ZIP_DEFLATED) as _zf_run:
             for _p in (
@@ -1480,6 +1537,7 @@ if do_run:
                 _layer_T_grid_path,
                 _layer_eta_grid_path,
                 _layer_short_shot_path,
+                _two_phase_path,
             ):
                 if _p is not None and _p.exists():
                     _zf_run.write(_p, _p.name)
@@ -1504,6 +1562,13 @@ if do_run:
                 "metadata.json",
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
             )
+            if two_phase_result is not None:
+                _zf_run.writestr(
+                    "two_phase_metadata.json",
+                    json.dumps(
+                        two_phase_result.metadata, indent=2, ensure_ascii=False, default=str
+                    ),
+                )
 
         # 解析結果の一式を session_state に格納。次回 rerun（3D スライダー操作等）
         # でも下のブロックがこれを拾って表示する。
@@ -1524,6 +1589,8 @@ if do_run:
         st.session_state["mfs_layer_T_grid_path"] = _layer_T_grid_path
         st.session_state["mfs_layer_eta_grid_path"] = _layer_eta_grid_path
         st.session_state["mfs_layer_short_shot_path"] = _layer_short_shot_path
+        st.session_state["mfs_two_phase_path"] = _two_phase_path
+        st.session_state["mfs_two_phase_result"] = two_phase_result
         st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
 
 # 結果が session_state にある間は、do_run=False のときも（3D 倍率スライダー
@@ -1544,6 +1611,8 @@ if "mfs_result" in st.session_state:
     layer_T_grid_path = st.session_state.get("mfs_layer_T_grid_path")
     layer_eta_grid_path = st.session_state.get("mfs_layer_eta_grid_path")
     layer_short_shot_path = st.session_state.get("mfs_layer_short_shot_path")
+    two_phase_path = st.session_state.get("mfs_two_phase_path")
+    two_phase_result = st.session_state.get("mfs_two_phase_result")
     _zip_bytes = st.session_state["mfs_zip_bytes"]
 
     with col_right:
@@ -1593,6 +1662,34 @@ if "mfs_result" in st.session_state:
             st.image(str(weld_path))
             st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
             _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
+
+        if two_phase_path is not None and two_phase_result is not None:
+            with st.expander("二相ショートショット（計量制限 + 圧縮前進）", expanded=True):
+                md2 = two_phase_result.metadata
+                st.image(str(two_phase_path))
+                st.caption(
+                    "青=射出相で充填（白線=射出等時線）、橙=圧縮相で前進、"
+                    "灰=未充填。実機の計量値・ストロークをそのまま入れて"
+                    "段階ショートショットの現物形状と比較する。"
+                )
+                tc1, tc2, tc3 = st.columns(3)
+                tc1.metric("計量体積 V_shot", f"{md2['shot_volume_cm3']:.2f} cm³")
+                tc2.metric(
+                    "射出終了時 充填率",
+                    f"{md2['injection_fill_fraction'] * 100:.1f} %",
+                )
+                tc3.metric(
+                    "圧縮後 充填率",
+                    f"{md2['final_fill_fraction'] * 100:.1f} %",
+                )
+                if md2["final_complete"]:
+                    st.info("この計量では圧縮後に完全充填する（ショートショットにならない）。")
+                _download(
+                    "⬇ PNGをダウンロード",
+                    two_phase_path,
+                    "image/png",
+                    "dl_two_phase_png",
+                )
 
         if skin_path is not None and core_path is not None:
             with st.expander("スキン層 / コア層 / ショートショット"):

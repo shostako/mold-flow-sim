@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.patches import Patch
 from scipy.ndimage import distance_transform_edt
 
 from .multilayer_solver import MultilayerFlowResult
@@ -1063,3 +1064,95 @@ def export_frames(
     finally:
         plt.close(fig)
     return out_paths
+
+
+# ---------------------------------------------------------------------------
+# Two-phase (injection + compression) short-shot map
+# ---------------------------------------------------------------------------
+
+# Categorical, not a ramp: the two regions answer "which phase put melt
+# here", an unordered fact. Blue = melt pool at the end of injection,
+# orange = area gained while the mold closed. Both are opaque — the region
+# boundary is the deliverable (it gets compared against a physical short
+# shot), so no interpolation, no alpha.
+TWO_PHASE_INJECTION_RGB = (0.22, 0.49, 0.72)
+TWO_PHASE_COMPRESSION_RGB = (0.95, 0.61, 0.15)
+
+
+def render_two_phase_map(
+    result,
+    output_path: str | Path,
+) -> Path:
+    """Categorical map of a ``TwoPhaseShortShotResult``.
+
+    Injection region (blue), compression advance (orange), unfilled cavity
+    (the geometry backdrop gray). Injection isochrones are overlaid inside
+    the injection region when the arrival field has enough distinct values.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+
+    omega1 = result.injection_mask
+    omega2 = result.final_mask
+    rgba = np.zeros((*g.shape, 4))
+    rgba[omega1] = (*TWO_PHASE_INJECTION_RGB, 1.0)
+    rgba[omega2 & ~omega1] = (*TWO_PHASE_COMPRESSION_RGB, 1.0)
+    ax.imshow(
+        rgba,
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        zorder=_Z_FIELD,
+    )
+
+    # Injection-front history: thin isochrones inside the melt pool.
+    t = np.where(omega1, result.injection_fill_time_s, np.nan)
+    finite_t = t[np.isfinite(t)]
+    if finite_t.size and np.unique(finite_t).size >= 2 and min(g.mask.shape) >= 2:
+        levels = np.linspace(float(finite_t.min()), float(finite_t.max()), 8)
+        if np.unique(levels).size >= 2:
+            ax.contour(
+                t,
+                levels=levels,
+                extent=extent,
+                origin="lower",
+                colors="white",
+                linewidths=0.6,
+                alpha=0.7,
+                zorder=_Z_ISOCHRONE,
+            )
+
+    _draw_gate_markers(ax, result)
+
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+
+    md = result.metadata
+    ax.set_title(
+        "Two-phase short shot — shot {v:.1f} cm3, "
+        "injection {fi:.0%} → after compression {ff:.0%}".format(
+            v=result.shot_volume_cm3,
+            fi=md.get("injection_fill_fraction", float("nan")),
+            ff=md.get("final_fill_fraction", float("nan")),
+        )
+    )
+
+    handles = [
+        Patch(facecolor=TWO_PHASE_INJECTION_RGB, label="filled during injection"),
+        Patch(facecolor=TWO_PHASE_COMPRESSION_RGB, label="advanced by compression"),
+        Patch(facecolor=_cavity_backdrop_colors()[1], label="unfilled"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path

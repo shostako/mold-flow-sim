@@ -295,6 +295,7 @@ def test_a_component_with_no_gate_has_no_unique_solution() -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="Issue #58: solve() invents a fill time for gate-less regions instead of "
     "rejecting them or marking them unfillable",
 )
@@ -310,6 +311,15 @@ def test_solve_does_not_invent_a_fill_time_for_a_gateless_region() -> None:
 
     Either resolution in that issue satisfies this: rejecting the geometry
     raises, and excluding the component leaves its cells without a fill time.
+
+    ``raises=AssertionError`` narrows the expectation to the failure actually
+    predicted. Without it, any exception counts as the expected failure, so an
+    unrelated ``RuntimeError`` or ``IndexError`` from a future regression would
+    be recorded as a tidy XFAIL and never surface. It also keeps the XPASS
+    signal honest in the other direction: a fix that rejects the geometry with
+    something other than ``ValueError`` escapes the ``except`` below, and
+    should be reported as a plain failure telling us to widen it -- not
+    silently absorbed as "still broken, as expected".
     """
     solver = _gateless_island_solver()
     try:

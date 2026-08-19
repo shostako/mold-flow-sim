@@ -326,6 +326,13 @@ def test_ramp_criteria_discriminate_known_scales(scale, monotone, separable):
     named scales whose verdicts are known. ``Bluered_r`` is the one that only
     a *sampled* ramp catches; ``Jet_r`` is the one that only a *whole-ramp*
     check catches.
+
+    These expectations describe Plotly's palettes, not the criteria. If one of
+    them fails because Plotly redefined a scale, **update the expectation** —
+    re-measure the scale and record what it now is. Do not loosen a criterion
+    to make the row pass: the criteria answer to what a thickness map has to
+    do (order thicknesses by darkness, carry enough contrast to read), which
+    no upstream palette change can alter.
     """
     fig = go.Figure()
     fig.update_layout(coloraxis=dict(colorscale=scale))

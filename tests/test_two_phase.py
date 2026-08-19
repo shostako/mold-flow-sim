@@ -514,7 +514,13 @@ def test_frame_states_validate_num_frames_and_survive_small_budgets():
 
     res = _stroked_strip_result()
     with pytest.raises(ValueError, match="num_frames"):
-        frame_states(res, num_frames=1)
+        frame_states(res, num_frames=0)
+    # num_frames=1 degenerates to a single final-state frame — this keeps the
+    # CLI contract aligned with the fill animation, which accepts 1 (Claude
+    # review P3 on PR #63)
+    (single,) = frame_states(res, num_frames=1)
+    assert (single.injection_filled | single.compression_filled == res.final_mask).all()
+    assert single.phase == "compression" and single.value == 1.0
     frames = frame_states(res, num_frames=4)  # both phases active, tiny budget
     assert len(frames) == 4
     filled_last = frames[-1].injection_filled | frames[-1].compression_filled

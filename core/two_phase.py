@@ -35,8 +35,11 @@ Deliberate limitations (documented, not bugs):
   plates where the pool conductance dwarfs the front's.
 
 With ``compression_molding=False`` (or stroke 0) the open and final gaps
-coincide, the phase-2 budget is zero and ``Omega2 == Omega1`` — the model
-degrades gracefully to a plain volume-limited short shot.
+coincide and phase 2 is skipped outright (``Omega2 == Omega1``) — the model
+degrades gracefully to a plain volume-limited short shot. A metered shot
+smaller than the gate region's open-gap volume is rejected: the gate cells
+are the tau = 0 tie group of the volume CDF, so a shot that cannot cover
+them has no consistent melt region.
 """
 
 from __future__ import annotations
@@ -147,6 +150,20 @@ def solve_two_phase_short_shot(
     t_arr1 = solver._arrival_time_field(tau1, mask, vol_open, T_open_total)
     T_inj = V_shot_mm3 / 1000.0 / Q_cm3s
 
+    # The gate cells all sit at tau = 0, so they form the first tie group of
+    # the volume CDF. A metered shot that cannot even cover that group has no
+    # consistent melt region in this model: forcing the gates in regardless
+    # would report an achieved volume larger than the metered shot (Codex P2
+    # on PR #62), and leaving them out would strand phase 2 without a
+    # Dirichlet source. Reject the input instead.
+    V_gate_mm3 = float(vol_open[gate_dirichlet & mask].sum())
+    if V_shot_mm3 < V_gate_mm3 * (1.0 - _REL_EPS):
+        raise ValueError(
+            "shot_volume_cm3 is smaller than the gate region's open-gap volume "
+            f"({V_gate_mm3 / 1000.0:.4f} cm^3) — the metered shot cannot cover "
+            "the gate cells, so the model has no melt region to grow from"
+        )
+
     injection_complete = V_shot_mm3 >= V_open_total * (1.0 - _REL_EPS)
     omega1 = np.zeros(geom.shape, dtype=bool)
     if injection_complete:
@@ -155,10 +172,6 @@ def solve_two_phase_short_shot(
         sel = mask & ~np.isnan(tau1)
         take = _prefix_by_volume(tau1[sel], vol_open[sel], V_shot_mm3)
         omega1[sel] = take
-        # The melt enters at the gates regardless of how small the shot is;
-        # without this a shot smaller than the gate tie-group would leave
-        # phase 2 with no Dirichlet cells at all.
-        omega1 |= gate_dirichlet & mask
 
     injection_fill_time_s = np.where(omega1, t_arr1, np.nan)
 
@@ -171,10 +184,17 @@ def solve_two_phase_short_shot(
     tau2: np.ndarray | None = None
     compression_progress = np.full(geom.shape, np.nan)
     final_complete = V_shot_mm3 >= V_fin_total * (1.0 - _REL_EPS)
+    # Phase 2 models the mold closing. When the gap does not actually close
+    # anywhere (no ICM, stroke 0, factor 1) there is no squeeze to advance
+    # the front — but the atomic phase-1 cutoff can still leave a residual
+    # budget, and on a nonuniform-thickness cavity the re-solved tau2
+    # ordering could hand that residual to some smaller cell (Codex P2 on
+    # PR #62). Gate the phase on the physics, not on the residual being zero.
+    gap_closes = bool(np.any(h_open[mask] > h_fin[mask] * (1.0 + _REL_EPS)))
 
     if final_complete:
         omega2 |= mask
-    else:
+    elif gap_closes:
         # h_open >= h_fin everywhere, so V_open_total >= V_fin_total and a
         # complete injection would have implied a complete final fill —
         # reaching this branch means omega1 is a strict subset of the cavity.

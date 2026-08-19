@@ -80,12 +80,39 @@ def test_spec_link_is_ignored_in_this_repo() -> None:
     assert _ignored_in(REPO, SPEC_LINK_NAME)
 
 
-def test_tracked_demo_spec_is_not_ignored() -> None:
-    """Counterweight: the rule must not swallow the repo's own demo spec, which
-    is fictional and deliberately tracked. An over-broad ``*.json`` would
-    satisfy the test above while quietly untracking data.
+def test_ignore_rule_does_not_swallow_the_demo_spec(tmp_path: Path) -> None:
+    """Counterweight: the rule must stay narrow.
+
+    An over-broad ``*.json`` would satisfy every test above while quietly
+    untracking the repo's own fictional demo spec.
+
+    Asked in a scratch repo about an *untracked* copy of that path, because
+    ``git check-ignore`` answers "not ignored" for any tracked file no matter
+    what the rules say. Asking the real repo about the real demo spec is
+    therefore vacuous -- it passes because the file is committed, and would go
+    on passing under ``*.json``. Measured: with ``*.json`` in ``.gitignore``,
+    the tracked path returns 1 and an untracked copy of it returns 0.
     """
-    assert not _ignored_in(REPO, str(DEMO_SPEC.relative_to(REPO)))
+    if _git("init", "-q", cwd=tmp_path).returncode != 0:
+        pytest.skip("git unavailable")
+    (tmp_path / ".gitignore").write_text(
+        (REPO / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    rel = DEMO_SPEC.relative_to(REPO)
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text("{}", encoding="utf-8")
+
+    assert not _ignored_in(tmp_path, str(rel))
+
+
+def test_demo_spec_is_tracked() -> None:
+    """And it must actually be in the repo.
+
+    Separate from the rule check above: a narrow ignore rule is no use if the
+    file it was careful to spare was never committed.
+    """
+    rel = str(DEMO_SPEC.relative_to(REPO))
+    assert _git("ls-files", "--error-unmatch", rel, cwd=REPO).returncode == 0
 
 
 @pytest.mark.parametrize(

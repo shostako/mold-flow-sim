@@ -216,6 +216,26 @@ def test_asymmetry_is_confined_to_the_gate_columns() -> None:
     assert not stray, f"asymmetry away from any gate row: {stray[:5]}"
 
 
+def test_the_system_without_the_pinned_unknowns_is_spd() -> None:
+    """Dropping the gate rows *and* columns leaves a symmetric positive-definite block.
+
+    This is the claim the customer-facing Q&A makes
+    (``docs/流動解析の仕組み_想定問答_技術編.md``): existence and uniqueness are
+    guaranteed. The guarantee is real, but it belongs to the reduced system, not
+    to ``A`` as assembled -- so it is asserted here rather than left as prose. A
+    document that promises a mathematical property to a customer should not be
+    the only place that property is recorded.
+    """
+    A, _b, gate_rows = _assembled_system()
+    dense = A.toarray()
+    keep = np.array([k for k in range(dense.shape[0]) if k not in gate_rows])
+    interior = dense[np.ix_(keep, keep)]
+
+    assert np.array_equal(interior, interior.T), "reduced block is not symmetric"
+    # eigvalsh needs symmetry, which the line above has just established.
+    assert float(np.linalg.eigvalsh(interior).min()) > 0.0, "reduced block is not positive definite"
+
+
 def test_eliminating_the_gate_columns_does_not_move_the_solution() -> None:
     """Zeroing the gate columns is exact, not an approximation.
 

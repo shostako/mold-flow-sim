@@ -33,6 +33,13 @@ Deliberate limitations (documented, not bugs):
   ``Omega1``, i.e. pressure gradients *inside* the pool are neglected
   relative to the resistance of the unfilled front. Reasonable for thin
   plates where the pool conductance dwarfs the front's.
+- **Only ``Omega1`` nests across shot volumes.** The injection pool is a
+  prefix of one fixed ``tau1`` order, so a larger metered shot strictly
+  contains a smaller one. ``Omega2`` carries no such guarantee: each shot's
+  phase 2 solves ``tau2`` against its own pool boundary, and on branched or
+  nonuniform cavities the reordering can trade a cell near one front for a
+  cell near another. Each result is a self-consistent quasi-static history
+  of *that* shot; a volume sweep is a family of runs, not one nested film.
 
 With ``compression_molding=False`` (or stroke 0) the open and final gaps
 coincide and phase 2 is skipped outright (``Omega2 == Omega1``) — the model
@@ -76,8 +83,8 @@ class TwoPhaseShortShotResult:
     # ``final_mask & ~injection_mask``.
     compression_progress: np.ndarray
     # Raw pseudo-conduction fields (NaN outside the cavity). ``tau2`` is
-    # None when phase 2 was skipped (full fill at injection, or nothing to
-    # advance).
+    # None when phase 2 never solved (no gap closure, full fill already at
+    # injection, or nothing to advance).
     tau1: np.ndarray
     tau2: np.ndarray | None
     shot_volume_cm3: float
@@ -104,6 +111,19 @@ def _prefix_by_volume(tau_vals: np.ndarray, volumes: np.ndarray, budget: float) 
     group_cum = cum[last]
     take[order] = group_cum <= budget * (1.0 + _REL_EPS)
     return take
+
+
+def _group_end_progress(tau_vals: np.ndarray, volumes: np.ndarray, budget: float) -> np.ndarray:
+    """Normalized advance order for the advanced cells: group-end cumulative
+    volume over ``budget``, so ties share one value and the last group lands
+    at (close to) 1."""
+    order = np.argsort(tau_vals, kind="stable")
+    tau_sorted = tau_vals[order]
+    cum = np.cumsum(volumes[order])
+    last = np.searchsorted(tau_sorted, tau_sorted, side="right") - 1
+    prog = np.empty(tau_vals.shape)
+    prog[order] = np.minimum(cum[last] / budget, 1.0)
+    return prog
 
 
 def solve_two_phase_short_shot(
@@ -205,6 +225,23 @@ def solve_two_phase_short_shot(
 
     if final_complete:
         omega2 |= mask
+        # Injection incomplete but the shot covers the whole final cavity —
+        # the everyday ICM full-fill case (V_fin <= V_shot < V_open). The
+        # shape needs no solve, but the result contract promises a normalized
+        # advance order on the compression-filled cells, so tau2 is still
+        # computed to order them (Codex P2, round 3). With injection already
+        # complete there is nothing to order; without gap closure this branch
+        # implies injection_complete anyway (V_shot >= V_fin = V_open).
+        candidates = mask & ~omega1
+        if gap_closes and not injection_complete and candidates.any():
+            S2 = solver._conductance_field(eta, h_fin)
+            tau2, _ = solver._solve_tau_field(S2, omega1)
+            cand_sel = candidates & ~np.isnan(tau2)
+            total = float(vol_fin[cand_sel].sum())
+            if total > 0:
+                compression_progress[cand_sel] = _group_end_progress(
+                    tau2[cand_sel], vol_fin[cand_sel], total
+                )
     elif gap_closes:
         # h_open >= h_fin everywhere, so V_open_total >= V_fin_total and a
         # complete injection would have implied a complete final fill —
@@ -220,18 +257,9 @@ def solve_two_phase_short_shot(
             advanced[cand_sel] = take
             omega2 |= advanced
             if advanced.any():
-                # Normalized advance order: group-end cumulative volume over
-                # the budget, so ties share one value and the last group
-                # lands at (close to) 1.
-                tv = tau2[advanced]
-                vv = vol_fin[advanced]
-                order = np.argsort(tv, kind="stable")
-                tau_sorted = tv[order]
-                cum = np.cumsum(vv[order])
-                last = np.searchsorted(tau_sorted, tau_sorted, side="right") - 1
-                prog = np.empty(tv.shape)
-                prog[order] = np.minimum(cum[last] / budget, 1.0)
-                compression_progress[advanced] = prog
+                compression_progress[advanced] = _group_end_progress(
+                    tau2[advanced], vol_fin[advanced], budget
+                )
 
     achieved_mm3 = float(vol_fin[omega2].sum())
     n_cavity = int(mask.sum())

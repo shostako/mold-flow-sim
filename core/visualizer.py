@@ -108,6 +108,25 @@ def _draw_geometry(ax, result: FlowResult) -> None:
 # colorblind-safe map if red/green confusion is a concern.
 FILL_CMAP = "turbo"
 
+# Thickness is an *input* — the geometry the analyst drew — not a solved field,
+# so it gets a single-quantity luminance ramp instead of the rainbow the result
+# maps use, and the picture reads as "this is the part" at a glance. The ramp
+# runs **light = thin, dark = thick**: ink density reads as material quantity
+# (contour shading, layered ink), and for a transparent molded part it is
+# literally true — thicker plastic attenuates more light and looks darker. The
+# unreversed ``cividis`` had it backwards.
+#
+# It is ``cividis_r`` and not a single-hue map (``Blues``, ``bone_r``) because
+# the thin end has to stay *saturated*. The product plate is both the thinnest
+# region and the one region anyone actually looks at; a map whose low end
+# approaches white washes the product out, drops the step contrast between
+# neighbouring plate zones, and in 3D lets the ceiling blend into the pale-gray
+# PL floor and the white background — measured on ``bone_r``, where the 0.35 mm
+# band went pure white and the outline disappeared. ``cividis_r`` ends in a
+# saturated yellow instead, and cividis is built for color-vision deficiency,
+# a property reversal preserves.
+THICKNESS_CMAP = "cividis_r"
+
 # Number of isochrone *lines* drawn over the fill front — asking for N puts
 # exactly N lines on the plot, which is what the UI label promises and what a
 # reader counts. The lines are the quantitative read of the plot; the colors
@@ -729,7 +748,7 @@ def _scalar_layer_field(
         label = "γ̇ [1/s]"
     elif field == "thickness":
         arr = result.layer_thickness_mm
-        cmap = "cividis"
+        cmap = THICKNESS_CMAP
         label = "h_k [mm]"
     else:
         raise ValueError(

@@ -266,13 +266,28 @@ def test_thickness_colorscale_matches_the_2d_map(small_result):
 
     fig = render_3d_thickness_map(small_result)
     assert fig.layout.coloraxis.colorscale is not None
-    # Plotly resolves the name into an (offset, css-color) table; take the
-    # end points and confirm the *rendered* ramp runs light -> dark, which is
-    # the whole point of the reversal. Comparing the name alone would pass
-    # even if Plotly's "Cividis_r" were secretly unreversed.
-    scale = fig.layout.coloraxis.colorscale
-    lo_lum = _relative_luminance(_css_rgb(scale[0][1]))
-    hi_lum = _relative_luminance(_css_rgb(scale[-1][1]))
-    assert lo_lum > hi_lum, (
-        f"thin end must be the lighter one: thin lum={lo_lum:.3f}, thick lum={hi_lum:.3f}"
+    # Plotly resolves the name into an (offset, css-color) table. Confirm the
+    # *rendered* ramp darkens monotonically, which is the whole point of the
+    # reversal. Comparing the name alone would pass even if Plotly's
+    # "Cividis_r" were secretly unreversed.
+    #
+    # Monotone across the whole ramp, not merely light-at-0 and dark-at-1: a
+    # two-endpoint check is fooled by 26 of Plotly's 188 built-in scales.
+    # ``jet_r`` is the worst — its endpoints differ by only 0.070 luminance
+    # while the middle swings back up by 0.719, so it reads as "light to dark"
+    # and is in fact a rainbow. A thickness map has to let the reader rank two
+    # thicknesses by darkness alone; where luminance reverses, two different
+    # thicknesses share a darkness and the ordering stops being recoverable.
+    #
+    # Checking the stops is sufficient, not a sample: Plotly interpolates
+    # linearly in RGB between stops, and luminance is a linear functional of
+    # RGB, so luminance is linear between stops too — monotone at the stops
+    # implies monotone everywhere.
+    lums = [
+        _relative_luminance(_css_rgb(color)) for _offset, color in fig.layout.coloraxis.colorscale
+    ]
+    drops = [b - a for a, b in zip(lums, lums[1:])]
+    assert all(d < 0 for d in drops), (
+        "thickness ramp must darken monotonically (thin=light, thick=dark); "
+        f"luminance by stop = {[round(v, 3) for v in lums]}"
     )

@@ -172,7 +172,18 @@ def test_thickness_ramp_runs_light_to_dark() -> None:
         r, g, b = cmap(x)[:3]
         return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-    assert luminance(0.0) > luminance(1.0), "thin end must be the lighter one"
+    # Monotone across the whole ramp, not merely lighter-at-0. A thickness map
+    # has to let the reader rank two thicknesses by darkness alone; where
+    # luminance reverses, two different thicknesses share a darkness and the
+    # ordering stops being recoverable. Endpoint-only checks are fooled by
+    # rainbow ramps such as ``jet_r``, whose ends are nearly equal in
+    # luminance while the middle swings far brighter.
+    lums = [luminance(x / 255.0) for x in range(256)]
+    drops = [b - a for a, b in zip(lums, lums[1:])]
+    assert all(d < 0 for d in drops), (
+        "thickness ramp must darken monotonically (thin=light, thick=dark); "
+        f"{sum(1 for d in drops if d >= 0)} of {len(drops)} steps do not darken"
+    )
 
     thin_rgb = cmap(0.0)[:3]
     _h, thin_sat, _v = mcolors.rgb_to_hsv(thin_rgb)

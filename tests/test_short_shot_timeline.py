@@ -79,7 +79,10 @@ def test_the_time_scale_comes_from_the_flowing_tau_not_the_frozen_one(frozen_run
     # the cavity-wide solve, which the frozen cells dominate, against the
     # re-solve over the cells that fill
     assert md["tau_max_cavity"] / md["tau_max_flow"] > 10.0
-    expected = md["T_fill_baseline_s"] * md["tau_max_flow"] / md["tau_max_baseline"]
+    # The inflation ratio is built from volume-weighted representatives over
+    # the still-flowing set -- not from single-cell maxima, which is how one
+    # pathological cell used to own the whole normalization (Issue #52).
+    expected = md["T_fill_baseline_s"] * md["tau_rep_flow"] / md["tau_rep_baseline"]
     assert frozen_run.total_fill_time_s == pytest.approx(expected, rel=1e-9)
 
 
@@ -155,8 +158,10 @@ def test_a_part_where_only_the_gate_fills_reports_the_baseline_time():
     assert md["no_flow"] is True
     assert r.total_fill_time_s == pytest.approx(md["T_fill_baseline_s"], rel=1e-9)
     assert md["T_fill_inflation"] == pytest.approx(1.0, rel=1e-9)
+    # The only cell that fills is the gate, and under the volume map its time
+    # is the time to inject its own volume -- which IS the whole fill here.
     finite = r.fill_time_s[np.isfinite(r.fill_time_s)]
-    assert finite.size and np.all(finite == 0.0)
+    assert finite.size and np.all(finite == pytest.approx(r.total_fill_time_s, rel=1e-9))
 
 
 def test_the_color_axis_agrees_with_the_reported_time_when_nothing_flows():
@@ -260,9 +265,16 @@ def test_no_short_shot_leaves_the_title_alone():
 
 
 def _sealed_plate(n: int = 24):
-    """Plate whose gate is ringed by cells thin enough to freeze shut."""
+    """Plate whose gate is ringed by cells thin enough to freeze shut.
+
+    0.02 mm, not 0.04: under the volume-CDF map the ring's arrival time is its
+    own tiny volume over Q -- almost zero -- so the skins get almost no time
+    to grow before the conductance snapshot is taken. The ring has to be thin
+    enough to close on that short clock for the sealed-gate branch to exist.
+    (0.04 sat right at the boundary; 0.03 already seals, 0.02 adds margin.)
+    """
     thk = np.full((n, n), 2.0)
-    thk[2:5, 2:5] = 0.04
+    thk[2:5, 2:5] = 0.02
     thk[3, 3] = 2.0
     geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
     geom.gates = [(3, 3)]
@@ -459,7 +471,7 @@ def test_the_inflation_compares_two_states_of_the_same_region():
     r = _solve(_sealed_strip())
     md = r.metadata
     assert md["T_fill_inflation"] == pytest.approx(
-        md["tau_max_flow"] / md["tau_max_baseline"], rel=1e-9
+        md["tau_rep_flow"] / md["tau_rep_baseline"], rel=1e-9
     )
     # the cavity-wide solve is orders away; it must not be what fed the ratio
     assert md["tau_max_cavity"] / md["tau_max_flow"] > 100.0
@@ -476,7 +488,12 @@ def test_the_default_rate_scales_with_the_live_volume_too():
     """
     from core.solver import DEFAULT_FILL_TIME_S
 
-    geom = _sealed_strip()
+    # Not _sealed_strip(): at the slow 1.5 s default fill a 1.5 growth
+    # constant freezes the 2.0 mm cells too (physically fair -- PP skins are
+    # ~0.5 mm/side by then and the constant-pressure feedback finishes the
+    # job). A gentler constant with a thinner band keeps the near half alive
+    # while the band still seals, which is the split this test needs.
+    geom = _strip(np.concatenate([np.full(20, 2.0), np.full(6, 0.03), np.full(20, 2.0)]))
     r = HeleShawSolver(
         geom,
         MaterialDB()["PP"],
@@ -485,7 +502,7 @@ def test_the_default_rate_scales_with_the_live_volume_too():
         injection_velocity_mms=200.0,
         injection_volume_flow_cm3s=None,
         skin_layer_enabled=True,
-        skin_growth_constant=1.5,
+        skin_growth_constant=0.5,
     ).solve(num_frames=6)
     live = geom.mask & ~r.unfillable_mask
     share = float(geom.thickness_mm[live].sum()) / float(geom.thickness_mm[geom.mask].sum())
@@ -597,3 +614,104 @@ def test_the_restricted_solver_keeps_the_rate_it_was_running_at():
     assert sub._baseline_fill_time(sub.geometry) == pytest.approx(
         solver._baseline_fill_time(sub.geometry), rel=1e-12
     )
+
+
+# --- the volume map (Issue #52) ----------------------------------------------
+
+
+def test_arrival_follows_swept_volume_on_a_uniform_strip():
+    """Constant rate, uniform strip: the front moves at constant speed.
+
+    Equal cells fill at equal intervals -- cell k at (k+1)/n of the total. The
+    old linear map ``tau / tau_max * T_fill`` reported the parabolic tau
+    profile as if it were time, putting the mid-strip cell at 0.75 T instead
+    of 0.5 T. This is the healthy-case half of Issue #52: the map was wrong
+    before any pathological cell entered the picture.
+    """
+    n = 40
+    r = _solve(_strip(np.full(n, 2.0)), skin_layer_enabled=False)
+    expected = (np.arange(n) + 1) / n * r.total_fill_time_s
+    assert np.allclose(r.fill_time_s[0], expected, rtol=1e-9)
+
+
+def test_one_slow_cell_does_not_move_anyone_elses_clock():
+    """The pathological half of Issue #52, pinned as an exact invariance.
+
+    Append one pathologically thin cell to a healthy strip. Its tau is orders
+    of magnitude above everything, but under the volume map a cell's absolute
+    time is (volume at or below its tau) / Q -- so the healthy cells' times do
+    not change at all when the outlier is added. Under the old map the outlier
+    sat in the denominator and rescaled every clock in the cavity.
+    """
+    healthy = _solve(_strip(np.full(40, 2.0)), skin_layer_enabled=False)
+    with_outlier = _solve(
+        _strip(np.concatenate([np.full(40, 2.0), np.full(1, 0.05)])),
+        skin_layer_enabled=False,
+    )
+    assert np.allclose(with_outlier.fill_time_s[0, :40], healthy.fill_time_s[0], rtol=1e-9)
+    # and the outlier itself is simply the last cell to fill
+    assert with_outlier.fill_time_s[0, 40] == pytest.approx(
+        with_outlier.total_fill_time_s, rel=1e-9
+    )
+
+
+def test_the_volume_map_helper_handles_ties_nans_and_the_end():
+    """Unit contract of ``_arrival_time_field``.
+
+    Ties share the arrival of the last cell in the group (equal tau must not
+    order itself by memory layout), excluded cells stay NaN, and the largest
+    tau lands exactly on T_fill.
+    """
+    solver = HeleShawSolver(_strip(np.full(4, 1.0)), MaterialDB()["PP"])
+    tau = np.array([[0.0, 2.0, 2.0, 5.0, np.nan]])
+    where = np.array([[True, True, True, True, True]])
+    vol = np.array([[1.0, 1.0, 1.0, 1.0, 1.0]])
+    t = solver._arrival_time_field(tau, where, vol, 8.0)
+    assert t[0, 0] == pytest.approx(8.0 * 1 / 4)
+    # the tie at tau=2.0 shares one arrival: the group's last cell (3 of 4)
+    assert t[0, 1] == t[0, 2] == pytest.approx(8.0 * 3 / 4)
+    assert t[0, 3] == pytest.approx(8.0)
+    assert np.isnan(t[0, 4])
+    # excluded cells stay NaN even with finite tau
+    where2 = np.array([[True, False, True, True, True]])
+    t2 = solver._arrival_time_field(tau, where2, vol, 8.0)
+    assert np.isnan(t2[0, 1])
+    # empty selection: all NaN, no division by an empty cumsum
+    t3 = solver._arrival_time_field(tau, np.zeros_like(where), vol, 8.0)
+    assert np.all(np.isnan(t3))
+
+
+def test_the_volume_mean_helper_weights_by_volume():
+    """Unit contract of ``_tau_volume_mean``."""
+    solver = HeleShawSolver(_strip(np.full(4, 1.0)), MaterialDB()["PP"])
+    tau = np.array([[1.0, 3.0, np.nan]])
+    where = np.array([[True, True, True]])
+    vol = np.array([[3.0, 1.0, 5.0]])
+    # (1*3 + 3*1) / (3 + 1) = 1.5 -- the NaN cell drops out, volume-weighted
+    assert solver._tau_volume_mean(tau, where, vol) == pytest.approx(1.5)
+    assert solver._tau_volume_mean(tau, np.zeros_like(where), vol) is None
+    assert solver._tau_volume_mean(tau, where, np.zeros_like(vol)) is None
+    assert solver._tau_volume_mean(np.zeros_like(tau), where, vol) is None
+
+
+def test_a_gate_side_choke_gets_almost_no_skin_before_the_front_passes():
+    """The skin clock is the *arrival* clock, pinned with its known tradeoff.
+
+    A 0.04 mm ring next to the gate arrives when its own tiny volume has been
+    injected -- near t = 0 -- so the conductance snapshot sees almost no skin
+    and the ring stays open. Under the old resistance-shaped map the same ring
+    inherited ~half the total fill time and sealed. Neither clock is the whole
+    truth: a gate-side choke keeps ageing for the entire fill AFTER the front
+    passes it, which an arrival snapshot cannot see. If gate-proximal
+    freeze-off is ever modelled properly (exposure clock, s(T_fill - t_arr)),
+    this test is the one that documents the change.
+    """
+    n = 24
+    thk = np.full((n, n), 2.0)
+    thk[2:5, 2:5] = 0.04  # openable on the arrival clock; 0.02 would seal
+    thk[3, 3] = 2.0
+    geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
+    geom.gates = [(3, 3)]
+    r = _solve(geom)
+    assert r.metadata["no_flow"] is False
+    assert r.metadata["short_shot_cells"] == 0

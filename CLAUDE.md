@@ -71,7 +71,7 @@ S = h³ / (12·η_eff)   ← Hele-Shaw コンダクタンス
 **`A` は SPD ではない。** この符号で制約前の作用素は対称半正定値だが、`_build_linear_system` は Dirichlet を**行にしか**適用しない（ゲート行を単位行に潰し、隣接する内部行はゲート列の `-coeff` を残す）ので、組み上がった行列は非対称。CG / AMG に載せ替えるならゲート列の消去が先。消去は厳密（ゲートで `τ = 0`）だが、`spsolve` が対称性を要求しないので現状は未実施。
 
 - `_build_linear_system` で5点ステンシル CSR を組み、`scipy.sparse.linalg.spsolve` で `τ` を解く。面コンダクタンスは隣接セルの**調和平均**。**注意：行列組立がPython二重ループでN大に弱い**。中規模以上のメッシュでは性能ネックになる（vectorization 候補）。
-- `τ` は擬似到達時間場。絶対時間化は `fill_time = (τ/τ_max) · (V_cavity/Q)`。
+- `τ` は擬似到達時間場。絶対時間化は**体積CDF写像**（v0.25.0, Issue #52）: セルの充填時刻 = 「そのセル以下の τ を持つセル群の体積」/ Q。定率射出なら先端は体積線形で進むので、これが物理そのもの（旧 `(τ/τ_max)·T_fill` 線形写像は健全な1Dストリップでも中央を 0.75T と誤報していた — 正しくは 0.5T）。外れ値1セルは自分の体積分しか他セルの時刻を動かせない。同値 τ はグループ末尾の時刻を共有。
 - `η_eff` はバルク温度 `0.7·T_melt + 0.3·T_mold` と代表剪断速度で Cross-WLF を1回評価する**定数値**（局所反復なし）。
 - 圧縮成形 (`compression_molding=True`) は時間ステッピングではなく、`h` を膨らませて `T_fill` を `compression_fraction/effective_factor + (1-compression_fraction)` で短縮する**等価モデル**。膨張対象は `compression_mask & mask` のセル（None なら全 cavity）。**2 モード対応**：
   - **factor モード**（デフォルト、後方互換）: `h_eff = h * compression_factor`。`effective_factor = 1 + (compression_factor − 1) · f_comp`、`f_comp = Geometry.compression_volume_fraction()`（圧縮対象セル**体積** / 全 cavity 体積）。同じ倍率を全 target セルに掛けるので**薄肉ほど絶対膨張量が大きい**。圧縮比（型開き量比）が設計指標のときに使う。
@@ -92,10 +92,10 @@ S = h_core³ / (12·η)                  ← Hele-Shaw コンダクタンス
 
 - `α` (= `material.thermal_diffusivity_m2_s`) は樹脂の熱拡散率。`data/materials.json` に8樹脂分。代表値（PP=9e-8, PP_T10=1.05e-7, PP_T20=1.30e-7, PP_T30=1.55e-7, ABS=1e-7, PC=1.3e-7, PA66=1e-7, PMMA=1.1e-7 m²/s）。タルク強化系は熱伝導率がベース PP より高いので α は単調増加。
 - `c_skin` (= `skin_growth_constant`) は無次元の成長定数。`0.0` で OFF と数値同一、`1.0` 付近が物理的代表値。
-- `s` は τ に依存し、τ は `S(h_core)` に依存するので **fixed-point 反復**で釣り合わせる：1) baseline (`h_core=h`) で τ_baseline を解く → 2) `t_arrival = (τ/τ_max)·T_fill` から `s_new`、`h_core_new` を計算 → 3) 新しい `S` で τ を再解 → 4) `‖Δτ‖` が `skin_convergence_tol` を下回るか `skin_max_iterations` に達するまで反復。
-- **絶対時間スケーリング**: 反復後の `τ_max` が baseline の `τ_max_0` に対して何倍に膨らんだかで `T_fill` を比例倍する（圧力一定近似 = 流量が抵抗増分だけ細る）。
+- `s` は τ に依存し、τ は `S(h_core)` に依存するので **fixed-point 反復**で釣り合わせる：1) baseline (`h_core=h`) で τ_baseline を解く → 2) 体積CDF写像の `t_arrival` から `s_new`、`h_core_new` を計算 → 3) 新しい `S` で τ を再解 → 4) `‖Δτ‖` が `skin_convergence_tol` を下回るか `skin_max_iterations` に達するまで反復。
+- **絶対時間スケーリング**: **体積重み付き平均 τ** の比（反復後 / baseline、**同一の still-flowing 集合上**で両方評価）で `T_fill` を比例倍する（圧力一定近似 = 流量が抵抗増分だけ細る）。v0.24 までは frozen 除外の max を全セル max で割っており、分母が病的1セルに支配されていた（Issue #52）— セルが凍ると分子からだけ抜けて比が雪崩れる構造。現行は凍ったセルが両側から同時に抜ける。実測に使った代表値は metadata の `tau_rep_flow` / `tau_rep_baseline`。既定 `skin_max_iterations=20`（旧5。定圧近似の正帰還は設計上雪崩れるもので、雪崩の途中で上限に当たると half-frozen のもっともらしい中間状態を返す）。
 - **ショートショット**: 反復後に `h - 2·s ≤ h_min` となったセルを `short_shot_mask` に記録。本来流路が遮断されるが、数値安定性のため `h_core` には `min_core_thickness_mm` 以上のフロアが残る。可視化で赤マーク。
-- 出力: `FlowResult.skin_thickness_mm`, `core_thickness_mm`, `short_shot_mask`、metadata に `skin_iterations / skin_converged / T_fill_inflation / short_shot_cells / short_shot_fraction`。
+- 出力: `FlowResult.skin_thickness_mm`, `core_thickness_mm`, `short_shot_mask`、metadata に `skin_iterations / skin_converged / T_fill_inflation / tau_rep_flow / tau_rep_baseline / short_shot_cells / short_shot_fraction`。
 - 可視化: `render_skin_layer_map(result, path)` でスキン厚マップ、`render_core_layer_map(result, path)` でコア層 + ショートショット。
 
 #### 層別 Hele-Shaw ソルバー（`MultilayerHeleShawSolver`）
@@ -127,13 +127,13 @@ N=1 で `m_1 = 1/6` → `S = h³/(12η)` と厳密に一致 (`test_n1_matches_le
 ```
 初期化: τ ← baseline (等温・代表 η) で _solve_tau_field
 反復:
-  t_arr ← (τ/τ_max) · T_fill
+  t_arr ← 体積CDF写像(τ, cell_volume, T_fill)   ← HeleShawSolver と同一の写像 (Issue #52)
   T_k(x,y) ← neumann_layer_temperatures(ζ_centers, t_arr, h_total, T_melt, T_mold, α)  (max(_, T_mold) で clamp)
   γ̇_k(x,y) ← poiseuille_shear_rates(ζ_centers, V, h_total, floor=0.01)
   η_k(x,y) ← cross_wlf_viscosity(material, T_k, γ̇_k, 0)
   S_total ← Σ_k h_total³ m_k / (12 η_k)
   τ_new ← _solve_tau_field(S_total, dirichlet)
-  T_fill_new ← T_fill_baseline · (τ_max_new / τ_max_baseline)   ← 圧力一定近似
+  T_fill_new ← T_fill_baseline · (mean_V(τ_new) / mean_V(τ_baseline))   ← 圧力一定近似（体積重み付き平均比、Issue #52）
   rel ← ‖τ_new - τ‖_2 / ‖τ‖_2
   if rel >= prev_rel: τ_new ← (1-ω)τ_old + ω·τ_new (適応的 damping、ω=damping_factor=0.7 既定)
   if rel < convergence_tol: 収束、終了
@@ -174,7 +174,7 @@ Brinkman 数 `Br = η·γ̇²·h² / (k·ΔT_ref)` (`ΔT_ref = T_melt − T_mold
 
 - `MultilayerFlowResult(FlowResult)` (継承): 既存フィールドに加えて `layer_thickness_mm` / `layer_temperature_K` / `layer_viscosity_Pa_s_field` / `layer_shear_rate_s_inv` / `layer_shear_heating_dT_K` / `layer_brinkman_number` (shape `(N, ny, nx)`)。`thermal_coupling=False` では `layer_temperature_K` 以下すべて None (thickness のみ populated)。
 - `short_shot_mask` (継承元 FlowResult のフィールド) が中央層温度ベースで populated。剪断発熱補正後の温度を反映。
-- `metadata` に `solver_kind="multilayer"` / `num_layers` / `layer_distribution` / `layer_zeta` / `layer_moments` / `multilayer_iterations` / `multilayer_converged` / `T_fill_inflation` / `damping_factor` / `damping_events` / `T_solid_K` / `short_shot_cells` / `short_shot_fraction` / `shear_heating_enabled` / `shear_heating_max_K` / `shear_heating_mean_K` / `brinkman_number_max` / `brinkman_number_mean` / `specific_heat_J_kgK` / `thermal_conductivity_W_mK`。
+- `metadata` に `solver_kind="multilayer"` / `num_layers` / `layer_distribution` / `layer_zeta` / `layer_moments` / `multilayer_iterations` / `multilayer_converged` / `T_fill_inflation` / `tau_rep_flow` / `tau_rep_baseline` / `damping_factor` / `damping_events` / `T_solid_K` / `short_shot_cells` / `short_shot_fraction` / `shear_heating_enabled` / `shear_heating_max_K` / `shear_heating_mean_K` / `brinkman_number_max` / `brinkman_number_mean` / `specific_heat_J_kgK` / `thermal_conductivity_W_mK`。
 
 **可視化** (`core/visualizer.py`):
 
@@ -309,7 +309,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 19 ファイル、合計 **430 テスト** (429 pass + 1 skip — skip はショートショット 高 threshold ケース)：
+`tests/` 配下に 19 ファイル、合計 **438 テスト** (437 pass + 1 skip — skip はショートショット 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 12件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証 / **行列の構造** — 非対称エントリがゲート行に限られること、固定点を消去した内部ブロックが対称正定値であること（`docs/流動解析の仕組み_想定問答_技術編.md` が顧客に約束している性質なので、散文だけに置かない）、ゲートに繋がらない成分があるとその保証が崩れること（数学の性質であって、修正後も不変）、**`solve()` がゲート未到達成分を入口で拒否すること（Issue #58 修正。旧実装は特異な純 Neumann ブロックを `spsolve` に渡してもっともらしいゴミを返していた。strict xfail が XPASS に転じたのを機にマーカーを外して現在形の assert に書き換えた）**、全ゲートが mask 外に落ちたときも拒否すること、**対角接触だけの「橋」を連結と数えないこと（到達性チェックは5点ステンシルと同じ4近傍。8近傍でラベリングすると特異ブロックを見逃す）**、ゲート列の消去が解を動かさないこと（消去は厳密）。**mask に穴を開けた形状で組む**のが要点で、mask が全 True だと圧縮行列インデックスと生グリッドインデックスが一致してしまい、両者を取り違えたテストも通る（`Geometry.gates` はグリッド座標、`A` はそうでない）
@@ -321,9 +321,9 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_settings_record.py` — 11件: 形状 config の全フィールドが記録されること（dataclass 自身と突き合わせ）/ `None` が null として残ること / tuple が list になり JSON round-trip すること / **アップロードしたスペックの中身がシリアライズ結果に現れないこと**（キーの有無でなく実際の数値で検証）/ フィンガープリントの同一性・差分検出 / bytes と str の等価 / config dataclass を持たない入力（`cfg=None`）/ `spec` 配下のキーが `name`/`sha256`/`bytes` に限られること（スペック自身の `name` フィールドは中身なので載せない）/ 型・空文字の拒否
 - `test_version.py` — 5件: `pyproject.toml` と `__version__` の一致 / CHANGELOG に現行版の項目がある / CHANGELOG の版が降順 / `build_label()` が版で始まる / git メタデータ（SHA・日付・dirty フラグ）の反映
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー
-- `test_short_shot_timeline.py` — 30件: 凍結セルが T_fill を決めないこと / 未充填セルの `fill_time_s` と `pressure_norm` が NaN / 時間軸が `tau_max_flow` 由来であること（`tau_max` との比が 10 倍超）/ **凍結セルに封じ込められた領域も未充填になること**（連結性）/ 凍結が無ければ挙動不変 / スキン OFF で `unfillable_mask` は None / ゲート凍結で全キャビティ未充填 / `_tau_reference` のフォールバック / metadata の内訳 / **色の場が死んだセルを隣の生きたセルから取ること**（合成データで検証。実部品では隣が最遅セルになりがちで、実物ベースだと差が出ない）/ 死んだセルが `filled` に関係なく覆われ続けること / タイトルのショートショット表記 / **未充填セルにウェルド・エアトラップを立てないこと**（生 τ なら立つことを前提 assert してから検証）/ 有限な充填時間が1種類でもウェルド図が描けること / 圧力マップが未充填セルを専用色で塗ること（アルファ固定後の画素で検証）/ **ゲート以外が全部封じ込められたとき T_fill がベースラインに留まること**（全体最大へのフォールバックは死セルの τ を呼び戻す）/ 描画の時間軸とヘッドラインが一致すること / **色スケール・タイトル・フレーム時刻の3者が同じ軸を読むこと**（欠陥は重複そのものなので3つまとめて assert）/ 反復途中で全セルが凍っても落ちないこと（反復上限3/5/8）/ **生きた領域を切り離して解き直していること**（独立に組んだ live-only 解と 25% 以内、未再解なら 3.3 倍ずれる）/ ベースライン時間が充填する体積だけを数えること / inflation が同じ領域の2状態の比であること / **射出率未指定の既定経路でも体積スケールが効くこと**（他のテストは全部明示的に率を渡していて、この経路を通らなかった） / **live 領域の結果が背後の死体積の量に依存しないこと**（同じ live 形状で死領域を20セル/100セルに振り、`h_core` と `fill_time` がビット一致。スキンの不動点を全体キャビティで1回だけ回すと 3.9 倍ずれる）/ **報告した live キャビティを新規に解き直しても動かないこと**（自己整合の検算）/ 制限後のソルバが射出率を引き継ぐこと
+- `test_short_shot_timeline.py` — 35件: 凍結セルが T_fill を決めないこと / 未充填セルの `fill_time_s` と `pressure_norm` が NaN / 時間軸が `tau_max_flow` 由来であること（`tau_max` との比が 10 倍超）/ **凍結セルに封じ込められた領域も未充填になること**（連結性）/ 凍結が無ければ挙動不変 / スキン OFF で `unfillable_mask` は None / ゲート凍結で全キャビティ未充填 / `_tau_reference` のフォールバック / metadata の内訳 / **色の場が死んだセルを隣の生きたセルから取ること**（合成データで検証。実部品では隣が最遅セルになりがちで、実物ベースだと差が出ない）/ 死んだセルが `filled` に関係なく覆われ続けること / タイトルのショートショット表記 / **未充填セルにウェルド・エアトラップを立てないこと**（生 τ なら立つことを前提 assert してから検証）/ 有限な充填時間が1種類でもウェルド図が描けること / 圧力マップが未充填セルを専用色で塗ること（アルファ固定後の画素で検証）/ **ゲート以外が全部封じ込められたとき T_fill がベースラインに留まること**（全体最大へのフォールバックは死セルの τ を呼び戻す）/ 描画の時間軸とヘッドラインが一致すること / **色スケール・タイトル・フレーム時刻の3者が同じ軸を読むこと**（欠陥は重複そのものなので3つまとめて assert）/ 反復途中で全セルが凍っても落ちないこと（反復上限3/5/8）/ **生きた領域を切り離して解き直していること**（独立に組んだ live-only 解と 25% 以内、未再解なら 3.3 倍ずれる）/ ベースライン時間が充填する体積だけを数えること / inflation が同じ領域の2状態の比であること / **射出率未指定の既定経路でも体積スケールが効くこと**（他のテストは全部明示的に率を渡していて、この経路を通らなかった） / **live 領域の結果が背後の死体積の量に依存しないこと**（同じ live 形状で死領域を20セル/100セルに振り、`h_core` と `fill_time` がビット一致。スキンの不動点を全体キャビティで1回だけ回すと 3.9 倍ずれる）/ **報告した live キャビティを新規に解き直しても動かないこと**（自己整合の検算）/ 制限後のソルバが射出率を引き継ぐこと / **体積CDF写像**（均一ストリップで到達が体積線形＝セル k が (k+1)/n·T になること — 旧線形写像は中央を 0.75T と返す / 外れ値1セルを足しても他セルの絶対時刻が一切動かないこと（CDF の厳密な不変性）/ `_arrival_time_field` の単体契約: 同値 τ がグループ末尾時刻を共有・除外セルは NaN・最大 τ がちょうど T_fill・空選択で全 NaN / `_tau_volume_mean` の単体契約: 体積重み・空/ゼロ体積/ゼロ τ で None）/ **ゲート脇チョークは到着時計ではほぼスキンを持たないこと**（到着スナップショット意味論のピン留め。ゲート近傍凍結を露光時計 s(T_fill−t_arr) でモデル化する日が来たら、これが変更を記録するテスト）
 - `test_skin_layer.py` — 6件: skin OFF/ON、`c_skin=0` で baseline 復元、極薄肉でのショートショット検出、metadata の整合性
-- `test_multilayer_solver.py` — 43件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / ショートショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認) / **ゲート到達性** (層別 solve も未到達成分を入口で拒否 — base の solve() を経由しないので独立に検査が要る)
+- `test_multilayer_solver.py` — 46件: 層分布プリミティブ (uniform / wall_refined / 端点・対称性・壁細密性・plan 例一致・Σm=1/6) / コンダクタンス helper (N=1 で h³/12η、cavity 外ゼロ、(N,) と (N,ny,nx) η 形状) / N=1 で既存 `HeleShawSolver` と一致 (anchor) / Σh_k=h_total / 後方互換 / wall_refined ソルバー受理 / 温度結合 (layer フィールド populated/None、τ_max 変化、収束性、tol 感度、metadata、壁<中央温度) / ショートショット (metadata 存在、warm で 0、極薄+高 threshold で発火、threshold 0 で 0) / damping (metadata、引数検証、ω=1 動作) / **剪断発熱段階1** (既定 OFF で後方互換、Br 数は常に populated、ON で ΔT_max>0 + 層フィールド shape、ON で η が下がる、material 由来 cp/k メタデータ確認) / **ゲート到達性** (層別 solve も未到達成分を入口で拒否 — base の solve() を経由しないので独立に検査が要る) / **体積CDF整合** (N=1 で base と fill_time が1セル量子以内で一致 / 膨張比が tau_rep_flow/tau_rep_baseline と厳密一致し max 比と判別可能な差を持つこと / 層温度が報告 fill_time の Neumann 解と 0.5K 以内 — 旧線形写像なら 14K ずれる)
 - `test_multilayer_thermal.py` — 22件: Neumann 1D (t→0 で T_melt、t→∞ で T_mold clamp、対称性、中央 > 壁、t 単調性、入力検証) / Poiseuille (壁で max、中央 floor、shape、floor=0、引数検証) / **剪断発熱段階1** (shape & 非負、γ̇=0 で ΔT=0、γ̇² スケーリング、t≫τ_thermal で頭打ち、極薄 PP の桁感、shape 不整合検出) / **Brinkman 数** (shape & 非負、γ̇=0 でゼロ、極薄高速で Br>1、k と ΔT の非正検出)
 - `test_visualizer_3d.py` — 25件: block anatomy（**3トレースとも flat-top Mesh3d**、天面=各 cavity セル2三角形＝面数 2×cavity・`intensitymode="cell"`）、天面が全 cavity セルを覆う（面数=2×cavity＝侵食ゼロ・天面 Z 有限正・床 Z=0）、**flat-top が対角境界を塞ぐ**（対角バンドで面数=2×cavity）、頂点がゲート中心座標（セル端の隅）、境界壁が PL〜天面を覆う、`aspectmode='data'` で等倍、天面=面ごと/側壁=頂点ごと intensity で coloraxis 共有、**厚み段差が縦の段差として描かれる**（段差プレートで天面 z が両厚みを保持＋PL非接触の段差壁が立つ）、**天面ホバーが場の値を露出**（fill/pressure で per-vertex customdata が読める）、**肉厚配色のガード**（2D の `THICKNESS_CMAP` と一致すること／ramp 全域で明→暗に単調であること／薄肉端と厚肉端のコントラスト比が 3:1 以上あること／colorscale の stop が hex と `rgb(...)` のどちらでも読めること）、**基準そのものの判別力**（`Cividis_r` / `Blues` / `Blues_r` / `Jet_r` / `Bluered_r` / `Greys_r` で期待値を固定。定数を差し替える変異注入は名前一致 assert が先に落ちて判定にならないため、基準を直接テスト）、**stop 判定だけでは区間内の逆行を見逃すこと**（緑→マゼンタの**構成した**反例で固定。組込配色を証人にすると、その配色が変わったときに「サンプリングはもう不要」と誤読される）。各ガードを何故そう組んだかは上の `visualizer.py` 項を参照
 - `test_fill_render.py` — 24件: 既定配色が turbo であること / 色スケールが 0..T_fill 固定 / 色の層が完全不透明（アルファに mask を持たせない）/ キャビティ外に NaN が残らない / `_nearest_extend` の3挙動 / **オーバーレイが露出するセルが `mask & filled` と完全一致**（侵食も滲みもゼロ）/ 外側とキャビティ内未充填が別の灰色 / 等時線のレベルが T_fill 固定でフレーム間不変 / 等時線 OFF と空フレーム / 全配色でのレンダリング / フレーム PNG が自前のカラーバーを持つこと / **等時線が一度だけ描かれ zorder でオーバーレイの下に入ること**（呼び出し順ではなく zorder で検証。matplotlib は imshow=0 / contour=2 なので、後から呼ぶだけでは隠れない）/ 要求した本数ちょうどが描かれること / 1セル幅キャビティで等時線を諦めること / ゲートマーカーがオーバーレイより上に来ること / **60枚出力しても contour が1回だけであること**（figure を毎フレーム作り直すと出力は同一なので、contour 呼び出し回数を数える以外に検出手段がない）

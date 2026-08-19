@@ -100,6 +100,11 @@ class _DomainSolution:
     T_fill: float
     T_fill_baseline: float
     tau_max_baseline: float
+    # The volume-weighted representatives that actually fed the T_fill
+    # inflation ratio, both taken over the same final still-flowing set.
+    # None until the skin loop runs (or when nothing flows).
+    tau_rep_flow: float | None
+    tau_rep_baseline: float | None
     skin_thk_mm: np.ndarray | None
     h_core_mm: np.ndarray | None
     frozen_mask: np.ndarray | None
@@ -538,6 +543,8 @@ class HeleShawSolver:
         skin_thk_mm: np.ndarray | None = None
         h_core_mm: np.ndarray | None = None
         frozen_mask: np.ndarray | None = None
+        tau_rep_flow: float | None = None
+        tau_rep_baseline: float | None = None
         skin_iters_done = 0
         skin_converged = False
 
@@ -601,6 +608,8 @@ class HeleShawSolver:
                     T_fill_new = T_fill_baseline
                 else:
                     T_fill_new = T_fill_baseline * (tau_rep_new / tau_rep_base)
+                tau_rep_flow = tau_rep_new
+                tau_rep_baseline = tau_rep_base
 
                 # convergence check on tau (relative L2 over masked cells)
                 msk_new = cavity_mask & ~np.isnan(tau_new) & ~np.isnan(tau)
@@ -639,6 +648,8 @@ class HeleShawSolver:
             skin_thk_mm=skin_thk_mm,
             h_core_mm=h_core_mm,
             frozen_mask=frozen_mask,
+            tau_rep_flow=tau_rep_flow,
+            tau_rep_baseline=tau_rep_baseline,
             iterations=skin_iters_done,
             converged=skin_converged,
         )
@@ -777,6 +788,10 @@ class HeleShawSolver:
                     "min_core_thickness_mm": self.min_core_thickness_mm,
                     "T_fill_baseline_s": T_fill_baseline,
                     "T_fill_inflation": (T_fill / T_fill_baseline if T_fill_baseline > 0 else 1.0),
+                    # the volume-weighted representatives that fed the ratio,
+                    # both over the same final still-flowing set (Issue #52)
+                    "tau_rep_flow": sol.tau_rep_flow,
+                    "tau_rep_baseline": sol.tau_rep_baseline,
                     "short_shot_cells": short_count,
                     "short_shot_fraction": short_count / cells_total,
                     "unfillable_cells": (

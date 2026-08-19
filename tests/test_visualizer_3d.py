@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import matplotlib.colors as mcolors
 import numpy as np
 import plotly.graph_objects as go
 import pytest
@@ -212,3 +213,28 @@ def test_thickness_step_renders_as_block_step():
     # at least one internal step wall: a 4-vertex quad with min z above PL
     zw = np.asarray(walls.z).reshape(-1, 4)
     assert np.any(zw.min(axis=1) > 1e-6), "no internal step wall emitted"
+
+
+def test_thickness_colorscale_matches_the_2d_map(small_result):
+    """The solid view and the 2D design map must agree on what "thick" looks
+    like. Plotly capitalizes its named colorscales, so the two constants are
+    spelled differently and nothing but this test keeps them in step."""
+    from core.visualizer import THICKNESS_CMAP
+    from core.visualizer_3d import THICKNESS_COLORSCALE
+
+    assert THICKNESS_COLORSCALE.lower() == THICKNESS_CMAP
+
+    fig = render_3d_thickness_map(small_result)
+    assert fig.layout.coloraxis.colorscale is not None
+    # Plotly resolves the name into an (offset, css-color) table; take the
+    # end points and confirm the *rendered* ramp runs light -> dark, which is
+    # the whole point of the reversal. Comparing the name alone would pass
+    # even if Plotly's "Cividis_r" were secretly unreversed.
+    scale = fig.layout.coloraxis.colorscale
+    lo_rgb = mcolors.to_rgb(scale[0][1])
+    hi_rgb = mcolors.to_rgb(scale[-1][1])
+    lo_lum = 0.2126 * lo_rgb[0] + 0.7152 * lo_rgb[1] + 0.0722 * lo_rgb[2]
+    hi_lum = 0.2126 * hi_rgb[0] + 0.7152 * hi_rgb[1] + 0.0722 * hi_rgb[2]
+    assert lo_lum > hi_lum, (
+        f"thin end must be the lighter one: thin lum={lo_lum:.3f}, thick lum={hi_lum:.3f}"
+    )

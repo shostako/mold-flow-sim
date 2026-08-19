@@ -45,6 +45,12 @@ import plotly.graph_objects as go
 
 from .solver import FlowResult
 
+# Plotly's built-in name for the same ramp ``core.visualizer.THICKNESS_CMAP``
+# gives the 2D maps, so the design view and the solid view agree on what "thick"
+# looks like. Kept as a separate constant because Plotly capitalizes its named
+# colorscales; ``tests/test_visualizer_3d.py`` is what keeps the two in step.
+THICKNESS_COLORSCALE = "Cividis_r"
+
 # ----------------------------------------------------------------------
 # Coordinate / mask helpers
 # ----------------------------------------------------------------------
@@ -453,7 +459,7 @@ def render_3d_thickness_map(result: FlowResult) -> go.Figure:
     """3D solid extrusion (PL→ceiling) with the ceiling colored by thickness."""
     g = result.geometry
     color = _scalar_with_mask(g.thickness_mm, g.mask)
-    fig = _figure_with_pl_extrusion(result, color, colorscale="Viridis")
+    fig = _figure_with_pl_extrusion(result, color, colorscale=THICKNESS_COLORSCALE)
     return _apply_camera_and_layout(
         fig,
         title="Cavity thickness h(x, y) [mm] — solid view from PL",

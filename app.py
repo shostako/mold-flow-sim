@@ -48,7 +48,12 @@ from core import (
 from core.geometry import Geometry
 from core.settings_record import config_settings, file_fingerprint, settings_json
 from core.version import build_label
-from core.visualizer import ISOCHRONE_LEVELS, render_layer_grid, render_short_shot_map
+from core.visualizer import (
+    ISOCHRONE_LEVELS,
+    THICKNESS_CMAP,
+    render_layer_grid,
+    render_short_shot_map,
+)
 
 DEMO_PROFILE_JSON = Path(__file__).parent / "data" / "gate_profiles" / "demo_profile_gate.json"
 
@@ -1216,7 +1221,7 @@ with col_left:
         -y0_mm,
         geom.ny * geom.cell_size_mm - y0_mm,
     ]
-    im = ax.imshow(fig_data, origin="lower", extent=extent, cmap="cividis")
+    im = ax.imshow(fig_data, origin="lower", extent=extent, cmap=THICKNESS_CMAP)
     for iy, ix in geom.gates:
         ax.plot(
             (ix + 0.5) * geom.cell_size_mm - x0_mm,

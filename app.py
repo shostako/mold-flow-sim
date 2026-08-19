@@ -1026,7 +1026,7 @@ with st.sidebar:
                 step=0.05,
                 help=(
                     "中央層温度が T_mold + fraction·(T_melt - T_mold) を下回るセルを"
-                    " short shot にマーク。PP は 0.3 が目安。"
+                    "ショートショットにマーク。PP は 0.3 が目安。"
                 ),
             )
             shear_heating_enabled = st.checkbox(
@@ -1595,13 +1595,13 @@ if "mfs_result" in st.session_state:
             _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
 
         if skin_path is not None and core_path is not None:
-            with st.expander("スキン層 / コア層 / short shot"):
+            with st.expander("スキン層 / コア層 / ショートショット"):
                 st.image(str(skin_path))
                 st.caption("スキン層厚さ s(x,y) [mm]。流動が遅いほど・薄肉ほど s が大きい。")
                 _download("⬇ スキン層 PNGをダウンロード", skin_path, "image/png", "dl_skin_png")
                 st.image(str(core_path))
                 st.caption(
-                    "コア層 h_core = h - 2s。赤マーク = スキン同士が会合した short shot 候補。"
+                    "コア層 h_core = h - 2s。赤マーク = スキン同士が会合したショートショット候補。"
                 )
                 _download("⬇ コア層 PNGをダウンロード", core_path, "image/png", "dl_core_png")
 

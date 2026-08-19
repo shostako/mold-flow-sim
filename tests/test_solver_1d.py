@@ -8,8 +8,8 @@ uniform effective viscosity. Dirichlet τ=0 imposed on the entire left edge
 in x.
 
 The discrete operator in :func:`HeleShawSolver._build_linear_system`
-assembles ``-∇·(S∇τ) = 1`` (positive-diagonal SPD form), i.e. the
-continuous equation is ``∇·(S∇τ) = -1``. With uniform S this becomes::
+assembles ``-∇·(S∇τ) = 1`` (positive diagonal, negative off-diagonals),
+i.e. the continuous equation is ``∇·(S∇τ) = -1``. With uniform S this becomes::
 
     S d²τ/dx² = -1
     τ(0) = 0,   dτ/dx(L) = 0
@@ -29,6 +29,7 @@ not exposed for cell-by-cell comparison here).
 from __future__ import annotations
 
 import numpy as np
+import scipy.sparse.linalg as spla
 
 from core import HeleShawSolver, MaterialDB
 from core.geometry import Geometry
@@ -150,3 +151,92 @@ def _strip_l2_error(nx: int) -> float:
     x_norm = i / (nx - 1)
     tau_exact_norm = 1.0 - (1.0 - x_norm) ** 2
     return float(np.sqrt(np.nanmean((tau_norm - tau_exact_norm) ** 2)))
+
+
+# --- Matrix structure: what the docstrings are allowed to claim -------------
+#
+# ``core/solver.py`` states that the assembled ``A`` is *not* symmetric,
+# because Dirichlet is applied to rows only, and that eliminating the gate
+# columns would be exact rather than an approximation. Both halves are
+# claims about the code, so both are tested here. They also survive the fix
+# they describe: if someone symmetrises the assembly, "all asymmetry sits in
+# gate columns" becomes vacuously true and the elimination stays a no-op.
+
+
+def _assembled_system(ny: int = 6, nx: int = 20):
+    """Assemble A for a notched strip, and report which matrix rows are gates.
+
+    The mask is punched rather than full on purpose. With every cell inside
+    the cavity the compressed matrix index equals the raw grid index, so a
+    test that confuses the two still passes -- and that confusion is easy to
+    make, since ``Geometry.gates`` is in grid coordinates while ``A`` is not.
+    Removing cells ahead of the gate column shifts the numbering so the two
+    genuinely disagree.
+    """
+    g = _build_uniform_strip(ny, nx, cell_mm=1.0, thk_mm=2.0)
+    notch = g.mask.copy()
+    notch[0, nx // 2 :] = False  # a row that stops short of the far end
+    notch[ny - 1, nx - 3 :] = False
+    g = Geometry(mask=notch, thickness_mm=g.thickness_mm, cell_size_mm=g.cell_size_mm)
+    g.gates = [(iy, 0) for iy in range(ny)]
+    solver = HeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+    )
+    S = solver._conductance_field(solver._effective_viscosity(), solver._open_thickness_field())
+    dirichlet = np.zeros(g.shape, dtype=bool)
+    for iy, ix in g.gates:
+        dirichlet[iy, ix] = True
+    A, b, _ = solver._build_linear_system(S, dirichlet)
+
+    # ``_build_linear_system`` numbers only the masked cells, so a grid index
+    # is not a matrix index. Conflating the two silently makes the assertions
+    # below inspect unrelated rows.
+    flat = np.where(g.mask.ravel())[0]
+    gate_rows = {int(np.flatnonzero(flat == iy * g.shape[1] + ix)[0]) for iy, ix in g.gates}
+    return A.tocsr(), b, gate_rows
+
+
+def test_asymmetry_is_confined_to_the_gate_columns() -> None:
+    """Every A[i,j] != A[j,i] must involve a gate row.
+
+    The face conductance is a harmonic mean, which is symmetric, so the only
+    thing that can break symmetry is the row-only Dirichlet treatment. If an
+    asymmetric entry ever shows up away from a gate, the cause is something
+    else and the docstring's explanation is wrong.
+    """
+    A, _b, gate_rows = _assembled_system()
+    asym = abs(A - A.T).tocoo()
+    offenders = [(int(r), int(c)) for r, c, v in zip(asym.row, asym.col, asym.data) if v > 1e-30]
+    stray = [(r, c) for r, c in offenders if r not in gate_rows and c not in gate_rows]
+    assert not stray, f"asymmetry away from any gate row: {stray[:5]}"
+
+
+def test_eliminating_the_gate_columns_does_not_move_the_solution() -> None:
+    """Zeroing the gate columns is exact, not an approximation.
+
+    ``tau`` is pinned to 0 at the gates, so the term those columns contribute
+    to a neighbour's equation is identically zero and the right-hand side does
+    not need a correction. This is what makes the CG/AMG roadmap item cheap:
+    the symmetric system is the same system, not a modified one.
+    """
+    A, b, gate_rows = _assembled_system()
+    tau_raw = spla.spsolve(A.tocsc(), b)
+
+    A_sym = A.tolil()
+    for k in gate_rows:
+        A_sym[:, k] = 0.0
+        A_sym[k, k] = 1.0
+    A_sym = A_sym.tocsr()
+
+    asym = abs(A_sym - A_sym.T)
+    assert asym.nnz == 0 or float(asym.max()) < 1e-30, "elimination left A asymmetric"
+
+    tau_sym = spla.spsolve(A_sym.tocsc(), b)
+    scale = float(np.max(np.abs(tau_raw)))
+    assert scale > 0
+    assert float(np.max(np.abs(tau_sym - tau_raw))) / scale < 1e-10

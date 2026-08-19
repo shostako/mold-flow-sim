@@ -1116,7 +1116,7 @@ with st.sidebar:
             if _hint_geom is not None:
                 _v_fin = _hint_geom.volume_cm3()
                 _hint = f"参考（前回実行の形状）: 最終キャビティ体積 {_v_fin:.2f} cm³"
-                if icm and comp_stroke:
+                if icm and comp_stroke is not None:
                     _v_open = _v_fin + comp_stroke * _hint_geom.compression_area_mm2() / 1000.0
                     _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
                 st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")

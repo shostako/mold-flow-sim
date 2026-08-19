@@ -326,15 +326,30 @@ def frame_states(result: TwoPhaseShortShotResult, num_frames: int = 24) -> list[
     """Frame sequence for the two-phase animation.
 
     Frames are split between the phases in proportion to the cell count each
-    phase fills (minimum 3 per active phase). Injection frames advance in
+    phase fills (minimum 3 per active phase when the budget allows;
+    ``num_frames=1`` degenerates to a single final-state frame). Injection frames advance in
     real arrival time from 0 to ``injection_time_s``; compression frames
     advance in normalized order. The filled sets grow monotonically and the
     last frame covers exactly ``final_mask``.
     """
-    if num_frames < 2:
-        raise ValueError("num_frames must be at least 2")
+    if num_frames < 1:
+        raise ValueError("num_frames must be at least 1")
     inj = result.injection_mask
     adv = result.final_mask & ~inj
+    if num_frames == 1:
+        # A one-frame animation shows the end of the whole history — the
+        # same endpoint principle as the one-frame injection phase below.
+        # This also keeps the CLI contract aligned with the fill animation,
+        # which accepts num_frames >= 1 (Claude review P3 on PR #63).
+        phase = "compression" if adv.any() else "injection"
+        return [
+            TwoPhaseFrame(
+                phase=phase,
+                value=1.0 if adv.any() else float(result.injection_time_s),
+                injection_filled=inj,
+                compression_filled=adv,
+            )
+        ]
     n_inj_cells = int(inj.sum())
     n_adv_cells = int(adv.sum())
     total = max(n_inj_cells + n_adv_cells, 1)

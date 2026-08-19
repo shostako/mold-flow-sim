@@ -12,20 +12,13 @@ This module provides:
   gate runner whose top-down silhouette is an isosceles trapezoid with the
   short edge replaced by a half-circle. A circular valve gate (Dirichlet
   τ=0) sits at the half-circle center.
-- geometry_from_image: extract cavity mask from an image (PNG/SVG raster).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
-
-try:
-    from PIL import Image
-except ImportError:  # pragma: no cover
-    Image = None  # type: ignore
 
 
 @dataclass
@@ -37,9 +30,8 @@ class Geometry:
     label: str = "cavity"
     # Cells that are inflated by ``compression_factor`` while the compression
     # phase is open. ``None`` keeps the legacy behaviour where the whole
-    # cavity expands (used by ``build_demo_geometry`` and
-    # ``geometry_from_image``). Parametric builders that distinguish a
-    # product body from runners/sprues set this to a per-cell bool array
+    # cavity expands (used by ``build_demo_geometry``). Builders that
+    # distinguish a product body from runners/sprues set this to a bool array
     # (only the product body is True). Cells outside ``mask`` are ignored
     # regardless of the value here.
     compression_mask: np.ndarray | None = None
@@ -891,36 +883,6 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
         for iy, ix in zip(gate_iys, gate_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
 
-    return geom
-
-
-def geometry_from_image(
-    image_path: str | Path,
-    cell_size_mm: float,
-    plate_thk_mm: float = 2.0,
-    threshold: int = 128,
-    invert: bool = False,
-) -> Geometry:
-    """Build a Geometry from an image. Dark pixels are interpreted as cavity
-    (set invert=True to swap). The image is downsampled / scaled to match
-    cell_size_mm given the image's pixel-to-mm ratio is treated as 1px=1mm
-    unless the user resizes externally. Thickness is uniform.
-    """
-    if Image is None:
-        raise RuntimeError("Pillow is required to read images")
-    img = Image.open(image_path).convert("L")
-    arr = np.asarray(img)
-    if invert:
-        mask = arr >= threshold
-    else:
-        mask = arr < threshold
-    thk = np.where(mask, plate_thk_mm, 0.0).astype(float)
-    geom = Geometry(
-        mask=mask,
-        thickness_mm=thk,
-        cell_size_mm=cell_size_mm,
-        label=Path(image_path).stem,
-    )
     return geom
 
 

@@ -15,7 +15,6 @@ from .geometry import (
     build_direct_gate_geometry,
     build_film_gate2_geometry,
     build_film_gate_geometry,
-    geometry_from_image,
 )
 from .materials import MaterialDB, cross_wlf_viscosity
 from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
@@ -58,7 +57,6 @@ __all__ = [
     "build_film_gate_geometry",
     "build_film_gate2_geometry",
     "build_direct_gate_geometry",
-    "geometry_from_image",
     "GateProfileSpec",
     "ProfilePlateConfig",
     "LandSpec",

@@ -51,3 +51,41 @@ def relative_luminance(rgb: tuple[float, float, float]) -> float:
     a ramp that actually gets lighter.
     """
     return 0.2126 * _linearize(rgb[0]) + 0.7152 * _linearize(rgb[1]) + 0.0722 * _linearize(rgb[2])
+
+
+def contrast_ratio(rgb_a: tuple[float, float, float], rgb_b: tuple[float, float, float]) -> float:
+    """WCAG contrast ratio between two gamma-encoded sRGB triples.
+
+    ``(L_light + 0.05) / (L_dark + 0.05)``, running 1:1 (identical) to 21:1
+    (black on white). Used instead of a raw luminance span because the ratio
+    is an absolute, standard-anchored quantity: WCAG 1.4.11 asks 3:1 of
+    graphical objects that carry meaning, which is exactly what a thickness
+    ramp is.
+    """
+    lo, hi = sorted((relative_luminance(rgb_a), relative_luminance(rgb_b)))
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def sample_ramp(
+    stops: list[tuple[float, str]], per_segment: int = 64
+) -> list[tuple[float, float, float]]:
+    """Densely sample a Plotly colorscale, matching how it is rendered.
+
+    Plotly interpolates **linearly between stops in gamma-encoded sRGB**.
+    Relative luminance applies a nonlinear transfer function to those channels,
+    so luminance is *not* linear along a segment and monotonicity at the stops
+    does not imply monotonicity between them. (An earlier version of these
+    tests claimed it did — true only while the luminance formula was itself a
+    plain weighted sum of the encoded channels, and quietly false the moment
+    that formula was corrected to linearize first.) Sampling removes the
+    argument entirely. It is not hypothetical: ``bluered_r`` passes a
+    stops-only check while reversing by 0.0023 inside a segment.
+    """
+    out: list[tuple[float, float, float]] = []
+    colors = [css_rgb(color) for _offset, color in stops]
+    for start, end in zip(colors, colors[1:]):
+        for i in range(per_segment):
+            t = i / per_segment
+            out.append(tuple(s + t * (e - s) for s, e in zip(start, end)))
+    out.append(colors[-1])
+    return out

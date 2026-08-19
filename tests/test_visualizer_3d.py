@@ -33,7 +33,7 @@ from core import (
     render_3d_thickness_map,
 )
 from core.visualizer_3d import _cavity_corner_mesh
-from tests.colorimetry import css_rgb, relative_luminance
+from tests.colorimetry import contrast_ratio, css_rgb, relative_luminance, sample_ramp
 
 
 @pytest.fixture(scope="module")
@@ -278,15 +278,74 @@ def test_thickness_colorscale_matches_the_2d_map(small_result):
     # thicknesses by darkness alone; where luminance reverses, two different
     # thicknesses share a darkness and the ordering stops being recoverable.
     #
-    # Checking the stops is sufficient, not a sample: Plotly interpolates
-    # linearly in RGB between stops, and luminance is a linear functional of
-    # RGB, so luminance is linear between stops too — monotone at the stops
-    # implies monotone everywhere.
-    lums = [
-        relative_luminance(css_rgb(color)) for _offset, color in fig.layout.coloraxis.colorscale
-    ]
+    # Sampled between the stops, not only at them: Plotly interpolates in
+    # gamma-encoded sRGB while relative luminance linearizes first, so
+    # luminance is not linear along a segment and stop-only monotonicity does
+    # not imply monotonicity between stops. ``bluered_r`` is the live proof —
+    # it passes a stops-only check and still reverses by 0.0023 inside one.
+    ramp = sample_ramp(list(fig.layout.coloraxis.colorscale))
+    lums = [relative_luminance(rgb) for rgb in ramp]
     drops = [b - a for a, b in zip(lums, lums[1:])]
     assert all(d < 0 for d in drops), (
         "thickness ramp must darken monotonically (thin=light, thick=dark); "
-        f"luminance by stop = {[round(v, 3) for v in lums]}"
+        f"{sum(1 for d in drops if d >= 0)} of {len(drops)} samples do not darken"
     )
+    # And it must actually carry information. Monotone alone is satisfied by a
+    # near-black-to-black ramp, which orders thicknesses in principle while
+    # rendering the map unreadable. WCAG 1.4.11 asks 3:1 of graphical objects
+    # that convey meaning; the thin/thick ends here clear that by a wide
+    # margin (cividis_r is 12.6:1).
+    ends_ratio = contrast_ratio(ramp[0], ramp[-1])
+    assert ends_ratio >= 3.0, (
+        f"thin and thick ends must be separable: contrast ratio {ends_ratio:.2f}:1 < 3:1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scale", "monotone", "separable"),
+    [
+        ("Cividis_r", True, True),  # the map in force
+        ("Blues", True, True),  # right direction, washes out the thin end
+        ("Blues_r", False, True),  # inverted
+        # A rainbow: the ends read light->dark, the middle does not — and its
+        # ends are barely separable either (1.44:1), so both criteria object.
+        ("Jet_r", False, False),
+        # Reverses only *between* stops, and spans too little to read (2.15:1).
+        ("Bluered_r", False, False),
+        ("Greys_r", False, True),  # inverted single-hue
+    ],
+)
+def test_ramp_criteria_discriminate_known_scales(scale, monotone, separable):
+    """Pins what the two criteria in the thickness test actually reject.
+
+    Exercising them through ``THICKNESS_COLORSCALE`` cannot work — the name
+    equality assertion fires first — so the criteria are pinned here against
+    named scales whose verdicts are known. ``Bluered_r`` is the one that only
+    a *sampled* ramp catches; ``Jet_r`` is the one that only a *whole-ramp*
+    check catches.
+    """
+    fig = go.Figure()
+    fig.update_layout(coloraxis=dict(colorscale=scale))
+    ramp = sample_ramp(list(fig.layout.coloraxis.colorscale))
+    lums = [relative_luminance(rgb) for rgb in ramp]
+
+    assert all(b < a for a, b in zip(lums, lums[1:])) is monotone
+    assert (contrast_ratio(ramp[0], ramp[-1]) >= 3.0) is separable
+
+
+def test_stops_only_check_would_miss_bluered_r():
+    """The evidence for sampling rather than reading the stops.
+
+    If this ever starts failing because ``Bluered_r`` became monotone when
+    sampled, the sampling in the thickness test is no longer earning its keep
+    and the simpler stops-only form is fine again.
+    """
+    fig = go.Figure()
+    fig.update_layout(coloraxis=dict(colorscale="Bluered_r"))
+    stops = list(fig.layout.coloraxis.colorscale)
+
+    at_stops = [relative_luminance(css_rgb(color)) for _offset, color in stops]
+    sampled = [relative_luminance(rgb) for rgb in sample_ramp(stops)]
+
+    assert all(b < a for a, b in zip(at_stops, at_stops[1:])), "stops-only check accepts it"
+    assert not all(b < a for a, b in zip(sampled, sampled[1:])), "sampled check must reject it"

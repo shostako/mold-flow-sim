@@ -19,7 +19,7 @@ from core.visualizer import (
     render_layer_map,
     render_short_shot_map,
 )
-from tests.colorimetry import relative_luminance
+from tests.colorimetry import contrast_ratio, relative_luminance
 
 
 def _solve(num_layers: int = 5, **solver_kwargs) -> object:
@@ -189,6 +189,19 @@ def test_thickness_ramp_runs_light_to_dark() -> None:
     _h, thin_sat, _v = mcolors.rgb_to_hsv(thin_rgb)
     assert thin_sat > 0.5, (
         f"thin end must stay saturated so it survives a white background; saturation={thin_sat:.2f}"
+    )
+
+    # Saturation says the thin end is distinguishable from white by *chroma*
+    # (cividis_r's yellow is only 1.25:1 against white in luminance, so a
+    # luminance test would reject the very map we chose). It says nothing
+    # about whether the ramp spans anything: HSV S is relative to the channel
+    # maximum, so (0.01, 0, 0) scores S = 1 while being nearly black, and a
+    # near-black-to-black ramp passes both monotonicity and saturation while
+    # rendering the map unreadable. WCAG 1.4.11 asks 3:1 of graphical objects
+    # that convey meaning, which is what a thickness ramp is.
+    ends_ratio = contrast_ratio(cmap(0.0)[:3], cmap(1.0)[:3])
+    assert ends_ratio >= 3.0, (
+        f"thin and thick ends must be separable: contrast ratio {ends_ratio:.2f}:1 < 3:1"
     )
 
 

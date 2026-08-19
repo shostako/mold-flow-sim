@@ -285,9 +285,16 @@ def test_a_component_with_no_gate_has_no_unique_solution() -> None:
     keep = np.array([k for k in range(dense.shape[0]) if k not in gate_rows])
     interior = dense[np.ix_(keep, keep)]
 
-    # Scale-free: the zero mode is zero relative to the block's own magnitude.
     ev = np.linalg.eigvalsh((interior + interior.T) / 2)
-    assert ev.min() / abs(ev).max() < 1e-12, (
+    scale = float(abs(ev).max())
+    assert scale > 0
+
+    # Two assertions, because "has a zero mode" is not the same claim as "is
+    # small". A signed ``ev.min() / scale < tol`` passes trivially for anything
+    # negative definite, which has no zero mode at all -- it would keep this
+    # test green while the thing it names stopped being true.
+    assert float(ev.min()) / scale > -1e-12, "block is not positive semi-definite"
+    assert float(abs(ev).min()) / scale < 1e-12, (
         "a gate-less component still looks positive definite; "
         "the documented precondition would be unnecessary"
     )

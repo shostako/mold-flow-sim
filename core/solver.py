@@ -193,7 +193,13 @@ class HeleShawSolver:
     # ----- skin-layer (Stefan/Neumann) model -----
     skin_layer_enabled: bool = False
     skin_growth_constant: float = 1.0  # c_skin in s(t) = c_skin * sqrt(alpha * t)
-    skin_max_iterations: int = 5  # fixed-point iterations for tau ↔ h_core coupling
+    # Fixed-point iterations for the tau <-> h_core coupling. The
+    # constant-pressure proxy makes marginal freezing an avalanche by design
+    # (skin narrows -> resistance up -> T_fill up -> more skin), and a cap in
+    # the middle of the avalanche reports a plausible-looking half-frozen
+    # state with only a metadata flag to show for it. 20 rides out every
+    # avalanche seen so far; the strips in test_short_shot_timeline needed 9.
+    skin_max_iterations: int = 20
     skin_convergence_tol: float = 1e-3  # relative L2 change in tau between iterations
     min_core_thickness_mm: float = 0.01  # h_core floor; cells at this floor are short shots
 
@@ -439,6 +445,65 @@ class HeleShawSolver:
         value = float(np.nanmax(tau[sel]))
         return value if value > 0 else None
 
+    @staticmethod
+    def _arrival_time_field(
+        tau: np.ndarray, where: np.ndarray, cell_volume: np.ndarray, T_fill: float
+    ) -> np.ndarray:
+        """Map tau to arrival times through the volume CDF (Issue #52).
+
+        At constant volumetric rate the front has swept exactly ``Q * t`` of
+        cavity by time ``t``, and cells fill in tau order -- so a cell arrives
+        when the volume at or below its tau has been injected. The old linear
+        map ``tau / tau_max * T_fill`` got even the healthy 1D strip wrong
+        (mid-strip reported at 0.75 T instead of 0.5 T), and its denominator
+        was a single cell: one pathologically slow cell rescaled every arrival
+        time in the cavity. Here that cell moves only itself -- everyone else
+        shifts by no more than its volume fraction.
+
+        Ties share the arrival of the last cell in the group, so equal tau
+        never orders itself by memory layout. Cells outside ``where`` (or with
+        NaN tau) stay NaN.
+        """
+        t_arr = np.full_like(tau, np.nan)
+        sel = where & ~np.isnan(tau)
+        if not sel.any() or T_fill <= 0:
+            return t_arr
+        tau_v = tau[sel]
+        vol_v = cell_volume[sel]
+        order = np.argsort(tau_v, kind="stable")
+        tau_sorted = tau_v[order]
+        cum = np.cumsum(vol_v[order])
+        total = float(cum[-1])
+        if total <= 0:
+            return t_arr
+        last = np.searchsorted(tau_sorted, tau_sorted, side="right") - 1
+        vals = np.empty_like(tau_v)
+        vals[order] = (cum[last] / total) * T_fill
+        t_arr[sel] = vals
+        return t_arr
+
+    @staticmethod
+    def _tau_volume_mean(
+        tau: np.ndarray, where: np.ndarray, cell_volume: np.ndarray
+    ) -> float | None:
+        """Volume-weighted mean tau over ``where``, or None if it is empty.
+
+        The constant-pressure inflation proxy needs a resistance
+        representative that one cell cannot own. The maximum was that one
+        cell; the volume-weighted mean moves by at most a cell's volume
+        fraction, and on a uniform plate (tau scaling by the same factor
+        everywhere) it reproduces the max-ratio exactly.
+        """
+        sel = where & ~np.isnan(tau)
+        if not sel.any():
+            return None
+        w = cell_volume[sel]
+        total = float(np.sum(w))
+        if total <= 0:
+            return None
+        value = float(np.sum(tau[sel] * w)) / total
+        return value if value > 0 else None
+
     def _solve_domain(self, eta: float) -> _DomainSolution:
         """Solve tau, the skin fixed point and the fill time on *this* cavity.
 
@@ -462,6 +527,9 @@ class HeleShawSolver:
         S0 = self._conductance_field(eta, h_open)
         tau, tau_max = self._solve_tau_field(S0, dirichlet)
         tau_max_baseline = tau_max
+        tau_baseline = tau.copy()
+        dx = float(self.geometry.cell_size_mm)
+        cell_volume = dx * dx * h_open  # mm^3, the volume each cell adds when swept
         T_fill = T_fill_baseline
         # tau of the slowest cell that still fills. Identical to ``tau_max``
         # until the skin model closes a core somewhere.
@@ -484,9 +552,12 @@ class HeleShawSolver:
 
             for it in range(int(max(self.skin_max_iterations, 1))):
                 msk = cavity_mask & ~np.isnan(tau)
-                # arrival time per cell, scaled to current best estimate of T_fill
-                t_arr = np.zeros_like(tau)
-                t_arr[msk] = (tau[msk] / tau_max_flow) * T_fill
+                # arrival time per cell: volume CDF against the current best
+                # estimate of T_fill. Frozen cells ride at the top of the CDF,
+                # so their arrival saturates at T_fill instead of exporting
+                # their stand-in tau into everyone else's time scale.
+                t_arr = self._arrival_time_field(tau, msk, cell_volume, T_fill)
+                t_arr = np.where(np.isnan(t_arr), 0.0, t_arr)
 
                 # skin layer thickness: s(t) = c_skin * sqrt(alpha * t) (m → mm)
                 s_m = c_skin * np.sqrt(alpha * np.maximum(t_arr, 0.0))
@@ -515,12 +586,21 @@ class HeleShawSolver:
                 tau_max_flow_new = self._tau_reference(tau_new, cavity_mask & ~frozen_new)
 
                 # constant-pressure proxy: T_fill grows with the resistance.
+                # Both the numerator and the denominator are volume-weighted
+                # means over the same still-flowing set: when a cell freezes it
+                # leaves both sides at once, instead of dropping out of one and
+                # avalanching the ratio (Issue #52 -- the old form divided a
+                # frozen-free max by an everything max, so one pathological
+                # cell freezing moved the reported time by tens of percent).
                 # With nothing flowing there is no resistance to speak of, so
                 # the baseline stands rather than an inflation off a dead cell.
-                if tau_max_flow_new is None or tau_max_baseline <= 0:
+                flow_new = cavity_mask & ~frozen_new
+                tau_rep_new = self._tau_volume_mean(tau_new, flow_new, cell_volume)
+                tau_rep_base = self._tau_volume_mean(tau_baseline, flow_new, cell_volume)
+                if tau_rep_new is None or tau_rep_base is None:
                     T_fill_new = T_fill_baseline
                 else:
-                    T_fill_new = T_fill_baseline * (tau_max_flow_new / tau_max_baseline)
+                    T_fill_new = T_fill_baseline * (tau_rep_new / tau_rep_base)
 
                 # convergence check on tau (relative L2 over masked cells)
                 msk_new = cavity_mask & ~np.isnan(tau_new) & ~np.isnan(tau)
@@ -627,10 +707,11 @@ class HeleShawSolver:
         tau_max_flow = None if no_flow_forced else sol.tau_max_flow
         T_fill_baseline = sol.T_fill_baseline
         tau_max_baseline = sol.tau_max_baseline
-        if tau_max_flow is None or tau_max_baseline <= 0:
-            T_fill = T_fill_baseline
-        else:
-            T_fill = T_fill_baseline * (tau_max_flow / tau_max_baseline)
+        # The domain solution already carries its own constant-pressure
+        # inflation (volume-weighted, over its own live set). Recomputing it
+        # here from single-cell maxima would reintroduce the one-cell
+        # normalization this branch exists to remove.
+        T_fill = T_fill_baseline if no_flow_forced else sol.T_fill
 
         # Nothing beyond the gates flows. Every time here is zero, so the
         # divisor only has to be positive -- what matters is that the reported
@@ -645,8 +726,12 @@ class HeleShawSolver:
         fillable = ~np.isnan(tau)
         if unfillable_mask is not None:
             fillable = fillable & ~unfillable_mask
-        fill_time_s = np.full_like(tau, np.nan)
-        fill_time_s[fillable] = (tau[fillable] / tau_scale) * T_fill
+        # Same volume-CDF map as the fixed point: at constant rate the front
+        # sweeps volume linearly in time, so a cell's time is the volume at or
+        # below its tau. Cells that never fill stay NaN.
+        h_open_final = domain_solver._open_thickness_field()
+        cell_volume_final = (float(self.geometry.cell_size_mm) ** 2) * h_open_final
+        fill_time_s = self._arrival_time_field(tau, fillable, cell_volume_final, T_fill)
 
         # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at last fill
         pressure_norm = np.full_like(tau, np.nan)

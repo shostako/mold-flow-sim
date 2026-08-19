@@ -307,7 +307,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 
 ## テスト
 
-`tests/` 配下に 19 ファイル、合計 **416 テスト** (415 pass + 1 skip — short-shot 高 threshold ケース)：
+`tests/` 配下に 19 ファイル、合計 **417 テスト** (416 pass + 1 skip — short-shot 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
 - `test_solver_1d.py` — 5件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証
@@ -315,7 +315,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_geometry_film_gate2.py` — 33件: 直角台形シルエット / 厚み場のプロファイル（連続性・段差の有無・x非依存性）/ ゲート位置可変 / 2段テーパ / 深ランナー / `resolved_*` フォールバック / バリデーション / solver 統合
 - `test_geometry_profile_gate.py` — 54件: JSON I/O（round-trip、パス付きエラー、未知キー拒否、非オブジェクトのセクション拒否）/ バリデーション / シルエット（ランド・ランプ式・cap 底打ち・アイランド・外壁・対称性 flip・非対称）/ 井戸（フロア深さ・max 合成・体積差分を放射積分と照合）/ **閉形式の体積検算**（直壁最小スペック ±3%）/ グリッドはみ出し拒否 / compression_mask / プレート2層 / solver 統合 / **溶接ダム（`island.weld`）**（帯内は一定深さ・帯外と島外は不変・体積減を求積と照合・未指定時は旧挙動と bit-identical・round-trip・バリデーション）/ **非有限値の拒否**（`validate` の dataclass 走査が数値リーフ28個に届くこと・JSON 経由 × NaN/±Inf・パーサを通さない直接構築・NumPy スカラが走査から落ちないこと）/ **配列フィールドの構造検証**（5フィールド × 壊れた値8種、2文字文字列のアンパック化けを含む）
-- `test_spec_source.py` — 43件: **gitignore ルールそのもの**（リンク本体は実リポに問い、配下は `.gitignore` を写した使い捨てリポで判定 — 実リポに問うと「シンボリックリンクの先」で 128 が返り、**機能を実際に使っている環境でだけ skip する**。ルールが無いと落ちることも別途 assert）/ 追跡中のデモスペックが巻き添えで無視されないこと / `spec_root`（不在・実ディレクトリ・外を指す symlink・**完全 resolve**・リンク切れ・ファイル・**symlink ループ**）/ `spec_link_exists`（不在と「あるが壊れている」の区別）/ `list_spec_files`（`*.json` のみ・ディレクトリ除外・**mtime 順でなく名前順**・読めないディレクトリで例外）/ `choose_spec_origin` 10 通り + IO を踏まないこと / **配線を AppTest で実 `app.py` に対して**（リンク無しで一覧が出ない・既定が未選択で何も読まれない・選択で読める・**ドロップが一覧に勝ちその旨が出て一覧が disabled になる**・解除で一覧に戻る・リンク切れの告知・読めないフォルダ/ファイルの告知に**パスが含まれない**・記録される名前がファイル名のみ）
+- `test_spec_source.py` — 44件: **gitignore ルールそのもの**（リンク本体は実リポに問い、配下は `.gitignore` を写した使い捨てリポで判定 — 実リポに問うと「シンボリックリンクの先」で 128 が返り、**機能を実際に使っている環境でだけ skip する**。ルールが無いと落ちることも別途 assert）/ ルールが広がりすぎてデモスペックを飲まないこと（**使い捨てリポの未追跡コピーに問う** — `git check-ignore` は追跡中のファイルにはルールに関わらず「無視しない」を返すので、実リポの実ファイルに問うと `*.json` でも通る空のガードになる）/ デモスペックが実際に追跡されていること / `spec_root`（不在・実ディレクトリ・外を指す symlink・**完全 resolve**・リンク切れ・ファイル・**symlink ループ**）/ `spec_link_exists`（不在と「あるが壊れている」の区別）/ `list_spec_files`（`*.json` のみ・ディレクトリ除外・**mtime 順でなく名前順**・読めないディレクトリで例外）/ `choose_spec_origin` 10 通り + IO を踏まないこと / **配線を AppTest で実 `app.py` に対して**（リンク無しで一覧が出ない・既定が未選択で何も読まれない・選択で読める・**ドロップが一覧に勝ちその旨が出て一覧が disabled になる**・解除で一覧に戻る・リンク切れの告知・読めないフォルダ/ファイルの告知に**パスが含まれない**・記録される名前がファイル名のみ）
 - `test_settings_record.py` — 11件: 形状 config の全フィールドが記録されること（dataclass 自身と突き合わせ）/ `None` が null として残ること / tuple が list になり JSON round-trip すること / **アップロードしたスペックの中身がシリアライズ結果に現れないこと**（キーの有無でなく実際の数値で検証）/ フィンガープリントの同一性・差分検出 / bytes と str の等価 / config 無し（画像入力）/ `spec` 配下のキーが `name`/`sha256`/`bytes` に限られること（スペック自身の `name` フィールドは中身なので載せない）/ 型・空文字の拒否
 - `test_version.py` — 5件: `pyproject.toml` と `__version__` の一致 / CHANGELOG に現行版の項目がある / CHANGELOG の版が降順 / `build_label()` が版で始まる / git メタデータ（SHA・日付・dirty フラグ）の反映
 - `test_compression_stroke.py` — 9件: stroke モード後方互換（`compression_stroke_mm=None` で factor モードと完全一致）/ 段差プレートで段差保存 / 全 target セル等量加算 / `stroke=0` で圧縮 OFF 一致 / uniform プレートで factor モードと stroke モードが等価 / metadata の `compression_mode` / `compression_stroke_mm` 露出 / `Geometry.compression_area_mm2()` ヘルパー

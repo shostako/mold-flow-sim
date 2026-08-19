@@ -321,9 +321,9 @@ def _draw_isochrones(ax, result: FlowResult, n_levels: int):
         return None
     g = result.geometry
     if min(g.mask.shape) < 2:
-        # contour needs a 2x2 neighbourhood. A one-cell-wide cavity (an
-        # uploaded image a single pixel across) solves fine, so raising here
-        # would throw away a finished analysis over a decoration.
+        # contour needs a 2x2 neighbourhood. A cavity one cell across -- a
+        # small shape meshed coarsely -- solves fine, so raising here would
+        # throw away a finished analysis over a decoration.
         return None
     t_max = fill_time_max(result)
     # n_levels + 2 points, ends dropped: N interior lines for a request of N.

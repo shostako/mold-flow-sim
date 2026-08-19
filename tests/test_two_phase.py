@@ -113,9 +113,24 @@ def test_a_full_shot_fills_the_whole_cavity():
 def test_gates_are_always_inside_the_injection_pool():
     geom = _film_gate()
     solver = _solver(geom)
-    res = solve_two_phase_short_shot(solver, 1e-4)
+    # The gate cells are the tau = 0 tie group: any accepted shot covers them.
+    gate = np.zeros(geom.shape, dtype=bool)
+    for iy, ix in geom.gates:
+        gate[iy, ix] = True
+    h_open = solver._open_thickness_field()
+    v_gate_cm3 = float((geom.cell_size_mm**2 * h_open)[gate].sum()) / 1000.0
+    res = solve_two_phase_short_shot(solver, v_gate_cm3 * 1.05)
     for iy, ix in geom.gates:
         assert res.injection_mask[iy, ix]
+
+
+def test_a_shot_smaller_than_the_gate_region_is_rejected():
+    """Forcing the gates in regardless would report an achieved volume larger
+    than the metered shot (Codex P2 on PR #62) — so it is an input error."""
+    geom = _film_gate()
+    solver = _solver(geom)
+    with pytest.raises(ValueError, match="gate region"):
+        solve_two_phase_short_shot(solver, 1e-4)
 
 
 def test_arrival_times_are_nan_beyond_the_pool():
@@ -206,6 +221,24 @@ def test_zero_stroke_means_no_advance():
     solver = _solver(geom, stroke=0.0)
     res = solve_two_phase_short_shot(solver, 15 * 1.0 / 1000.0)
     assert (res.final_mask == res.injection_mask).all()
+
+
+def test_no_closure_skips_phase_two_even_with_residual_budget():
+    """Codex P2 on PR #62: with no gap change, the atomic phase-1 cutoff can
+    leave a residual budget, and on a nonuniform cavity the re-solved tau2
+    ordering could hand it to some smaller cell. Phase 2 must be gated on the
+    physics (the gap actually closing), so tau2 is never even solved."""
+    mask = np.ones((1, 30), dtype=bool)
+    thickness = np.full((1, 30), 1.0)
+    thickness[0, 10:] = 0.25  # thin far region: cells smaller than the residual
+    geom = Geometry(mask=mask, thickness_mm=thickness, cell_size_mm=1.0)
+    geom.add_gate(0, 0)
+    solver = _solver(geom, stroke=None)
+    # 5 full cells + a residual of 0.5 mm^3 that a 0.25 mm^3 thin cell would fit
+    res = solve_two_phase_short_shot(solver, 5.5 / 1000.0)
+    assert int(res.injection_mask.sum()) == 5
+    assert (res.final_mask == res.injection_mask).all()
+    assert res.tau2 is None
 
 
 def test_factor_mode_is_accepted():

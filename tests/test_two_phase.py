@@ -92,13 +92,19 @@ def test_the_final_shape_holds_exactly_the_metered_volume():
     assert V_shot * 1000.0 - achieved_mm3 < 20 * max_cell
 
 
-def test_shots_nest():
+def test_injection_pools_nest_across_shot_volumes():
+    """Omega1 is a prefix of one fixed tau1 order, so nesting is exact.
+    Omega2 carries NO such guarantee (each shot solves tau2 against its own
+    pool boundary — see the module docstring / Codex P2 round 3), so only the
+    final-mask behaviour on this particular geometry is pinned as a
+    regression, not asserted as an invariant."""
     geom = _film_gate()
     solver = _solver(geom)
     V = geom.volume_cm3()
     small = solve_two_phase_short_shot(solver, 0.3 * V)
     large = solve_two_phase_short_shot(solver, 0.6 * V)
     assert (small.injection_mask <= large.injection_mask).all()
+    # Regression pin on this geometry (holds here; not a model guarantee).
     assert (small.final_mask <= large.final_mask).all()
 
 
@@ -200,6 +206,32 @@ def test_compression_progress_is_monotone_and_ends_at_one():
     assert (np.diff(prog) > 0).all()  # strip: strictly increasing outward
     assert prog[-1] == pytest.approx(1.0, abs=1e-9)
     assert np.isnan(res.compression_progress[~advanced]).all()
+
+
+def test_a_final_complete_icm_shot_still_reports_the_compression_order():
+    """V_fin <= V_shot < V_open — the everyday ICM full-fill case: injection
+    stops short of the open cavity, closure finishes the fill. The shape is
+    trivially the whole cavity, but the result contract still promises the
+    normalized advance order on the compression-filled cells (Codex P2,
+    round 3)."""
+    n, h, stroke = 40, 1.0, 1.0
+    geom = _strip(n, h)
+    solver = _solver(geom, stroke=stroke)
+    V_fin = n * h / 1000.0
+    V_open = n * (h + stroke) / 1000.0
+    V_shot = 0.5 * (V_fin + V_open)  # strictly between
+    res = solve_two_phase_short_shot(solver, V_shot)
+    assert res.metadata["final_complete"]
+    assert not res.metadata["injection_complete"]
+    assert (res.final_mask == geom.mask).all()
+    assert res.tau2 is not None
+    advanced = res.final_mask & ~res.injection_mask
+    assert advanced.any()
+    prog = res.compression_progress[advanced]
+    assert np.isfinite(prog).all()
+    assert (np.diff(prog) > 0).all()  # strip: strictly increasing outward
+    assert prog[-1] == pytest.approx(1.0, abs=1e-9)
+    assert np.isnan(res.compression_progress[res.injection_mask]).all()
 
 
 # ---------------------------------------------------------------------------

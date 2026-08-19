@@ -78,6 +78,44 @@ from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 DEFAULT_FILL_TIME_S = 1.5
 
 
+def check_gate_reachability(geometry: Geometry) -> None:
+    """Reject cavity components that no gate can reach (Issue #58).
+
+    A connected component of the mask with no Dirichlet point in it is a pure
+    Neumann Laplacian block: singular, so ``spsolve`` fills it with garbage
+    and never warns. Depending on how the disconnection arose, the garbage is
+    either astronomically large (visible) or a plausible-looking uniform fill
+    time across the severed region (invisible) -- the Profile gate rasteriser
+    used to produce the second kind when the gate exit width fell below the
+    mesh spacing.
+
+    Rejection, not ``unfillable_mask``: a severed component is a geometry
+    specification mistake, not a region the physics says the melt cannot
+    reach. Folding it into the unfillable machinery would silently relabel
+    "your input is wrong" as "the model predicts a short shot".
+
+    4-connectivity, to match the 5-point stencil in
+    ``HeleShawSolver._build_linear_system`` exactly: a diagonal-only "bridge"
+    carries no flux in the discretisation, so it must not count as connected
+    here either.
+    """
+    labels, _ = ndi.label(geometry.mask)  # default structure = 4-connectivity
+    gate_labels = {int(labels[iy, ix]) for iy, ix in geometry.gates if geometry.mask[iy, ix]}
+    gate_labels.discard(0)
+    if not gate_labels:
+        raise ValueError("no gate lies inside the cavity mask")
+    orphaned = geometry.mask & ~np.isin(labels, list(gate_labels))
+    if orphaned.any():
+        n_cells = int(orphaned.sum())
+        n_regions = int(np.unique(labels[orphaned]).size)
+        raise ValueError(
+            f"{n_cells} cavity cells in {n_regions} connected region(s) cannot be "
+            "reached from any gate. The geometry is disconnected -- check the gate "
+            "placement, or a feature narrower than the mesh spacing that rasterised "
+            "into a closed wall."
+        )
+
+
 @dataclass
 class FlowResult:
     tau: np.ndarray  # raw pseudo-conduction time field
@@ -365,6 +403,7 @@ class HeleShawSolver:
     def solve(self, num_frames: int = 24) -> FlowResult:
         if not self.geometry.gates:
             raise ValueError("Geometry has no gates")
+        check_gate_reachability(self.geometry)
 
         eta = self._effective_viscosity()
 

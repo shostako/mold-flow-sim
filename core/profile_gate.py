@@ -762,6 +762,17 @@ def build_profile_gate_geometry(
         row_wa = wa[iy_plate_bottom, :]
         ix_close = (row_wa < 0) | (row_wa > full_half_width)
         mask[iy_plate_bottom, ix_close] = False
+        if not mask[iy_plate_bottom, :].any():
+            # The wall just severed the plate from the gate block. Without
+            # this, the solver would fill the orphaned plate with garbage that
+            # looks like a uniform fill time (Issue #58); its own reachability
+            # check now rejects that too, but this message names the knob.
+            raise ValueError(
+                f"gate_exit_width ({spec.gate_exit_width} mm) rasterises to zero "
+                f"open columns at cell_size_mm={dx}: the gate land wall closes the "
+                "entire plate-bottom row and severs the plate from the gate. "
+                "Widen the exit or refine the mesh."
+            )
 
     # --- thickness ---
     thk = np.zeros_like(xx, dtype=float)

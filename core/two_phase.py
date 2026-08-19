@@ -353,7 +353,13 @@ def frame_states(result: TwoPhaseShortShotResult, num_frames: int = 24) -> list[
     T_inj = result.injection_time_s
     none_yet = np.zeros(result.geometry.shape, dtype=bool)
     frames: list[TwoPhaseFrame] = []
-    for t in np.linspace(0.0, T_inj, n1):
+    # A single-frame injection phase must show the phase's END — the
+    # completed pool at T_inj — not the empty cavity at t = 0: with
+    # np.linspace(0, T, 1) == [0.0] the animation would jump from "nothing
+    # injected" straight to the final mask and the documented injection
+    # endpoint would never appear (Codex P2 on PR #63).
+    inj_times = np.linspace(0.0, T_inj, n1) if n1 >= 2 else np.array([T_inj])
+    for t in inj_times:
         filled = inj & (np.nan_to_num(t_arr, nan=np.inf) <= t * (1.0 + _REL_EPS))
         frames.append(
             TwoPhaseFrame(

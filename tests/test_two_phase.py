@@ -521,6 +521,26 @@ def test_frame_states_validate_num_frames_and_survive_small_budgets():
     assert (filled_last == res.final_mask).all()
 
 
+def test_a_single_injection_frame_shows_the_completed_pool():
+    """Codex P2 on PR #63: np.linspace(0, T, 1) == [0.0], so a one-frame
+    injection phase used to show an EMPTY cavity and then jump straight to
+    the final mask — the documented injection endpoint at T_inj never
+    appeared. A lone injection frame must show the phase's end state."""
+    from core.two_phase import frame_states
+
+    res = _stroked_strip_result()
+    hit_single = False
+    for nf in (2, 4):  # this fixture allocates exactly one injection frame
+        frames = frame_states(res, num_frames=nf)
+        inj_frames = [fr for fr in frames if fr.phase == "injection"]
+        if len(inj_frames) == 1:
+            hit_single = True
+            only = inj_frames[0]
+            assert only.value == pytest.approx(res.injection_time_s)
+            assert (only.injection_filled == res.injection_mask).all()
+    assert hit_single, "fixture no longer produces a single-frame injection phase"
+
+
 def test_the_map_legend_sits_outside_the_axes():
     """The plates are wide and shallow: an in-axes legend lands on the part
     (it covered the far corner of the first real render). The legend must be

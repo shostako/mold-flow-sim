@@ -62,6 +62,34 @@ def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
     assert "two_phase_metadata.json" in names
 
 
+def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
+    """Codex P2 (round 2) on PR #62: the UI minimum of 0.01 cm3 can be below
+    the gate region's open-gap volume on coarse meshes / large gates; the
+    solver's ValueError must become a warning + skip, not an uncaught
+    Streamlit exception.
+
+    Whether a given geometry actually rejects a given shot depends on its
+    gate-region volume (the default Film gate 2 sits at ~0.0094 cm3, just
+    under the UI minimum), so the rejection is injected: ``app.py`` re-does
+    ``from core.two_phase import ...`` on every AppTest run, which reads the
+    patched module attribute — the except-path wiring is what is under test.
+    """
+    import core.two_phase as tp
+
+    def _reject(solver, shot_volume_cm3):
+        raise ValueError("injected rejection (gate region)")
+
+    monkeypatch.setattr(tp, "solve_two_phase_short_shot", _reject)
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(True).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert at.session_state["mfs_two_phase_result"] is None
+    assert at.session_state["mfs_two_phase_path"] is None
+    assert "二相ショートショット解析をスキップしました" in _texts(at)
+
+
 def test_a_wall_cooling_model_skips_two_phase_with_a_warning():
     at = _app()
     at.radio(key="wall_model").set_value("skin")

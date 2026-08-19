@@ -141,6 +141,18 @@ def solve_two_phase_short_shot(
 
     # ---- Phase 1: injection at the open gap -------------------------------
     h_open = solver._open_thickness_field()  # mm; includes compression inflation
+    h_fin = geom.thickness_mm
+    # The model's arithmetic assumes the mold only ever closes: h_open >=
+    # h_fin everywhere. A compression_factor < 1 or a negative stroke would
+    # let a shot fill the whole open cavity while holding less than the
+    # final cavity volume — phase 2 is then skipped (gap_closes is False)
+    # and the achieved volume exceeds the metered shot (Codex P2, round 2).
+    if bool(np.any(h_open[mask] < h_fin[mask] * (1.0 - _REL_EPS))):
+        raise ValueError(
+            "compression settings shrink the open gap below the final "
+            "thickness (compression_factor < 1 or a negative stroke) — the "
+            "two-phase model requires h_open >= h_final on every cavity cell"
+        )
     vol_open = dx * dx * h_open  # mm^3 per cell when swept at the open gap
     S1 = solver._conductance_field(eta, h_open)
     tau1, _ = solver._solve_tau_field(S1, gate_dirichlet)
@@ -176,7 +188,6 @@ def solve_two_phase_short_shot(
     injection_fill_time_s = np.where(omega1, t_arr1, np.nan)
 
     # ---- Phase 2: compression at the final thickness ----------------------
-    h_fin = geom.thickness_mm
     vol_fin = dx * dx * h_fin
     V_fin_total = float(vol_fin[mask].sum())
 

@@ -277,6 +277,27 @@ def test_a_nonpositive_shot_volume_is_rejected():
         solve_two_phase_short_shot(solver, 0.0)
 
 
+def test_gap_shrinking_compression_is_rejected():
+    """Codex P2 (round 2) on PR #62: factor < 1 or a negative stroke makes
+    h_open < h_fin, so a full open-cavity shot holds less than the final
+    volume and the achieved volume exceeds the metered shot."""
+    geom = _strip(20)
+    neg_stroke = _solver(geom, stroke=-0.2)
+    with pytest.raises(ValueError, match="open gap"):
+        solve_two_phase_short_shot(neg_stroke, 0.01)
+    shrink_factor = HeleShawSolver(
+        geom,
+        PP,
+        melt_temperature_K=T_MELT,
+        mold_temperature_K=T_MOLD,
+        injection_volume_flow_cm3s=10.0,
+        compression_molding=True,
+        compression_factor=0.8,
+    )
+    with pytest.raises(ValueError, match="open gap"):
+        solve_two_phase_short_shot(shrink_factor, 0.01)
+
+
 def test_a_gateless_geometry_is_rejected():
     mask = np.ones((1, 10), dtype=bool)
     geom = Geometry(mask=mask, thickness_mm=np.full((1, 10), 1.0), cell_size_mm=1.0)

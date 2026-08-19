@@ -1414,7 +1414,14 @@ if do_run:
                     "今回はスキップしました。"
                 )
             else:
-                two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
+                try:
+                    two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
+                except ValueError as e:
+                    # 例: 計量がゲート群の開ギャップ体積を下回る。メッセージは
+                    # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
+                    # 含まない。
+                    two_phase_result = None
+                    st.warning(f"二相ショートショット解析をスキップしました: {e}")
 
         # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
         # ダウンロードした ZIP から設定を復元できない (画像から寸法を測って

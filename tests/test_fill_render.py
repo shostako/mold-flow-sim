@@ -254,11 +254,12 @@ def test_isochrone_count_matches_the_request(result, requested):
 def test_isochrones_skip_a_cavity_too_narrow_to_contour(result):
     """A one-cell-wide cavity solves fine; it must not kill the render.
 
-    ``contour`` needs a 2x2 neighbourhood. An uploaded image a single pixel
-    across produces a valid geometry, and throwing away a finished analysis
-    over a decoration would be the wrong trade. The slice keeps a row that
-    actually contains cavity cells — an empty row would hit the all-NaN
-    guard instead and never exercise this one.
+    ``contour`` needs a 2x2 neighbourhood. A shape small enough, or a mesh
+    coarse enough, to leave the grid one cell across still produces a valid
+    geometry, and throwing away a finished analysis over a decoration would
+    be the wrong trade. The slice keeps a row that actually contains cavity
+    cells — an empty row would hit the all-NaN guard instead and never
+    exercise this one.
     """
     import dataclasses
 

@@ -22,7 +22,8 @@ Caveats:
   ``geometry.compression_mask`` are inflated (parametric builders
   set this to the product-body cells, leaving runners/sprues at
   their cast thickness). When ``compression_mask`` is ``None`` the
-  whole cavity inflates (legacy / image input).
+  whole cavity inflates -- ``build_demo_geometry`` is the only
+  builder that still leaves it unset.
 
 Skin-layer model (optional, ``skin_layer_enabled=True``):
 

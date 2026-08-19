@@ -715,3 +715,33 @@ def test_a_gate_side_choke_gets_almost_no_skin_before_the_front_passes():
     r = _solve(geom)
     assert r.metadata["no_flow"] is False
     assert r.metadata["short_shot_cells"] == 0
+
+
+def test_the_domain_pass_valve_still_buries_its_frozen_cells(monkeypatch):
+    """Codex P2 on PR #60: tripping the pass cap must not leave frozen cells live.
+
+    With the cap forced to zero the loop never processes the first solution's
+    frozen cells. They still must end up in ``unfillable_mask`` (with whatever
+    they seal off), keep NaN fill times, stay a subset of the unfillable set,
+    and the run must say the domain did not converge.
+    """
+    import core.solver as solver_mod
+
+    monkeypatch.setattr(solver_mod, "MAX_DOMAIN_PASSES", 0)
+    r = _solve(_sealed_strip())
+    md = r.metadata
+    assert md["domain_converged"] is False
+    assert md["domain_passes"] == 0
+    assert r.short_shot_mask.any()
+    assert r.unfillable_mask is not None
+    # frozen plus sealed-off, exactly like the converged path
+    assert (r.short_shot_mask & ~r.unfillable_mask).sum() == 0
+    assert md["short_shot_cells"] <= md["unfillable_cells"]
+    assert np.all(np.isnan(r.fill_time_s[r.unfillable_mask]))
+
+
+def test_the_domain_loop_converges_and_says_so():
+    """The valve is for pathologies; a normal run reports a settled domain."""
+    r = _solve(_sealed_strip())
+    assert r.metadata["domain_converged"] is True
+    assert r.metadata["domain_passes"] >= 1

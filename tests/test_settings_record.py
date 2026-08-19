@@ -116,9 +116,14 @@ def test_extra_fields_land_next_to_the_config():
     assert rec["cell_size_mm"] == 0.8
 
 
-def test_config_is_optional_for_image_input():
-    """The image importer has no config dataclass, only loose parameters."""
-    rec = config_settings("画像から生成 (PNG/JPG)", None, threshold=128, invert=False)
+def test_config_is_optional():
+    """An input may describe itself with loose keyword parameters instead of a
+    config dataclass. No shipped input does so today -- the image importer,
+    which was the original caller, was removed in v0.23.0 -- but the parameter
+    stays optional, and a caller passing ``None`` must still get a usable
+    record rather than an empty one.
+    """
+    rec = config_settings("何かの入力", None, threshold=128, invert=False)
     assert "config" not in rec
     assert rec["threshold"] == 128
 

@@ -34,7 +34,6 @@ from core import (
     fill_frame_fractions,
     fill_frame_times,
     fill_player_height_px,
-    geometry_from_image,
     render_3d_fill_time,
     render_3d_pressure,
     render_3d_thickness_map,
@@ -294,7 +293,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- **層内対流項**: 1D Neumann は純粋拡散のみ（薄板では妥当な近似だが、極厚 $h > 4$ mm では破綻）\n"
         "- **ベント・脱気挙動**: エアトラップ位置は予測するが圧抜けは考慮しない\n"
         "- **STL/STEP 直接読み込み**: パラメトリック形状（Film gate / Direct gate）"
-        "または PNG/JPG 二値画像のみ\n"
+        "または JSON スペック（Profile gate）のみ\n"
         "- **非構造格子・中立面メッシュ**: 構造格子（正方形セル）固定\n"
         "- **絶対圧力場の出力**: 圧力は正規化値（ゲート=1 / フロント=0）のみ。"
         "実機の必要型締力評価には未対応"
@@ -343,7 +342,6 @@ with st.sidebar:
             "Film gate 2 (ゲート位置可変)",
             "Direct gate (parametric)",
             "Profile gate (JSONスペック)",
-            "画像から生成 (PNG/JPG)",
         ],
         index=1,
         key="geom_source",
@@ -420,7 +418,6 @@ with st.sidebar:
                 "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
                 "滑らかな3Dが要るときだけ下げる。"
             )
-        upload = None
     elif geom_source.startswith("Film gate 2"):
         with st.expander("製品形状", expanded=False):
             plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -591,7 +588,6 @@ with st.sidebar:
                 "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
                 "滑らかな3Dが要るときだけ下げる。"
             )
-        upload = None
     elif geom_source.startswith("Film gate"):
         with st.expander("製品・ゲート形状", expanded=False):
             plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
@@ -768,7 +764,6 @@ with st.sidebar:
                 "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
                 "滑らかな3Dが要るときだけ下げる。"
             )
-        upload = None
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
             spec_mode_pg = SPEC_MODE_BY_LABEL[
@@ -883,16 +878,6 @@ with st.sidebar:
                 "スペックの想定解像度は 1.0mm。細かいほど深さ場の再現精度が上がるが、"
                 "解析が重くなる。"
             )
-        upload = None
-    else:
-        with st.expander("画像入力", expanded=False):
-            upload = st.file_uploader(
-                "キャビティ画像（暗部=キャビティ、白=外）", type=["png", "jpg", "jpeg"]
-            )
-            plate_thk = st.slider("均一肉厚 [mm]", 0.2, 2.0, 2.0, step=0.1)
-            cell_size = st.slider("ピクセル->mm 換算 [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
-            invert = st.checkbox("白を内部として扱う（反転）", value=False)
-            threshold = st.slider("二値化しきい値", 16, 240, 128)
 
     with st.expander("材料", expanded=False):
         material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
@@ -1265,37 +1250,9 @@ def build_geometry() -> tuple[Geometry, dict]:
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
-    if upload is None:
-        st.warning("画像をアップロードしてください。")
-        st.stop()
-    img_bytes = upload.read()
-    tmp_path = Path(tempfile.mkdtemp()) / upload.name
-    tmp_path.write_bytes(img_bytes)
-    g = geometry_from_image(
-        tmp_path,
-        cell_size_mm=cell_size,
-        plate_thk_mm=plate_thk,
-        invert=invert,
-        threshold=threshold,
-    )
-    if not g.gates:
-        # default gate: leftmost cavity column, vertical center
-        ys, xs = np.where(g.mask)
-        if ys.size == 0:
-            st.error("キャビティ領域が検出できませんでした。しきい値か反転設定を見直してください。")
-            st.stop()
-        ix = int(xs.min())
-        col_ys = ys[xs == xs.min()]
-        iy = int(np.median(col_ys))
-        g.add_gate(iy, ix)
-    return g, config_settings(
-        geom_source,
-        image=file_fingerprint(upload.name, img_bytes),
-        cell_size_mm=cell_size,
-        plate_thk_mm=plate_thk,
-        invert=invert,
-        threshold=threshold,
-    )
+    # Every branch above returns, so this is reachable only if a new entry is
+    # added to the input radio without a matching branch here.
+    raise AssertionError(f"no geometry builder for input: {geom_source!r}")
 
 
 col_left, col_right = st.columns([1, 1.3])

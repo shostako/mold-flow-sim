@@ -1,8 +1,10 @@
 # Streamlit runtime config (loaded by both local and Streamlit Cloud).
 #
 # - server.maxUploadSize:
-#     画像から生成 (PNG/JPG) モード用に上限を 50MB に。
-#     デフォルト 200MB は無料枠でメモリ的にきつい。
+#     アップロードするのは Profile gate の JSON スペックだけで、実物は数 KB。
+#     デフォルト 200MB は無料枠でメモリ的にきついので 50MB に絞る。
+#     （元は画像入力モード用の設定。画像入力は v0.23.0 で撤去したが、
+#       上限自体は JSON uploader にそのまま効くので残す。）
 # - browser.gatherUsageStats:
 #     開発者向けテレメトリを無効化（Streamlit Cloud のメトリクスとは別）。
 [server]

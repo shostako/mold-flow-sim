@@ -116,16 +116,17 @@ def test_extra_fields_land_next_to_the_config():
     assert rec["cell_size_mm"] == 0.8
 
 
-def test_config_is_optional():
-    """An input may describe itself with loose keyword parameters instead of a
-    config dataclass. No shipped input does so today -- the image importer,
-    which was the original caller, was removed in v0.23.0 -- but the parameter
-    stays optional, and a caller passing ``None`` must still get a usable
-    record rather than an empty one.
+def test_rejects_a_missing_config():
+    """Every input must describe itself with a config dataclass.
+
+    ``cfg`` was optional while the image importer described itself with loose
+    keyword arguments instead. That input is gone, so a record without a
+    ``config`` key is now a shape nothing produces -- and a settings file that
+    silently omitted the geometry would be worse than one that was never
+    written.
     """
-    rec = config_settings("何かの入力", None, threshold=128, invert=False)
-    assert "config" not in rec
-    assert rec["threshold"] == 128
+    with pytest.raises(TypeError):
+        config_settings("何かの入力", None, threshold=128)
 
 
 def test_rejects_a_dataclass_type_passed_by_mistake():
@@ -134,8 +135,9 @@ def test_rejects_a_dataclass_type_passed_by_mistake():
 
 
 def test_rejects_an_empty_source():
+    """Checked with a valid config, so the failure can only be the source."""
     with pytest.raises(ValueError):
-        config_settings("", None)
+        config_settings("", DirectGateConfig(plate_w_mm=1.0, plate_h_mm=1.0, plate_thk_mm=1.0))
 
 
 def test_only_the_fingerprint_keys_describe_an_uploaded_spec():

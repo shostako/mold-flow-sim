@@ -215,6 +215,46 @@ def test_thickness_step_renders_as_block_step():
     assert np.any(zw.min(axis=1) > 1e-6), "no internal step wall emitted"
 
 
+def _css_rgb(value: str) -> tuple[float, float, float]:
+    """Parse one Plotly colorscale stop into 0..1 RGB.
+
+    Plotly hands back either ``#rrggbb`` or the CSS functional form
+    ``rgb(r, g, b)`` depending on which named scale was asked for — 81 of its
+    94 built-ins use the functional form, which ``matplotlib.colors.to_rgb``
+    rejects outright. Cividis happens to be one of the 13 hex ones, so a
+    hex-only parser passes today purely by luck of the colormap in force and
+    would raise ``ValueError`` the moment anyone evaluated a different
+    candidate — which is exactly what the luminance test below exists to
+    support. A crash there reads as "the test is broken" and invites deleting
+    it rather than reconsidering the colormap, so both spellings are handled.
+    """
+    text = str(value).strip()
+    if text.startswith("rgb"):  # covers rgb(...) and rgba(...)
+        body = text[text.index("(") + 1 : text.rindex(")")]
+        return tuple(float(n) / 255.0 for n in body.split(",")[:3])
+    return mcolors.to_rgb(text)
+
+
+def _relative_luminance(rgb: tuple[float, float, float]) -> float:
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+@pytest.mark.parametrize(
+    ("stop", "expected"),
+    [
+        ("#fee838", (254 / 255, 232 / 255, 56 / 255)),
+        ("rgb(254, 232, 56)", (254 / 255, 232 / 255, 56 / 255)),
+        ("rgb(0,0,0)", (0.0, 0.0, 0.0)),
+        ("rgba(255, 255, 255, 0.5)", (1.0, 1.0, 1.0)),
+    ],
+)
+def test_css_rgb_parses_both_plotly_stop_spellings(stop, expected):
+    """Guards the parser the luminance test depends on. Without the functional
+    form, swapping in any of the 81 ``rgb(...)``-spelled built-ins turns a
+    colormap verdict into an unrelated-looking ValueError."""
+    assert _css_rgb(stop) == pytest.approx(expected, abs=1e-9)
+
+
 def test_thickness_colorscale_matches_the_2d_map(small_result):
     """The solid view and the 2D design map must agree on what "thick" looks
     like. Plotly capitalizes its named colorscales, so the two constants are
@@ -231,10 +271,8 @@ def test_thickness_colorscale_matches_the_2d_map(small_result):
     # the whole point of the reversal. Comparing the name alone would pass
     # even if Plotly's "Cividis_r" were secretly unreversed.
     scale = fig.layout.coloraxis.colorscale
-    lo_rgb = mcolors.to_rgb(scale[0][1])
-    hi_rgb = mcolors.to_rgb(scale[-1][1])
-    lo_lum = 0.2126 * lo_rgb[0] + 0.7152 * lo_rgb[1] + 0.0722 * lo_rgb[2]
-    hi_lum = 0.2126 * hi_rgb[0] + 0.7152 * hi_rgb[1] + 0.0722 * hi_rgb[2]
+    lo_lum = _relative_luminance(_css_rgb(scale[0][1]))
+    hi_lum = _relative_luminance(_css_rgb(scale[-1][1]))
     assert lo_lum > hi_lum, (
         f"thin end must be the lighter one: thin lum={lo_lum:.3f}, thick lum={hi_lum:.3f}"
     )

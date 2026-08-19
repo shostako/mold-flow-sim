@@ -14,15 +14,21 @@ def css_rgb(value: str) -> tuple[float, float, float]:
     """Parse one Plotly colorscale stop into 0..1 (gamma-encoded) sRGB.
 
     Plotly hands back either ``#rrggbb`` or the CSS functional form
-    ``rgb(r, g, b)`` depending on which named scale was asked for. Across its
-    94 built-ins in both directions — 188 ramps, 1774 stops — the split is
-    1442 functional to 332 hex, and ``matplotlib.colors.to_rgb`` rejects the
-    functional form outright. Cividis happens to be one of the hex ones, so a
-    hex-only parser passes today purely by luck of the colormap in force and
-    would raise ``ValueError`` the moment anyone evaluated a different
-    candidate — which is exactly what these tests exist to support. A crash
-    there reads as "the test is broken" and invites deleting it rather than
-    reconsidering the colormap, so both spellings are handled.
+    ``rgb(r, g, b)`` depending on which named scale was asked for, and
+    ``matplotlib.colors.to_rgb`` rejects the functional form outright. Both
+    spellings occurring is the whole reason this exists; how many scales use
+    which is not, and is deliberately left unstated — ``plotly>=5.18`` is
+    unpinned, so any count here would be a snapshot masquerading as a
+    guarantee. (For scale: on plotly 6.7.0 the functional form was the large
+    majority, and Cividis was one of the hex minority — which is why a
+    hex-only parser passed at all.)
+
+    A hex-only parser therefore survives only as long as the chosen colormap
+    happens to be spelled in hex, and raises ``ValueError`` the moment anyone
+    evaluates a different candidate — which is exactly what these tests exist
+    to support. A crash there reads as "the test is broken" and invites
+    deleting it rather than reconsidering the colormap, so both spellings are
+    handled.
     """
     text = str(value).strip()
     if text.startswith("rgb"):  # covers rgb(...) and rgba(...)

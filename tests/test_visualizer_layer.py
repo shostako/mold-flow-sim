@@ -19,6 +19,7 @@ from core.visualizer import (
     render_layer_map,
     render_short_shot_map,
 )
+from tests.colorimetry import relative_luminance
 
 
 def _solve(num_layers: int = 5, **solver_kwargs) -> object:
@@ -169,8 +170,7 @@ def test_thickness_ramp_runs_light_to_dark() -> None:
     cmap = plt.get_cmap(THICKNESS_CMAP)
 
     def luminance(x: float) -> float:
-        r, g, b = cmap(x)[:3]
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return relative_luminance(cmap(x)[:3])
 
     # Monotone across the whole ramp, not merely lighter-at-0. A thickness map
     # has to let the reader rank two thicknesses by darkness alone; where

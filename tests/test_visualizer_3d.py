@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import matplotlib.colors as mcolors
 import numpy as np
 import plotly.graph_objects as go
 import pytest
@@ -34,6 +33,7 @@ from core import (
     render_3d_thickness_map,
 )
 from core.visualizer_3d import _cavity_corner_mesh
+from tests.colorimetry import css_rgb, relative_luminance
 
 
 @pytest.fixture(scope="module")
@@ -215,30 +215,6 @@ def test_thickness_step_renders_as_block_step():
     assert np.any(zw.min(axis=1) > 1e-6), "no internal step wall emitted"
 
 
-def _css_rgb(value: str) -> tuple[float, float, float]:
-    """Parse one Plotly colorscale stop into 0..1 RGB.
-
-    Plotly hands back either ``#rrggbb`` or the CSS functional form
-    ``rgb(r, g, b)`` depending on which named scale was asked for — 81 of its
-    94 built-ins use the functional form, which ``matplotlib.colors.to_rgb``
-    rejects outright. Cividis happens to be one of the 13 hex ones, so a
-    hex-only parser passes today purely by luck of the colormap in force and
-    would raise ``ValueError`` the moment anyone evaluated a different
-    candidate — which is exactly what the luminance test below exists to
-    support. A crash there reads as "the test is broken" and invites deleting
-    it rather than reconsidering the colormap, so both spellings are handled.
-    """
-    text = str(value).strip()
-    if text.startswith("rgb"):  # covers rgb(...) and rgba(...)
-        body = text[text.index("(") + 1 : text.rindex(")")]
-        return tuple(float(n) / 255.0 for n in body.split(",")[:3])
-    return mcolors.to_rgb(text)
-
-
-def _relative_luminance(rgb: tuple[float, float, float]) -> float:
-    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-
-
 @pytest.mark.parametrize(
     ("stop", "expected"),
     [
@@ -252,7 +228,30 @@ def test_css_rgb_parses_both_plotly_stop_spellings(stop, expected):
     """Guards the parser the luminance test depends on. Without the functional
     form, swapping in any of the 81 ``rgb(...)``-spelled built-ins turns a
     colormap verdict into an unrelated-looking ValueError."""
-    assert _css_rgb(stop) == pytest.approx(expected, abs=1e-9)
+    assert css_rgb(stop) == pytest.approx(expected, abs=1e-9)
+
+
+def test_relative_luminance_linearizes_srgb():
+    """Guards the metric the monotonicity tests depend on.
+
+    ``0.2126R + 0.7152G + 0.0722B`` applied to gamma-encoded sRGB is luma, not
+    luminance, and the two disagree in *sign* when a palette trades intensity
+    between channels. This pair is the concrete case: naive luma calls it a
+    darkening step, relative luminance calls it a brightening one. Getting it
+    wrong would wave through a replacement ramp that actually gets lighter.
+    """
+    darker_looking = css_rgb("rgb(205,78,46)")
+    brighter = css_rgb("rgb(242,34,36)")
+
+    def luma(rgb):
+        return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+    assert luma(brighter) < luma(darker_looking)  # the wrong answer
+    assert relative_luminance(brighter) > relative_luminance(darker_looking)
+
+    # anchors: the transfer function must not disturb black or white
+    assert relative_luminance((0.0, 0.0, 0.0)) == pytest.approx(0.0)
+    assert relative_luminance((1.0, 1.0, 1.0)) == pytest.approx(1.0)
 
 
 def test_thickness_colorscale_matches_the_2d_map(small_result):
@@ -284,7 +283,7 @@ def test_thickness_colorscale_matches_the_2d_map(small_result):
     # RGB, so luminance is linear between stops too — monotone at the stops
     # implies monotone everywhere.
     lums = [
-        _relative_luminance(_css_rgb(color)) for _offset, color in fig.layout.coloraxis.colorscale
+        relative_luminance(css_rgb(color)) for _offset, color in fig.layout.coloraxis.colorscale
     ]
     drops = [b - a for a, b in zip(lums, lums[1:])]
     assert all(d < 0 for d in drops), (

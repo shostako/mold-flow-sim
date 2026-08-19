@@ -189,6 +189,54 @@ def test_direct_construction_rejects_non_finite(mutate) -> None:
         bad.validate()
 
 
+def _sequence_slots(obj, path=()):
+    """Paths of every list-valued field in a spec dict (t_range / line pairs)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, list):
+                yield (*path, k)
+            else:
+                yield from _sequence_slots(v, (*path, k))
+
+
+# Two-item *iterables* that are not two-item arrays of numbers. Unpacking
+# accepts several of these silently, which is the whole point.
+_MALFORMED_SEQUENCES = [
+    "68",  # a 2-char string unpacks into ('6', '8') → (6.0, 8.0)
+    [1],
+    [1, 2, 3],
+    {"a": 1, "b": 2},
+    [True, False],
+    ["1", "2"],
+    5,
+    [[1, 2], [3, 4], [5, 6]],
+]
+# `None` is deliberately absent: JSON ``null`` means "omitted" for the
+# optional fields (well.floor_t_range), which is a documented behaviour,
+# not a hole.
+
+
+@pytest.mark.parametrize("bad", _MALFORMED_SEQUENCES, ids=lambda b: repr(b)[:16])
+def test_sequence_fields_reject_malformed_values(bad) -> None:
+    """Every ``[a, b]`` / ``[[t,w],[t,w]]`` field must require a real array.
+
+    Sweeping all list-valued fields rather than naming the reported one:
+    ``t_range`` and the boundary lines share the same two helpers, so a hole
+    in either shows up everywhere. Note how weak the accidental protection
+    is — most of these were caught only by a later *range* check, which is
+    luck, not validation: ``weld.t_range = "68"`` lands inside
+    ``[land.length, end_dist]`` and used to sail through as a band at 6–8 mm.
+    """
+    base = _weld_spec().to_dict()
+    slots = list(_sequence_slots(base))
+    assert len(slots) == 5, slots  # wall line, island line, weld/well/floor ranges
+    for path in slots:
+        d = copy.deepcopy(base)
+        _set_at(d, path, bad)
+        with pytest.raises(ValueError, match="gate profile JSON"):
+            GateProfileSpec.from_dict(d)
+
+
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int64])
 def test_numpy_scalar_fields_are_walked(dtype) -> None:
     """A spec can hold NumPy scalars — the walk must not skip them.

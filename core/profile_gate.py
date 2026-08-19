@@ -138,33 +138,44 @@ def _req(d: dict, key: str, path: str) -> Any:
     return d[key]
 
 
-def _num(d: dict, key: str, path: str) -> float:
-    val = _req(d, key, path)
-    if isinstance(val, bool) or not isinstance(val, (int, float)):
-        raise ValueError(f"gate profile JSON: '{path}{key}' must be a number, got {val!r}")
+def _scalar(val: Any, label: str) -> float:
+    """Accept a JSON number (or any real scalar), reject bool and everything else."""
+    if isinstance(val, bool) or not isinstance(val, numbers.Real):
+        raise ValueError(f"gate profile JSON: '{label}' must be a number, got {val!r}")
     return float(val)
 
 
+def _num(d: dict, key: str, path: str) -> float:
+    return _scalar(_req(d, key, path), f"{path}{key}")
+
+
+def _elements(val: Any, count: int, label: str, shape: str) -> list:
+    """Require an actual sequence of exactly ``count`` items.
+
+    Unpacking (``a, b = val``) would happily take any 2-item iterable — and a
+    two-character string is one. ``"t_range": "68"`` then parses as
+    ``(6.0, 8.0)``: a valid-looking band in a completely different place,
+    accepted without a word. Malformed JSON must be rejected, not reinterpreted.
+    """
+    if isinstance(val, (str, bytes)) or not isinstance(val, (list, tuple)) or len(val) != count:
+        raise ValueError(f"gate profile JSON: '{label}' must be {shape}, got {val!r}")
+    return list(val)
+
+
 def _line(d: dict, key: str, path: str) -> tuple[tuple[float, float], tuple[float, float]]:
-    val = _req(d, key, path)
-    try:
-        (t1, w1), (t2, w2) = val
-        pts = ((float(t1), float(w1)), (float(t2), float(w2)))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"gate profile JSON: '{path}{key}' must be [[t1, w1], [t2, w2]], got {val!r}"
-        ) from exc
-    return pts
+    label = f"{path}{key}"
+    shape = "[[t1, w1], [t2, w2]]"
+    pts = []
+    for pt in _elements(_req(d, key, path), 2, label, shape):
+        a, b = _elements(pt, 2, label, shape)
+        pts.append((_scalar(a, label), _scalar(b, label)))
+    return (pts[0], pts[1])
 
 
 def _pair(d: dict, key: str, path: str) -> tuple[float, float]:
-    val = _req(d, key, path)
-    try:
-        a, b = val
-        pair = (float(a), float(b))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"gate profile JSON: '{path}{key}' must be [a, b], got {val!r}") from exc
-    return pair
+    label = f"{path}{key}"
+    a, b = _elements(_req(d, key, path), 2, label, "[a, b]")
+    return (_scalar(a, label), _scalar(b, label))
 
 
 def _section(d: dict, key: str, *, required: bool) -> dict | None:

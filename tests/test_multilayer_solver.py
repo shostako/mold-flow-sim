@@ -841,3 +841,89 @@ def test_multilayer_rejects_a_gateless_region() -> None:
     )
     with pytest.raises(ValueError, match="cannot be .*reached from any gate"):
         solver.solve(num_frames=2)
+
+
+def test_n1_matches_legacy_fill_time_map() -> None:
+    """The two solver modes must agree on what "fill time at a cell" means.
+
+    Both map tau to time through the volume CDF (Issue #52). If either side
+    reverts to the old linear ``tau / tau_max`` map, identical physics would
+    report different per-cell times depending on which UI radio was picked.
+    """
+    g = build_film_gate_geometry(_default_cfg())
+    db = MaterialDB()
+    r_legacy = HeleShawSolver(geometry=g, material=db["PP"], **_solver_kwargs()).solve(num_frames=4)
+    r_multi = MultilayerHeleShawSolver(
+        geometry=g,
+        material=db["PP"],
+        num_layers=1,
+        thermal_coupling=False,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    # FP noise between the two tau solves can swap the CDF rank of
+    # near-tied cells, shifting their time by exactly one cell's volume
+    # quantum. Anything beyond that single quantum is a real map divergence.
+    assert np.array_equal(np.isnan(r_legacy.fill_time_s), np.isnan(r_multi.fill_time_s))
+    vol = g.thickness_mm * g.cell_size_mm**2
+    quantum = float(vol[g.mask].max()) / float(vol[g.mask].sum())
+    bound = quantum * r_legacy.total_fill_time_s * (1.0 + 1e-9)
+    diff = np.abs(np.nan_to_num(r_legacy.fill_time_s - r_multi.fill_time_s, nan=0.0))
+    assert float(diff.max()) <= bound
+
+
+def test_multilayer_inflation_uses_the_volume_weighted_representatives() -> None:
+    """The T_fill proxy is the ratio of volume-weighted mean taus (Issue #52).
+
+    Asserted against metadata the solver itself exports, on a geometry where
+    the tau change is non-uniform -- so the volume-weighted ratio measurably
+    differs from the old single-cell max ratio and the test can tell the two
+    apart.
+    """
+    g = build_film_gate_geometry(_default_cfg())
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        num_layers=3,
+        thermal_coupling=True,
+        **_solver_kwargs(),
+    ).solve(num_frames=4)
+    md = r.metadata
+    assert md["tau_rep_flow"] is not None and md["tau_rep_baseline"] is not None
+    assert md["T_fill_inflation"] == pytest.approx(
+        md["tau_rep_flow"] / md["tau_rep_baseline"], rel=1e-9
+    )
+    # the case has to discriminate: max ratio and mean ratio must not coincide
+    max_ratio = md["tau_max"] / md["tau_max_baseline"]
+    assert abs(md["T_fill_inflation"] - max_ratio) > 1e-3
+
+
+def test_multilayer_temperatures_come_from_the_volume_map_arrivals() -> None:
+    """The Neumann temperatures must be evaluated at volume-CDF arrival times.
+
+    Reconstructs the layer temperatures from the *reported* fill times (the
+    volume map) and from the old linear ``tau / tau_max`` map: the solver's
+    field matches the first within the fixed point's own tolerance (~0.03 K
+    here) and misses the second by ~14 K. A revert of the in-loop arrival map
+    walks straight into the margin.
+    """
+    from core.multilayer_thermal import neumann_layer_temperatures
+
+    g = build_film_gate_geometry(_default_cfg())
+    mat = MaterialDB()["PP"]
+    kwargs = _solver_kwargs()
+    solver = MultilayerHeleShawSolver(
+        geometry=g, material=mat, num_layers=3, thermal_coupling=True, **kwargs
+    )
+    r = solver.solve(num_frames=4)
+    t_cdf = np.where(np.isnan(r.fill_time_s), 0.0, r.fill_time_s)
+    T_expected = neumann_layer_temperatures(
+        zeta_centers=solver.layer_zeta_centers(),
+        t_arr_s=t_cdf,
+        h_total_mm=g.thickness_mm,
+        T_melt_K=kwargs["melt_temperature_K"],
+        T_mold_K=kwargs["mold_temperature_K"],
+        alpha_m2_s=mat.thermal_diffusivity_m2_s,
+    )
+    cav = np.broadcast_to(g.mask, T_expected.shape)
+    max_dev_K = float(np.nanmax(np.abs(r.layer_temperature_K - T_expected)[cav]))
+    assert max_dev_K < 0.5

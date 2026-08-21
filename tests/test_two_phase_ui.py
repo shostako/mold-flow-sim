@@ -24,9 +24,20 @@ def _texts(at: AppTest) -> str:
     return "\n".join(parts)
 
 
-def test_the_toggle_is_off_by_default_and_nothing_two_phase_runs():
+def test_the_defaults_are_two_phase_on_with_icm_and_no_wall_model():
+    """UI defaults (v0.29.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
+    model 'none' -- the combination the two-phase model actually runs in."""
     at = _app()
-    assert at.checkbox(key="two_phase_on").value is False
+    assert at.checkbox(key="two_phase_on").value is True
+    assert at.checkbox(key="icm_on").value is True
+    assert at.radio(key="wall_model").value == "none"
+    stroke = [s for s in at.slider if str(s.label).startswith("圧縮ストローク")]
+    assert len(stroke) == 1 and stroke[0].value == 0.50
+
+
+def test_switching_the_toggle_off_runs_nothing_two_phase():
+    at = _app()
+    at.checkbox(key="two_phase_on").set_value(False).run()
     at.radio(key="wall_model").set_value("none")
     at.button[0].click().run()
     assert not at.exception

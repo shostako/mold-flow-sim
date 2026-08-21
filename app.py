@@ -20,7 +20,6 @@ import streamlit.components.v1 as components
 
 from core import (
     DirectGateConfig,
-    FilmGate2Config,
     GateProfileSpec,
     HeleShawSolver,
     MaterialDB,
@@ -28,7 +27,6 @@ from core import (
     ProfilePlateConfig,
     build_direct_gate_geometry,
     build_fill_player_html,
-    build_film_gate2_geometry,
     build_profile_gate_geometry,
     export_frames,
     fill_frame_fractions,
@@ -69,9 +67,6 @@ from core.visualizer import (
 
 APP_DIR = Path(__file__).parent
 DEMO_PROFILE_JSON = APP_DIR / "data" / "gate_profiles" / "demo_profile_gate.json"
-# Film gate 1: the well's sloped wall angle is fixed (a cutter-geometry
-# constant on the drawings this input reproduces, not a design variable).
-_WELL_WALL_ANGLE_DEG = 60.0
 
 # Radio labels live here, next to the rest of the UI text; the logic in
 # ``core.spec_source`` switches on :class:`SpecMode` so that rewording one of
@@ -335,6 +330,336 @@ db = _load_db()
 material_keys = list(db.keys())
 
 
+# ----------------------- Film gate 1 / 2: parametric gate-block inputs -----------------------
+# Both Film gates are the same family as the Profile gate JSON (land / main
+# ramp / island / well / outer wall), driven by sliders and assembled into a
+# ``GateProfileSpec``. Film gate 1 is the symmetric (centre-valve) block and
+# defaults to hamoko_gate_furiwake_20260703; Film gate 2 is the one-sided
+# block (valve at the w=0 edge) and defaults to hamoko_gate_2bai_20260703.
+# The derived quantities (island boundary t-endpoints, outer-wall start
+# width, well floor) are tied to the major dimensions the way those drawings
+# tie them.
+
+# The well's sloped wall angle is fixed (a cutter-geometry constant on the
+# drawings these inputs reproduce, not a design variable).
+_WELL_WALL_ANGLE_DEG = 60.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _ProfileGateDefaults:
+    gate_exit_width: float
+    island_w_near: float
+    island_w_far: float
+    wall_t2: float
+    wall_w2: float
+    valve_t: float | None  # None = centre of the well
+
+
+_FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=298.0,
+    island_w_near=52.7,
+    island_w_far=10.0,
+    wall_t2=23.3,
+    wall_w2=4.5,
+    valve_t=None,
+)
+_FILM_GATE2_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=299.0,
+    island_w_near=95.3,
+    island_w_far=20.0,
+    wall_t2=23.6,
+    wall_w2=4.45,
+    valve_t=20.0,
+)
+
+
+def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
+    """Draw the Film gate sidebar and return the raw slider values.
+
+    ``tag`` prefixes widget keys so the two Film gates never share state.
+    Width-type values are half-widths from the valve axis when ``symmetric``,
+    else widths from the valve-side (w=0) edge -- the labels say which.
+    """
+    w_word = "半幅" if symmetric else "幅"
+    w_origin = "バルブ軸からの半幅" if symmetric else "バルブ側端（w=0）からの幅"
+    v: dict = {"symmetric": symmetric}
+
+    with st.expander("製品形状", expanded=False):
+        v["plate_w"] = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
+        v["plate_h"] = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+        two_layer = st.checkbox(
+            "製品肉厚を2層化する（ゲート側／反ゲート側）",
+            value=True,
+            help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
+            key=f"{tag}_plate_2layer",
+        )
+        if two_layer:
+            v["plate_split"] = st.slider(
+                "段差位置（製品長辺から）[mm]",
+                1.0,
+                float(v["plate_h"]),
+                min(20.0, float(v["plate_h"])),
+                step=1.0,
+                help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
+            )
+            v["plate_lower_thk"] = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+            v["plate_upper_thk"] = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
+            v["plate_thk"] = float(v["plate_lower_thk"])
+        else:
+            v["plate_thk"] = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+            v["plate_split"] = 0.0
+            v["plate_lower_thk"] = v["plate_upper_thk"] = float(v["plate_thk"])
+
+    with st.expander("ゲートブロック（肉厚調整ゲート）", expanded=False):
+        st.caption(
+            f"t = ゲート出口（製品長辺）からの距離、w = {w_origin}。"
+            + ("左右対称。" if symmetric else "片側のみ（バルブは端）。")
+            + "深さ = 流路肉厚。"
+        )
+        gew = st.slider(
+            "ゲート出口幅 [mm] (≤ 製品幅)",
+            min_value=10.0,
+            max_value=float(v["plate_w"]),
+            value=float(min(d.gate_exit_width, v["plate_w"])),
+            step=1.0,
+        )
+        v["gate_exit_width"] = gew
+        # the pocket's full width coordinate: half of it when symmetric
+        w_full = gew / 2.0 if symmetric else gew
+
+        st.markdown("**ランド（出口）**")
+        v["land_depth"] = st.slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
+        v["land_length"] = st.slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
+
+        st.markdown("**メインランプ**")
+        v["ramp_angle"] = st.number_input(
+            "ランプ角 [deg]",
+            min_value=1.0,
+            max_value=45.0,
+            value=10.95,
+            step=0.05,
+            format="%.2f",
+            help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
+        )
+        v["ramp_cap"] = st.slider(
+            "ランプ上限深さ [mm] (≥ ランド深さ)",
+            min_value=float(v["land_depth"]),
+            max_value=10.0,
+            value=float(max(2.5, v["land_depth"])),
+            step=0.1,
+        )
+
+        st.markdown("**アイランド（浅い帯＝振り分け）**")
+        v["island_on"] = st.checkbox(
+            "アイランドを有効化",
+            value=True,
+            key=f"{tag}_island_on",
+            help=(
+                "バルブ側の帯だけランプ角を緩くして流路を絞り、樹脂を遠方へ振り分ける。"
+                "境界線はランド終端 (t=ランド長) からアイランド終端 (t=end) までの直線で、"
+                f"{w_word}を出口側・終端側の2点で指定する。"
+            ),
+        )
+        if v["island_on"]:
+            v["island_angle"] = st.number_input(
+                "アイランド角 [deg] (≤ ランプ角)",
+                min_value=0.0,
+                max_value=float(v["ramp_angle"]),
+                value=float(min(2.5, v["ramp_angle"])),
+                step=0.05,
+                format="%.2f",
+            )
+            v["island_end"] = st.slider(
+                "アイランド終端 t_end [mm] (> ランド長)",
+                min_value=float(v["land_length"] + 0.5),
+                max_value=60.0,
+                value=float(max(17.0, v["land_length"] + 0.5)),
+                step=0.1,
+            )
+            v["island_w_near"] = st.slider(
+                f"境界{w_word}（出口側、t=ランド長）[mm]",
+                min_value=1.0,
+                max_value=float(w_full),
+                value=float(min(d.island_w_near, w_full)),
+                step=0.1,
+            )
+            v["island_w_far"] = st.slider(
+                f"境界{w_word}（終端側、t=t_end）[mm]",
+                min_value=0.5,
+                max_value=float(w_full),
+                value=float(min(d.island_w_far, w_full)),
+                step=0.1,
+            )
+
+        st.markdown("**外壁線（ポケット外形）**")
+        st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
+        v["wall_t1"] = st.slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
+        v["wall_t2"] = st.slider(
+            "外壁終端 t [mm] (> 開始)",
+            min_value=float(v["wall_t1"] + 0.5),
+            max_value=80.0,
+            value=float(max(d.wall_t2, v["wall_t1"] + 0.5)),
+            step=0.1,
+        )
+        v["wall_w2"] = st.slider(
+            f"外壁終端の{w_word} [mm]",
+            min_value=0.5,
+            max_value=float(w_full),
+            value=float(min(d.wall_w2, w_full)),
+            step=0.05,
+        )
+        v["wall_w1"] = float(w_full)
+
+        st.markdown("**井戸（バルブ周りの長穴ポケット）**")
+        v["well_on"] = st.checkbox("井戸を有効化", value=True, key=f"{tag}_well_on")
+        if v["well_on"]:
+            v["well_t1"] = st.slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
+            v["well_t2"] = st.slider(
+                "井戸終端 t [mm] (> 開始)",
+                min_value=float(v["well_t1"] + 0.5),
+                max_value=80.0,
+                value=float(max(27.5, v["well_t1"] + 0.5)),
+                step=0.1,
+            )
+            v["well_half_w"] = st.slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
+            # The 60° wall climbs from the rim, so the deepest point the
+            # pocket can reach is half_width·tan(60°) at the centreline. A
+            # deeper request is rejected by validate() and would otherwise be
+            # recorded as asked and built shallower (Codex P1).
+            depth_max = float(
+                min(15.0, v["well_half_w"] * math.tan(math.radians(_WELL_WALL_ANGLE_DEG)))
+            )
+            depth_max = max(0.5, math.floor(depth_max * 10.0) / 10.0)
+            v["well_depth"] = st.slider(
+                "井戸深さ [mm] (≤ 半幅·tan60°)",
+                0.5,
+                depth_max,
+                float(min(4.5, depth_max)),
+                step=0.1,
+                help="壁角 60° で到達できる最大深さ = 半幅 × tan(60°)。",
+            )
+            well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"])
+            pocket_t_end = max(float(v["wall_t2"]), float(v["well_t2"]))
+        else:
+            well_t_mid = 0.5 * (v["wall_t1"] + v["wall_t2"])
+            pocket_t_end = float(v["wall_t2"])
+
+        st.markdown("**バルブゲート**")
+        v["valve_d"] = st.slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+        # Keep the orifice inside the pocket along t. Outside it the builder
+        # snaps the gate to the nearest masked cell and the solver injects
+        # somewhere other than the recorded position (Codex P1).
+        t_min = float(v["valve_d"] / 2.0)
+        t_max = float(max(t_min + 0.1, pocket_t_end - v["valve_d"] / 2.0))
+        t_default = well_t_mid if d.valve_t is None else d.valve_t
+        v["valve_t"] = st.slider(
+            "バルブ位置 t [mm] (ポケット内)",
+            t_min,
+            t_max,
+            float(min(max(round(t_default, 1), t_min), t_max)),
+            step=0.1,
+            help=(
+                ("既定は井戸の中央（井戸 OFF なら外壁線の中点）。" if d.valve_t is None else "")
+                + "上限はポケット終端（外壁終端／井戸終端の遠い方）− 半径。"
+            ),
+        )
+
+        v["cell_size"] = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+        st.caption(
+            "この形状の想定解像度は 1.0mm（ランド長 1mm が 1 セル）。"
+            "細かいほど深さ場の再現精度が上がるが、解析が重くなる。"
+        )
+    return v
+
+
+def _profile_gate_from_inputs(
+    name: str, v: dict
+) -> tuple[GateProfileSpec, ProfilePlateConfig, float]:
+    """Assemble the spec + plate from ``_profile_gate_sidebar`` values."""
+    t_land = float(v["land_length"])
+    well = None
+    if v["well_on"]:
+        # Floor extent follows from the sloped wall: the 60° wall eats
+        # depth/tan(60°) of t at each end. When the pocket is too short for a
+        # flat floor the floor range is simply not reported.
+        eat = float(v["well_depth"]) / math.tan(math.radians(_WELL_WALL_ANGLE_DEG))
+        floor = (float(v["well_t1"]) + eat, float(v["well_t2"]) - eat)
+        well = WellSpec(
+            shape="obround",
+            t_range=(float(v["well_t1"]), float(v["well_t2"])),
+            half_width=float(v["well_half_w"]),
+            depth=float(v["well_depth"]),
+            floor_t_range=floor if floor[1] > floor[0] + 1e-6 else None,
+            wall_angle_deg=_WELL_WALL_ANGLE_DEG,
+        )
+    island = None
+    if v["island_on"]:
+        island = IslandSpec(
+            angle_deg=float(v["island_angle"]),
+            boundary_line=(
+                (t_land, float(v["island_w_near"])),
+                (float(v["island_end"]), float(v["island_w_far"])),
+            ),
+            end_dist=float(v["island_end"]),
+        )
+    spec = GateProfileSpec(
+        name=name,
+        units="mm",
+        symmetric=bool(v["symmetric"]),
+        gate_exit_width=float(v["gate_exit_width"]),
+        land=LandSpec(depth=float(v["land_depth"]), length=t_land),
+        main_ramp=MainRampSpec(angle_deg=float(v["ramp_angle"]), cap_depth=float(v["ramp_cap"])),
+        outer_wall_line=(
+            (float(v["wall_t1"]), float(v["wall_w1"])),
+            (float(v["wall_t2"]), float(v["wall_w2"])),
+        ),
+        valve=ValveSpec(t=float(v["valve_t"]), w=0.0, orifice_diameter=float(v["valve_d"])),
+        island=island,
+        well=well,
+    )
+    plate = ProfilePlateConfig(
+        plate_w_mm=v["plate_w"],
+        plate_h_mm=v["plate_h"],
+        plate_thk_mm=v["plate_thk"],
+        plate_split_height_mm=v["plate_split"] if v["plate_split"] > 0 else 0.0,
+        plate_lower_thk_mm=v["plate_lower_thk"] if v["plate_split"] > 0 else None,
+        plate_upper_thk_mm=v["plate_upper_thk"] if v["plate_split"] > 0 else None,
+    )
+    return spec, plate, float(v["cell_size"])
+
+
+def _valve_centre_cell(spec: GateProfileSpec, plate: ProfilePlateConfig, dx: float) -> tuple:
+    """Grid cell holding the valve centre (the ``floor(y/dx)`` row/column)."""
+    iy = int((plate.pad_mm + spec.t_max() - spec.valve.t) / dx)
+    if spec.symmetric:
+        x_valve = plate.pad_mm + plate.plate_w_mm / 2.0
+    else:
+        x_valve = plate.pad_mm + plate.plate_w_mm / 2.0 - spec.gate_exit_width / 2.0
+    return iy, int(x_valve / dx)
+
+
+def _build_film_gate(name: str, v: dict, source: str) -> tuple[Geometry, dict]:
+    spec, plate, dx = _profile_gate_from_inputs(name, v)
+    geom = build_profile_gate_geometry(spec, plate, cell_size_mm=dx)
+    # The builder snaps a gate whose orifice misses the pocket to the nearest
+    # masked cell. The slider bounds keep the orifice inside the pocket along
+    # t; this catches the width-wise miss the bounds cannot express.
+    iy, ix = _valve_centre_cell(spec, plate, dx)
+    if not (0 <= iy < geom.mask.shape[0] and 0 <= ix < geom.mask.shape[1] and geom.mask[iy, ix]):
+        raise ValueError(
+            f"バルブ位置 t={spec.valve.t:g} mm がポケットの外にある。"
+            "外壁終端／井戸の範囲内に移動するか、外壁終端の幅を広げる。"
+        )
+    return geom, config_settings(
+        source,
+        plate,
+        cell_size_mm=dx,
+        # Slider values, not a drawing: record the assembled spec in full so
+        # the ZIP reproduces the geometry.
+        gate_profile=dataclasses.asdict(spec),
+    )
+
+
 # ----------------------- sidebar: inputs -----------------------
 with st.sidebar:
     _hdr_col, _run_col = st.columns([1.4, 1], vertical_alignment="bottom")
@@ -346,7 +671,7 @@ with st.sidebar:
         "入力",
         [
             "Film gate 1 (肉厚調整ゲート)",
-            "Film gate 2 (ゲート位置可変)",
+            "Film gate 2 (肉厚調整ゲート・片側)",
             "Direct gate (parametric)",
             "Profile gate (JSONスペック)",
         ],
@@ -426,371 +751,9 @@ with st.sidebar:
                 "滑らかな3Dが要るときだけ下げる。"
             )
     elif geom_source.startswith("Film gate 2"):
-        with st.expander("製品形状", expanded=False):
-            plate_w_f2 = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
-            plate_h_f2 = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
-
-            plate_2layer_f2 = st.checkbox(
-                "製品肉厚を2層化する（ゲート側／反ゲート側）",
-                value=True,
-                help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
-            )
-            if plate_2layer_f2:
-                plate_split_f2 = st.slider(
-                    "段差位置（製品長辺から）[mm]",
-                    1.0,
-                    float(plate_h_f2),
-                    min(20.0, float(plate_h_f2)),
-                    step=1.0,
-                    help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
-                )
-                plate_lower_f2 = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
-                plate_upper_f2 = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
-                plate_thk_f2 = float(plate_lower_f2)
-            else:
-                plate_thk_f2 = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
-                plate_split_f2 = 0.0
-                plate_lower_f2 = float(plate_thk_f2)
-                plate_upper_f2 = float(plate_thk_f2)
-
-        with st.expander("ゲート形状", expanded=False):
-            st.markdown("**ゲート台形（直角台形）**")
-            gate_depth_f2 = st.slider(
-                "ゲート高さ D [mm]（注入点側）",
-                10.0,
-                60.0,
-                20.0,
-                step=1.0,
-                help="製品長辺から注入点までの距離（台形の高さ）。",
-            )
-            gate_position_f2 = st.slider(
-                "ゲート位置 [mm]（0=右端 / Wp÷2=中央=二等辺）",
-                0.0,
-                float(plate_w_f2),
-                0.0,
-                step=5.0,
-                help="注入バルブゲートの右端からの距離。0で直角台形、Wp÷2で二等辺。",
-            )
-            left_edge_f2 = st.slider(
-                "左端の高さ [mm]",
-                0.0,
-                min(15.0, float(gate_depth_f2)),
-                min(10.0, float(gate_depth_f2)),
-                step=1.0,
-                help="製品長辺端での台形高さ（台形化＝左端の尖り防止）。",
-            )
-            valve_f2 = st.slider("バルブゲート径 Φ [mm]", 1.0, 10.0, 3.0, step=0.5)
-            _gate_left_offset_max_f2 = float(max(plate_w_f2 - gate_position_f2 - 5.0, 0.0))
-
-            st.markdown("**ゲートランド（製品長辺接続部）**")
-            land_width_f2 = st.slider("ランド幅 [mm]", 1.0, 5.0, 1.0, step=0.5)
-            land_depth_f2 = st.slider("ランド深さ [mm]", 0.2, 2.0, 0.35, step=0.05)
-
-            st.markdown("**テーパ面形状**")
-            mid_a_f2 = st.slider(
-                "1段目の深さ [mm]（厚・深ランナー寄り）",
-                0.2,
-                5.0,
-                2.0,
-                step=0.1,
-                help="テーパ面の基本段（深ランナー寄り・厚め）の肉厚。",
-            )
-            taper1_len_f2 = st.slider(
-                "上段テーパ長 L1 [mm]",
-                1.0,
-                30.0,
-                8.0,
-                step=0.5,
-                help="ランドから1段目深さに達するまでの底辺距離。",
-            )
-            taper_2stage_f2 = st.checkbox(
-                "テーパ面を左右で段化する（右側に薄い2段目を追加）",
-                value=True,
-                help=(
-                    "ONで製品幅方向に左右分割。左=1段テーパのみ、"
-                    "右=薄い2段目を足した2段テーパ。OFFで全幅が単一テーパ。"
-                ),
-            )
-            if taper_2stage_f2:
-                gate_left_offset_f2 = st.slider(
-                    "2段境界の位置（製品左端から）[mm]",
-                    0.0,
-                    _gate_left_offset_max_f2,
-                    min(150.0, _gate_left_offset_max_f2),
-                    step=5.0,
-                    help="この位置より右に薄い2段目が入る。左は1段テーパのみ。",
-                )
-                mid_b_f2 = st.slider(
-                    "2段目の深さ [mm]（薄・製品長辺側）",
-                    0.2,
-                    5.0,
-                    1.8,
-                    step=0.1,
-                    help="ランド直後（製品長辺側）の薄い段の肉厚。1段目との境界はスロープで連続。",
-                )
-                taper2_left_f2 = st.slider(
-                    "2段目テーパ 端側の最遠点 [mm]",
-                    1.0,
-                    20.0,
-                    5.0,
-                    step=0.5,
-                    help="2段目の製品長辺から一番離れた点。端（楔先端）側。",
-                )
-                taper2_right_f2 = st.slider(
-                    "2段目テーパ 注入点側の最遠点 [mm]",
-                    1.0,
-                    20.0,
-                    10.0,
-                    step=0.5,
-                    help="2段目の製品長辺から一番離れた点。注入点側（台形の大きい辺）。",
-                )
-            else:
-                # 全幅で完全に同一の単一テーパにする（gate_position に依存しない）。
-                # gate_left_offset=0 で has_2nd を全幅 True にし、2段目の遠点を
-                # ランド端 (land_width) に潰す（far2=w_land 一定）と in2 は空になり、
-                # in1 が mid_b→mid_a を [w_land, w_land+L1] で描く。mid_b=land_depth に
-                # すると in1 は land_depth→mid_a の単一ランプ（長さ L1）になり、
-                # ランプ開始が land と連続。far2 一定なので左右で差が出ず、
-                # far_max=land_width なので validate の extent 膨張もない。
-                gate_left_offset_f2 = 0.0
-                mid_b_f2 = float(land_depth_f2)
-                taper2_left_f2 = float(land_width_f2)
-                taper2_right_f2 = float(land_width_f2)
-
-            st.markdown("**深ランナー（左斜辺沿い・台形断面）**")
-            runner_depth_f2 = st.slider("深さ [mm]", 2.0, 5.0, 3.0, step=0.5)
-            runner_top_f2 = st.slider("上底（開口幅）[mm]", 2.0, 5.0, 4.0, step=0.5)
-            runner_bottom_f2 = st.slider("下底（底幅・抜き勾配）[mm]", 1.0, 3.0, 2.0, step=0.5)
-
-            land_step_f2 = st.checkbox(
-                "ランド↔テーパ境界に段差をつける",
-                value=True,
-                help="ランド直後のテーパ始端深さを独立指定して段差を作る。OFFで連続（段差なし）。",
-            )
-            if land_step_f2:
-                taper2_near_f2 = st.slider(
-                    "ランド↔2段目テーパ 境界深さ [mm]（2段目がある領域）",
-                    0.2,
-                    float(runner_depth_f2),
-                    min(float(land_depth_f2), float(runner_depth_f2)),
-                    step=0.05,
-                    help="2段目テーパのランド側始端の深さ。ランド深さと変えると段差。上限は深ランナー深さ。",
-                )
-                taper1_near_f2 = st.slider(
-                    "ランド↔1段目テーパ 境界深さ [mm]（2段目が無い領域）",
-                    0.2,
-                    float(runner_depth_f2),
-                    min(1.50, float(runner_depth_f2)),
-                    step=0.05,
-                    help="2段目が無い左側で、1段目テーパのランド側始端の深さ。上限は深ランナー深さ。",
-                )
-            else:
-                taper2_near_f2 = None
-                taper1_near_f2 = None
-
-        with st.expander("メッシュ", expanded=False):
-            cell_size_f2 = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
-            st.caption(
-                "細かいほど解析精度が上がり 3D 表示も滑らかになるが、解析が重くなる"
-                "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
-                "滑らかな3Dが要るときだけ下げる。"
-            )
+        pg_inputs = _profile_gate_sidebar("f2", symmetric=False, d=_FILM_GATE2_DEFAULTS)
     elif geom_source.startswith("Film gate 1"):
-        # Parametric "肉厚調整ゲート" (ranner-block depth field) -- the same
-        # family as the Profile gate JSON (land / main ramp / island / well /
-        # outer wall), but driven by sliders and assembled into a
-        # ``GateProfileSpec`` here. The defaults reproduce
-        # hamoko_gate_furiwake_20260703 so the sliders start on a real
-        # balanced-gate design; the derived quantities below (boundary-line
-        # t-endpoints, outer-wall start half-width, well floor) are tied to
-        # the major dimensions the way that drawing ties them.
-        with st.expander("製品形状", expanded=False):
-            plate_w = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
-            plate_h = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
-
-            plate_2layer_f1 = st.checkbox(
-                "製品肉厚を2層化する（ゲート側／反ゲート側）",
-                value=True,
-                help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
-                key="f1_plate_2layer",
-            )
-            if plate_2layer_f1:
-                plate_split = st.slider(
-                    "段差位置（製品長辺から）[mm]",
-                    1.0,
-                    float(plate_h),
-                    min(20.0, float(plate_h)),
-                    step=1.0,
-                    help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
-                )
-                plate_lower_thk = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
-                plate_upper_thk = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
-                plate_thk = float(plate_lower_thk)
-            else:
-                plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
-                plate_split = 0.0
-                plate_lower_thk = float(plate_thk)
-                plate_upper_thk = float(plate_thk)
-
-        with st.expander("ゲートブロック（肉厚調整ゲート）", expanded=False):
-            st.caption(
-                "t = ゲート出口（製品長辺）からの距離、w = バルブ軸からの半幅。"
-                "左右対称。深さ = 流路肉厚。"
-            )
-            gate_exit_width = st.slider(
-                "ゲート出口幅 [mm] (≤ 製品幅)",
-                min_value=10.0,
-                max_value=float(plate_w),
-                value=float(min(298.0, plate_w)),
-                step=1.0,
-            )
-
-            st.markdown("**ランド（出口）**")
-            land_depth = st.slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
-            land_length = st.slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
-
-            st.markdown("**メインランプ**")
-            ramp_angle = st.number_input(
-                "ランプ角 [deg]",
-                min_value=1.0,
-                max_value=45.0,
-                value=10.95,
-                step=0.05,
-                format="%.2f",
-                help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
-            )
-            ramp_cap = st.slider(
-                "ランプ上限深さ [mm] (≥ ランド深さ)",
-                min_value=float(land_depth),
-                max_value=10.0,
-                value=float(max(2.5, land_depth)),
-                step=0.1,
-            )
-
-            st.markdown("**アイランド（中央の浅い帯＝振り分け）**")
-            island_on = st.checkbox(
-                "アイランドを有効化",
-                value=True,
-                key="f1_island_on",
-                help=(
-                    "中央帯だけランプ角を緩くして流路を絞り、樹脂を両端へ振り分ける。"
-                    "境界線はランド終端 (t=ランド長) からアイランド終端 (t=end) まで"
-                    "の直線で、半幅を出口側・終端側の2点で指定する。"
-                ),
-            )
-            if island_on:
-                island_angle = st.number_input(
-                    "アイランド角 [deg] (≤ ランプ角)",
-                    min_value=0.0,
-                    max_value=float(ramp_angle),
-                    value=float(min(2.5, ramp_angle)),
-                    step=0.05,
-                    format="%.2f",
-                )
-                island_end = st.slider(
-                    "アイランド終端 t_end [mm] (> ランド長)",
-                    min_value=float(land_length + 0.5),
-                    max_value=60.0,
-                    value=float(max(17.0, land_length + 0.5)),
-                    step=0.1,
-                )
-                island_w_near = st.slider(
-                    "境界半幅（出口側、t=ランド長）[mm]",
-                    min_value=1.0,
-                    max_value=float(gate_exit_width / 2.0),
-                    value=float(min(52.7, gate_exit_width / 2.0)),
-                    step=0.1,
-                )
-                island_w_far = st.slider(
-                    "境界半幅（終端側、t=t_end）[mm]",
-                    min_value=0.5,
-                    max_value=float(gate_exit_width / 2.0),
-                    value=float(min(10.0, gate_exit_width / 2.0)),
-                    step=0.1,
-                )
-            else:
-                island_angle = 0.0
-                island_end = 0.0
-                island_w_near = 0.0
-                island_w_far = 0.0
-
-            st.markdown("**外壁線（ポケット外形）**")
-            st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
-            wall_t1 = st.slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
-            wall_t2 = st.slider(
-                "外壁終端 t [mm] (> 開始)",
-                min_value=float(wall_t1 + 0.5),
-                max_value=80.0,
-                value=float(max(23.3, wall_t1 + 0.5)),
-                step=0.1,
-            )
-            wall_w2 = st.slider(
-                "外壁終端の半幅 [mm]",
-                min_value=0.5,
-                max_value=float(gate_exit_width / 2.0),
-                value=float(min(4.5, gate_exit_width / 2.0)),
-                step=0.1,
-            )
-
-            st.markdown("**井戸（バルブ周りの長穴ポケット）**")
-            well_on = st.checkbox("井戸を有効化", value=True, key="f1_well_on")
-            if well_on:
-                well_t1 = st.slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
-                well_t2 = st.slider(
-                    "井戸終端 t [mm] (> 開始)",
-                    min_value=float(well_t1 + 0.5),
-                    max_value=80.0,
-                    value=float(max(27.5, well_t1 + 0.5)),
-                    step=0.1,
-                )
-                well_half_w = st.slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
-                # The 60° wall climbs from the rim, so the deepest point the
-                # pocket can reach is half_width·tan(60°) at the centreline.
-                # A deeper request would be accepted by the spec, recorded in
-                # settings.json, and silently built shallower (Codex P1).
-                _well_depth_max = float(
-                    min(15.0, well_half_w * math.tan(math.radians(_WELL_WALL_ANGLE_DEG)))
-                )
-                _well_depth_max = max(0.5, math.floor(_well_depth_max * 10.0) / 10.0)
-                well_depth = st.slider(
-                    "井戸深さ [mm] (≤ 半幅·tan60°)",
-                    0.5,
-                    _well_depth_max,
-                    float(min(4.5, _well_depth_max)),
-                    step=0.1,
-                    help="壁角 60° で到達できる最大深さ = 半幅 × tan(60°)。",
-                )
-                _well_t_mid = 0.5 * (well_t1 + well_t2)
-                _pocket_t_end = max(float(wall_t2), float(well_t2))
-            else:
-                well_t1 = well_t2 = well_half_w = well_depth = 0.0
-                _well_t_mid = 0.5 * (wall_t1 + wall_t2)
-                _pocket_t_end = float(wall_t2)
-
-            st.markdown("**バルブゲート**")
-            valve_d = st.slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
-            # Keep the orifice inside the pocket along t. Outside it the
-            # builder snaps the gate to the nearest masked cell and the solver
-            # injects somewhere other than the recorded position (Codex P1).
-            _valve_t_min = float(valve_d / 2.0)
-            _valve_t_max = float(max(_valve_t_min + 0.1, _pocket_t_end - valve_d / 2.0))
-            valve_t = st.slider(
-                "バルブ位置 t [mm] (ポケット内)",
-                _valve_t_min,
-                _valve_t_max,
-                float(min(max(round(_well_t_mid, 1), _valve_t_min), _valve_t_max)),
-                step=0.1,
-                help=(
-                    "既定は井戸の中央（井戸 OFF なら外壁線の中点）。"
-                    "上限はポケット終端（外壁終端／井戸終端の遠い方）− 半径。"
-                ),
-            )
-
-            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
-            st.caption(
-                "この形状の想定解像度は 1.0mm（ランド長 1mm が 1 セル）。"
-                "細かいほど深さ場の再現精度が上がるが、解析が重くなる。"
-            )
+        pg_inputs = _profile_gate_sidebar("f1", symmetric=True, d=_FILM_GATE1_DEFAULTS)
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
             spec_mode_pg = SPEC_MODE_BY_LABEL[
@@ -946,7 +909,7 @@ with st.sidebar:
         wall_model = st.radio(
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
-            index=2,
+            index=0,
             key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
@@ -965,8 +928,8 @@ with st.sidebar:
 
         # default container (so downstream `solver = HeleShawSolver(...)` /
         # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-        # 極薄プレート (t0.35〜0.50 想定) 向けに既定値を調整:
-        #   モード: 層別 (index=2)
+        # 既定モードは『なし』(index=0) — 二相ショートショット（計量律速、凍結なし）
+        # を既定 ON にしているため。層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
         #   層数 N: 7 (壁勾配が急なので N=5 から増量)
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
         skin_on = wall_model == "skin"
@@ -1071,7 +1034,7 @@ with st.sidebar:
             shear_heating_enabled = False
 
     with st.expander("射出圧縮成形 (ICM)", expanded=False):
-        icm = st.checkbox("圧縮成形ON", value=False, key="icm_on")
+        icm = st.checkbox("圧縮成形ON", value=True, key="icm_on")
         if icm:
             # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
             # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
@@ -1080,7 +1043,7 @@ with st.sidebar:
                 "圧縮ストローク [mm]",
                 0.0,
                 2.0,
-                0.70,
+                0.50,
                 step=0.05,
                 help=(
                     "金型シム量。圧縮 mask セル全てに加算される絶対量。"
@@ -1108,7 +1071,7 @@ with st.sidebar:
         # 段階ショートショットの現物形状と直接比較する用途。
         two_phase_on = st.checkbox(
             "二相ショートショット解析ON",
-            value=False,
+            value=True,
             key="two_phase_on",
             help=(
                 "計量を意図的に絞ったショートショットの最終形状を予測する。"
@@ -1206,113 +1169,14 @@ def build_geometry() -> tuple[Geometry, dict]:
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
-    if geom_source.startswith("Film gate 2"):
+    if geom_source.startswith("Film gate"):
+        _name = (
+            "film_gate_1_parametric"
+            if geom_source.startswith("Film gate 1")
+            else "film_gate_2_parametric"
+        )
         try:
-            cfg_f2 = FilmGate2Config(
-                plate_w_mm=plate_w_f2,
-                plate_h_mm=plate_h_f2,
-                plate_thk_mm=plate_thk_f2,
-                gate_depth_mm=gate_depth_f2,
-                gate_position_mm=gate_position_f2,
-                gate_left_offset_mm=gate_left_offset_f2,
-                left_edge_mm=left_edge_f2,
-                land_width_mm=land_width_f2,
-                land_depth_mm=land_depth_f2,
-                taper1_len_mm=taper1_len_f2,
-                mid_depth_a_mm=mid_a_f2,
-                mid_depth_b_mm=mid_b_f2,
-                taper2_near_depth_mm=taper2_near_f2,
-                taper1_near_depth_mm=taper1_near_f2,
-                taper2_left_mm=taper2_left_f2,
-                taper2_right_mm=taper2_right_f2,
-                runner_depth_mm=runner_depth_f2,
-                runner_top_mm=runner_top_f2,
-                runner_bottom_mm=runner_bottom_f2,
-                valve_gate_diameter_mm=valve_f2,
-                cell_size_mm=cell_size_f2,
-                plate_split_height_mm=plate_split_f2 if plate_split_f2 > 0 else 0.0,
-                plate_lower_thk_mm=plate_lower_f2 if plate_split_f2 > 0 else None,
-                plate_upper_thk_mm=plate_upper_f2 if plate_split_f2 > 0 else None,
-            )
-            return build_film_gate2_geometry(cfg_f2), config_settings(geom_source, cfg_f2)
-        except ValueError as exc:
-            st.error(f"パラメータ不整合: {exc}")
-            st.stop()
-    if geom_source.startswith("Film gate 1"):
-        try:
-            _t_land = float(land_length)
-            _well_f1 = None
-            if well_on:
-                # Floor extent follows from the sloped wall: the 60° wall eats
-                # depth/tan(60°) of t at each end. When the pocket is too short
-                # for a flat floor the floor range is simply not reported.
-                _wall_eat = float(well_depth) / math.tan(math.radians(_WELL_WALL_ANGLE_DEG))
-                _floor = (float(well_t1) + _wall_eat, float(well_t2) - _wall_eat)
-                _well_f1 = WellSpec(
-                    shape="obround",
-                    t_range=(float(well_t1), float(well_t2)),
-                    half_width=float(well_half_w),
-                    depth=float(well_depth),
-                    floor_t_range=_floor if _floor[1] > _floor[0] + 1e-6 else None,
-                    wall_angle_deg=_WELL_WALL_ANGLE_DEG,
-                )
-            _island_f1 = None
-            if island_on:
-                _island_f1 = IslandSpec(
-                    angle_deg=float(island_angle),
-                    boundary_line=(
-                        (_t_land, float(island_w_near)),
-                        (float(island_end), float(island_w_far)),
-                    ),
-                    end_dist=float(island_end),
-                )
-            spec_f1 = GateProfileSpec(
-                name="film_gate_1_parametric",
-                units="mm",
-                symmetric=True,
-                gate_exit_width=float(gate_exit_width),
-                land=LandSpec(depth=float(land_depth), length=_t_land),
-                main_ramp=MainRampSpec(angle_deg=float(ramp_angle), cap_depth=float(ramp_cap)),
-                outer_wall_line=(
-                    (float(wall_t1), float(gate_exit_width) / 2.0),
-                    (float(wall_t2), float(wall_w2)),
-                ),
-                valve=ValveSpec(t=float(valve_t), w=0.0, orifice_diameter=float(valve_d)),
-                island=_island_f1,
-                well=_well_f1,
-            )
-            plate_f1 = ProfilePlateConfig(
-                plate_w_mm=plate_w,
-                plate_h_mm=plate_h,
-                plate_thk_mm=plate_thk,
-                plate_split_height_mm=plate_split if plate_split > 0 else 0.0,
-                plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
-                plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
-            )
-            geom_f1 = build_profile_gate_geometry(spec_f1, plate_f1, cell_size_mm=cell_size)
-            # The builder snaps a gate whose orifice misses the pocket to the
-            # nearest masked cell. The slider bounds above keep the orifice
-            # inside the pocket along t; this catches the width-wise miss
-            # (orifice wider than the pocket tip) the bounds cannot express.
-            _iy_v = int((plate_f1.pad_mm + spec_f1.t_max() - float(valve_t)) / cell_size)
-            _ix_v = int((plate_f1.pad_mm + float(plate_w) / 2.0) / cell_size)
-            if not (
-                0 <= _iy_v < geom_f1.mask.shape[0]
-                and 0 <= _ix_v < geom_f1.mask.shape[1]
-                and geom_f1.mask[_iy_v, _ix_v]
-            ):
-                raise ValueError(
-                    f"バルブ位置 t={valve_t:g} mm がポケットの外にある。"
-                    "外壁終端／井戸の範囲内に移動するか、外壁終端の半幅を広げる。"
-                )
-            return geom_f1, config_settings(
-                geom_source,
-                plate_f1,
-                cell_size_mm=cell_size,
-                # Slider values, not a drawing: record the assembled spec in
-                # full so the ZIP reproduces the geometry.
-                gate_profile=dataclasses.asdict(spec_f1),
-            )
+            return _build_film_gate(_name, pg_inputs, geom_source)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1423,7 +1287,7 @@ with col_left:
     plt.close(fig)
     st.image(fig_buf.getvalue())
     st.caption(
-        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。ゲートブロック／ランナーは y < 0 側。赤丸はバルブゲート位置。"
+        "原点 (x, y) = (0, 0) はバルブゲート位置（赤丸）。ゲートブロック／ランナーは y < 0 側。"
     )
 
 

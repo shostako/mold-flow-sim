@@ -204,23 +204,29 @@ def test_a_well_too_short_for_a_flat_floor_reports_no_floor_range():
 def test_a_valve_centre_outside_the_pocket_is_rejected_not_snapped(monkeypatch):
     """The post-build guard in app.py. Slider bounds make this unreachable by
     hand (the centreline w=0 is always inside a pocket whose half-width is
-    ≥ 0.5 mm), so the miss is injected: the real builder runs, then the
-    valve-centre cell is cut out of the mask. ``app.py`` re-imports
+    ≥ 0.5 mm), so the miss is injected: the real builder runs, then every
+    cell under the orifice is cut out of the mask. ``app.py`` re-imports
     ``build_profile_gate_geometry`` from ``core`` on every AppTest run, so
     patching the module attribute reaches it."""
     import core
 
     real = core.build_profile_gate_geometry
 
-    def cut_out_valve_cell(spec, plate, cell_size_mm=1.0):
+    def cut_out_orifice(spec, plate, cell_size_mm=1.0):
         geom = real(spec, plate, cell_size_mm=cell_size_mm)
-        iy = int((plate.pad_mm + spec.t_max() - spec.valve.t) / cell_size_mm)
-        ix = int((plate.pad_mm + plate.plate_w_mm / 2.0) / cell_size_mm)
-        assert geom.mask[iy, ix], "the injected miss must start from a hit"
-        geom.mask[iy, ix] = False
+        ny, nx = geom.mask.shape
+        iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+        x_v = plate.pad_mm + plate.plate_w_mm / 2.0
+        y_v = plate.pad_mm + spec.t_max() - spec.valve.t
+        r = spec.valve.orifice_diameter / 2.0
+        orifice = ((ix + 0.5) * cell_size_mm - x_v) ** 2 + (
+            (iy + 0.5) * cell_size_mm - y_v
+        ) ** 2 <= r**2
+        assert np.any(orifice & geom.mask), "the injected miss must start from a hit"
+        geom.mask[orifice] = False
         return geom
 
-    monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_valve_cell)
+    monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_orifice)
     at = _film_gate1_app()
     at.button[0].click().run()
     assert not at.exception

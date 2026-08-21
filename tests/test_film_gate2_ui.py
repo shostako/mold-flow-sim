@@ -105,3 +105,39 @@ def test_the_gate_sits_at_the_valve_side_edge(film_gate2_run):
     ixs = np.array([ix for _, ix in geom.gates])
     x_edge_cell = int((5.0 + 300.0 / 2.0 - 299.0 / 2.0) / 1.0)
     assert abs(ixs.mean() - x_edge_cell) < 2.0
+
+
+def _slider(at: AppTest, label_prefix: str):
+    hits = [s for s in at.slider if str(s.label).startswith(label_prefix)]
+    assert len(hits) == 1, [str(s.label) for s in at.slider]
+    return hits[0]
+
+
+def test_film_gate_sliders_do_not_leak_across_the_two_inputs():
+    """Codex P2: widgets without a key are identified by label + parameters,
+    so a Film gate 2 value would survive the switch to Film gate 1 and
+    override that input's default."""
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    _slider(at, "製品幅").set_value(200.0).run()
+    _slider(at, "ランド深さ").set_value(0.8).run()
+    at.radio(key="geom_source").set_value("Film gate 1 (肉厚調整ゲート)").run()
+    assert _slider(at, "製品幅").value == 300.0
+    assert _slider(at, "ランド深さ").value == 0.35
+
+
+def test_one_sided_valve_on_the_pocket_boundary_is_accepted_on_a_fine_mesh():
+    """Codex P2: the one-sided valve centre sits on the w=0 boundary; with
+    the well off and a 0.4 mm mesh the centre floor()s into the cell just
+    outside the pocket while the orifice overlaps plenty of pocket cells. The
+    guard must test orifice overlap (as the builder does), not the centre cell."""
+    at = AppTest.from_file(str(APP), default_timeout=400.0)
+    at.run()
+    at.checkbox(key="f2_well_on").set_value(False).run()
+    _slider(at, "メッシュ粗さ").set_value(0.4).run()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.button[0].click().run()
+    assert not at.exception
+    assert not [e for e in at.error if "ポケットの外" in str(e.value)]
+    assert "mfs_geom" in at.session_state

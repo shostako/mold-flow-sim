@@ -49,7 +49,7 @@ HAMOKO_2BAI_SPEC = {
 def film_gate3_run() -> AppTest:
     at = AppTest.from_file(str(APP), default_timeout=240.0)
     at.run()
-    assert at.radio(key="geom_source").value == FILM_GATE3_LABEL  # the UI default input
+    at.radio(key="geom_source").set_value(FILM_GATE3_LABEL).run()
     at.button[0].click().run()
     assert not at.exception
     return at
@@ -119,6 +119,7 @@ def test_film_gate_sliders_do_not_leak_across_the_two_inputs():
     override that input's default."""
     at = AppTest.from_file(str(APP), default_timeout=240.0)
     at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE3_LABEL).run()
     _slider(at, "製品幅").set_value(200.0).run()
     _slider(at, "ランド深さ").set_value(0.8).run()
     at.radio(key="geom_source").set_value("Film gate 1 (扇状/肉盗み1)").run()
@@ -133,6 +134,7 @@ def test_one_sided_valve_on_the_pocket_boundary_is_accepted_on_a_fine_mesh():
     guard must test orifice overlap (as the builder does), not the centre cell."""
     at = AppTest.from_file(str(APP), default_timeout=400.0)
     at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE3_LABEL).run()
     at.checkbox(key="f3_well_on").set_value(False).run()
     _slider(at, "メッシュ粗さ").set_value(0.4).run()
     at.radio(key="wall_model").set_value("none")
@@ -149,6 +151,7 @@ def test_one_sided_well_half_width_is_capped_by_the_edge_room():
     builder reject the grid overhang. Default: 5 + (300 − 299)/2 = 5.5."""
     at = AppTest.from_file(str(APP), default_timeout=240.0)
     at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE3_LABEL).run()
     hw = _slider(at, "井戸半幅")
     assert hw.max == pytest.approx(5.5)
     _slider(at, "ゲート出口幅").set_value(280.0).run()
@@ -179,6 +182,7 @@ def test_a_one_sided_orifice_outside_the_pocket_is_rejected_not_snapped(monkeypa
     monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_orifice)
     at = AppTest.from_file(str(APP), default_timeout=240.0)
     at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE3_LABEL).run()
     at.button[0].click().run()
     assert not at.exception
     assert any("ポケットの外" in str(e.value) for e in at.error)

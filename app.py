@@ -1250,6 +1250,7 @@ with st.sidebar:
             40,
             int(WELD_MIN_ANGLE_DEG),
             step=5,
+            key="weld_min_angle",
             help="2 つの流れが出会うときの開き角。45° 以上は濃い赤（ウェルド）、"
             "この角度から 45° までは薄い赤（メルド）、未満は描かない。"
             "穴の後ろに残る遅れ帯の痕を追いたいときは下げる。",
@@ -1673,6 +1674,7 @@ if do_run:
         st.session_state["mfs_player_height"] = fill_player_height_px(_frame_paths)
         st.session_state["mfs_press_path"] = _press_path
         st.session_state["mfs_weld_path"] = _weld_path
+        st.session_state["mfs_weld_min_angle"] = float(weld_min_angle)
         st.session_state["mfs_skin_path"] = _skin_path
         st.session_state["mfs_core_path"] = _core_path
         st.session_state["mfs_layer_T_grid_path"] = _layer_T_grid_path
@@ -1684,9 +1686,39 @@ if do_run:
         st.session_state["mfs_two_phase_skip"] = two_phase_skip_reason
         st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
 
+
 # 結果が session_state にある間は、do_run=False のときも（3D 倍率スライダー
 # などのウィジェット操作で rerun が走った場合も）表示を維持する。
+def _refresh_weld_assets(min_angle: float) -> None:
+    """Re-threshold the cached weld map when the slider moves after a run.
+
+    The solver keeps ``weld_angle_deg`` precisely so this does not need a
+    re-solve: redraw weld.png from the cached result, update the recorded
+    setting, and swap both entries inside the cached ZIP so a download taken
+    after moving the slider matches what the screen shows (Codex P2).
+    """
+    cached = st.session_state["mfs_result"]
+    tmp_dir = st.session_state["mfs_tmp_dir"]
+    new_path = render_weldlines(cached, tmp_dir / "weld.png", weld_min_angle_deg=min_angle)
+    st.session_state["mfs_weld_path"] = new_path
+    st.session_state["mfs_weld_min_angle"] = min_angle
+    settings = st.session_state["mfs_settings"]
+    settings["output"]["weld_min_angle_deg"] = min_angle
+    old_zip = zipfile.ZipFile(io.BytesIO(st.session_state["mfs_zip_bytes"]))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for info in old_zip.infolist():
+            if info.filename in (new_path.name, "settings.json"):
+                continue
+            zf.writestr(info, old_zip.read(info.filename))
+        zf.write(new_path, new_path.name)
+        zf.writestr("settings.json", settings_json(settings))
+    st.session_state["mfs_zip_bytes"] = buf.getvalue()
+
+
 if "mfs_result" in st.session_state:
+    if st.session_state.get("mfs_weld_min_angle") != float(weld_min_angle):
+        _refresh_weld_assets(float(weld_min_angle))
     result = st.session_state["mfs_result"]
     geom = st.session_state["mfs_geom"]
     skin_on = st.session_state["mfs_skin_on"]

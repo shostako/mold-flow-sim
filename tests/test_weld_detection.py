@@ -148,3 +148,20 @@ def test_results_without_an_angle_field_fall_back_to_the_stored_score():
     g = _plate(ny, nx, [(0, ix) for ix in range(nx)] + [(ny - 1, ix) for ix in range(nx)])
     r = replace(_solve(g), weld_angle_deg=None)
     assert np.array_equal(weld_overlay_score(r, min_angle_deg=40.0), r.weld_score)
+
+
+def test_even_width_grid_with_two_tied_centre_columns_still_finds_the_weld():
+    """Symmetric solves tie the two centre columns to machine precision; the
+    crest on each of them sees a zero drop toward its twin and must read one
+    cell further out instead of calling itself flat."""
+    ny, nx = 80, 40
+    hole = (20, 30, 14, 26)  # symmetric about the column boundary 19|20
+    g = _plate(ny, nx, [(0, ix) for ix in range(nx)], hole=hole)
+    r = _solve(g)
+    tau = r.tau
+    assert np.allclose(tau[31:40, 19], tau[31:40, 20], rtol=1e-12)
+    w = r.weld_score
+    assert (w[31:34, 19] > 0).all() and (w[31:34, 20] > 0).all()
+    assert w[31, 19] == pytest.approx(1.0) and w[31, 20] == pytest.approx(1.0)
+    # the line is the twin pair and nothing beside it
+    assert not (w[31:40, :19] > 0).any() and not (w[31:40, 21:] > 0).any()

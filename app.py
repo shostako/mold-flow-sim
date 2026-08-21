@@ -43,7 +43,7 @@ from core import (
     wrap_standalone_html,
 )
 from core.geometry import Geometry
-from core.profile_gate import IslandSpec, LandSpec, MainRampSpec, ValveSpec, WellSpec
+from core.profile_gate import IslandSpec, LandSpec, MainRampSpec, ValveSpec, WeldSpec, WellSpec
 from core.settings_record import config_settings, file_fingerprint, settings_json
 from core.spec_source import (
     SPEC_LINK_NAME,
@@ -330,53 +330,83 @@ db = _load_db()
 material_keys = list(db.keys())
 
 
-# ----------------------- Film gate 1 / 2: parametric gate-block inputs -----------------------
-# Both Film gates are the same family as the Profile gate JSON (land / main
-# ramp / island / well / outer wall), driven by sliders and assembled into a
-# ``GateProfileSpec``. Film gate 1 is the symmetric (centre-valve) block and
-# defaults to hamoko_gate_furiwake_20260703; Film gate 2 is the one-sided
-# block (valve at the w=0 edge) and defaults to hamoko_gate_2bai_20260703.
-# The derived quantities (island boundary t-endpoints, outer-wall start
-# width, well floor) are tied to the major dimensions the way those drawings
-# tie them.
-
-# The well's sloped wall angle is fixed (a cutter-geometry constant on the
-# drawings these inputs reproduce, not a design variable).
-_WELL_WALL_ANGLE_DEG = 60.0
+# ----------------------- Film gate 1 / 2 / 3: parametric gate-block inputs -----------------------
+# All three Film gates are the same family as the Profile gate JSON (land /
+# main ramp / island (肉盗み) / well / outer wall), driven by sliders and
+# assembled into a ``GateProfileSpec``:
+#   Film gate 1 (扇状/肉盗み1)   symmetric, hamoko_gate_furiwake_20260703
+#   Film gate 2 (扇状/肉盗み2)   symmetric, hamoko_gate_furiwake_weld_20260818
+#                                (the 肉盗み has a flat dam: ``island.weld``)
+#   Film gate 3 (片側/二倍流動長) one-sided (valve at the w=0 edge),
+#                                hamoko_gate_2bai_20260703
+# The derived quantities (島 boundary t-endpoints, outer-wall start width,
+# well floor) are tied to the major dimensions the way those drawings tie
+# them.
 
 
 @dataclasses.dataclass(frozen=True)
 class _ProfileGateDefaults:
     gate_exit_width: float
-    island_w_near: float
-    island_w_far: float
+    island_w_near: float  # 肉盗み境界の幅, at t = land length
+    island_w_far: float  # 肉盗み境界の幅, at t = island end
+    wall_t1: float
     wall_t2: float
     wall_w2: float
     valve_t: float | None  # None = centre of the well
+    # The well's sloped wall angle is a cutter-geometry constant on each
+    # drawing, not a design variable -- so it lives here, not on a slider.
+    well_wall_angle_deg: float
+    # Flat dam inside the 肉盗み: (start t, residual depth from PL). None = no dam.
+    weld: tuple[float, float] | None = None
 
 
 _FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
     gate_exit_width=298.0,
     island_w_near=52.7,
     island_w_far=10.0,
+    wall_t1=3.0,
     wall_t2=23.3,
     wall_w2=4.5,
     valve_t=None,
+    well_wall_angle_deg=60.0,
 )
+# The drawing's 肉盗み boundary runs from (t=0, w=50.0) to (t=17, w=9.9); the
+# sidebar pins the near end to t = land length (1.0), where that line reads
+# 47.64 -- same line, expressed at the point the UI exposes.
 _FILM_GATE2_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=298.0,
+    island_w_near=47.64,
+    island_w_far=9.9,
+    wall_t1=5.0,
+    wall_t2=23.28,
+    wall_w2=4.48,
+    valve_t=None,
+    well_wall_angle_deg=71.6,
+    weld=(7.0, 0.1),
+)
+_FILM_GATE3_DEFAULTS = _ProfileGateDefaults(
     gate_exit_width=299.0,
     island_w_near=95.3,
     island_w_far=20.0,
+    wall_t1=3.0,
     wall_t2=23.6,
     wall_w2=4.45,
     valve_t=20.0,
+    well_wall_angle_deg=60.0,
 )
+
+# radio label -> (widget key tag, symmetric, defaults, recorded geometry name)
+_FILM_GATES: dict[str, tuple[str, bool, _ProfileGateDefaults, str]] = {
+    "Film gate 1 (扇状/肉盗み1)": ("f1", True, _FILM_GATE1_DEFAULTS, "film_gate_1_parametric"),
+    "Film gate 2 (扇状/肉盗み2)": ("f2", True, _FILM_GATE2_DEFAULTS, "film_gate_2_parametric"),
+    "Film gate 3 (片側/二倍流動長)": ("f3", False, _FILM_GATE3_DEFAULTS, "film_gate_3_parametric"),
+}
 
 
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
-    ``tag`` prefixes widget keys so the two Film gates never share state.
+    ``tag`` prefixes widget keys so the Film gates never share state.
     Width-type values are half-widths from the valve axis when ``symmetric``,
     else widths from the valve-side (w=0) edge -- the labels say which.
     """
@@ -385,7 +415,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
     v: dict = {"symmetric": symmetric}
 
     # Every widget gets a tag-prefixed key. Without one Streamlit identifies a
-    # widget by its label + parameters, so a Film gate 2 slider's value would
+    # widget by its label + parameters, so a Film gate 3 slider's value would
     # survive a switch to Film gate 1 (same label, same bounds) and override
     # that input's default (Codex P2).
     def slider(label: str, *args, **kwargs):
@@ -459,20 +489,20 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             step=0.1,
         )
 
-        st.markdown("**アイランド（浅い帯＝振り分け）**")
+        st.markdown("**肉盗み（浅い帯＝振り分け）**")
         v["island_on"] = st.checkbox(
-            "アイランドを有効化",
+            "肉盗みを有効化",
             value=True,
             key=f"{tag}_island_on",
             help=(
                 "バルブ側の帯だけランプ角を緩くして流路を絞り、樹脂を遠方へ振り分ける。"
-                "境界線はランド終端 (t=ランド長) からアイランド終端 (t=end) までの直線で、"
+                "境界線はランド終端 (t=ランド長) から肉盗み終端 (t=end) までの直線で、"
                 f"{w_word}を出口側・終端側の2点で指定する。"
             ),
         )
         if v["island_on"]:
             v["island_angle"] = number_input(
-                "アイランド角 [deg] (≤ ランプ角)",
+                "肉盗み角 [deg] (≤ ランプ角)",
                 min_value=0.0,
                 max_value=float(v["ramp_angle"]),
                 value=float(min(2.5, v["ramp_angle"])),
@@ -480,7 +510,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 format="%.2f",
             )
             v["island_end"] = slider(
-                "アイランド終端 t_end [mm] (> ランド長)",
+                "肉盗み終端 t_end [mm] (> ランド長)",
                 min_value=float(v["land_length"] + 0.5),
                 max_value=60.0,
                 value=float(max(17.0, v["land_length"] + 0.5)),
@@ -500,10 +530,36 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 value=float(min(d.island_w_far, w_full)),
                 step=0.1,
             )
+            v["weld_on"] = st.checkbox(
+                "水平部（溶接ダム）を有効化",
+                value=d.weld is not None,
+                key=f"{tag}_weld_on",
+                help=(
+                    "肉盗みの下流側を溶接で肉盛りして天面を PL と平行にした区間。"
+                    "終端は肉盗み終端と同じ。PL からの距離（残り流路厚）が 0 なら "
+                    "鋼材が PL に接して樹脂が入らない＝完全な肉抜き空洞（穴）になる。"
+                ),
+            )
+            if v["weld_on"]:
+                weld_t0, weld_h = d.weld if d.weld is not None else (7.0, 0.1)
+                v["weld_t1"] = slider(
+                    "水平部開始 t [mm] (≥ ランド長、< 肉盗み終端)",
+                    min_value=float(v["land_length"]),
+                    max_value=float(v["island_end"] - 0.5),
+                    value=float(min(max(weld_t0, v["land_length"]), v["island_end"] - 0.5)),
+                    step=0.1,
+                )
+                v["weld_depth"] = slider(
+                    "水平部の PL からの距離（残り流路厚）[mm] (≤ ランド深さ、0 = 空洞)",
+                    min_value=0.0,
+                    max_value=float(v["land_depth"]),
+                    value=float(min(weld_h, v["land_depth"])),
+                    step=0.05,
+                )
 
         st.markdown("**外壁線（ポケット外形）**")
         st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
-        v["wall_t1"] = slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
+        v["wall_t1"] = slider("外壁開始 t [mm]", 0.0, 30.0, float(d.wall_t1), step=0.1)
         v["wall_t2"] = slider(
             "外壁終端 t [mm] (> 開始)",
             min_value=float(v["wall_t1"] + 0.5),
@@ -546,22 +602,25 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 float(min(4.5, hw_max)),
                 step=0.1,
             )
-            # The 60° wall climbs from the rim, so the deepest point the
-            # pocket can reach is half_width·tan(60°) at the centreline. A
+            # The sloped wall climbs from the rim, so the deepest point the
+            # pocket can reach is half_width·tan(angle) at the centreline. A
             # deeper request is rejected by validate() and would otherwise be
             # recorded as asked and built shallower (Codex P1).
-            depth_max = float(
-                min(15.0, v["well_half_w"] * math.tan(math.radians(_WELL_WALL_ANGLE_DEG)))
-            )
+            tan_wall = math.tan(math.radians(d.well_wall_angle_deg))
+            depth_max = float(min(15.0, v["well_half_w"] * tan_wall))
             depth_max = max(0.5, math.floor(depth_max * 10.0) / 10.0)
             v["well_depth"] = slider(
-                "井戸深さ [mm] (≤ 半幅·tan60°)",
+                f"井戸深さ [mm] (≤ 半幅·tan{d.well_wall_angle_deg:g}°)",
                 0.5,
                 depth_max,
                 float(min(4.5, depth_max)),
                 step=0.1,
-                help="壁角 60° で到達できる最大深さ = 半幅 × tan(60°)。",
+                help=(
+                    f"壁角 {d.well_wall_angle_deg:g}° で到達できる最大深さ "
+                    f"= 半幅 × tan({d.well_wall_angle_deg:g}°)。"
+                ),
             )
+            v["well_wall_angle"] = float(d.well_wall_angle_deg)
             well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"])
             pocket_t_end = max(float(v["wall_t2"]), float(v["well_t2"]))
         else:
@@ -569,8 +628,8 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             pocket_t_end = float(v["wall_t2"])
 
         st.markdown("**バルブゲート**")
-        v["valve_d"] = slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
-        # Keep the orifice inside the pocket along t. Outside it the builder
+        v["valve_d"] = slider("バルブゲート径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+        # Keep the gate circle inside the pocket along t. Outside it the builder
         # snaps the gate to the nearest masked cell and the solver injects
         # somewhere other than the recorded position (Codex P1).
         t_min = float(v["valve_d"] / 2.0)
@@ -603,10 +662,10 @@ def _profile_gate_from_inputs(
     t_land = float(v["land_length"])
     well = None
     if v["well_on"]:
-        # Floor extent follows from the sloped wall: the 60° wall eats
-        # depth/tan(60°) of t at each end. When the pocket is too short for a
-        # flat floor the floor range is simply not reported.
-        eat = float(v["well_depth"]) / math.tan(math.radians(_WELL_WALL_ANGLE_DEG))
+        # Floor extent follows from the sloped wall: it eats depth/tan(angle)
+        # of t at each end. When the pocket is too short for a flat floor the
+        # floor range is simply not reported.
+        eat = float(v["well_depth"]) / math.tan(math.radians(v["well_wall_angle"]))
         floor = (float(v["well_t1"]) + eat, float(v["well_t2"]) - eat)
         well = WellSpec(
             shape="obround",
@@ -614,10 +673,16 @@ def _profile_gate_from_inputs(
             half_width=float(v["well_half_w"]),
             depth=float(v["well_depth"]),
             floor_t_range=floor if floor[1] > floor[0] + 1e-6 else None,
-            wall_angle_deg=_WELL_WALL_ANGLE_DEG,
+            wall_angle_deg=float(v["well_wall_angle"]),
         )
     island = None
     if v["island_on"]:
+        weld = None
+        if v.get("weld_on"):
+            weld = WeldSpec(
+                t_range=(float(v["weld_t1"]), float(v["island_end"])),
+                depth=float(v["weld_depth"]),
+            )
         island = IslandSpec(
             angle_deg=float(v["island_angle"]),
             boundary_line=(
@@ -625,6 +690,7 @@ def _profile_gate_from_inputs(
                 (float(v["island_end"]), float(v["island_w_far"])),
             ),
             end_dist=float(v["island_end"]),
+            weld=weld,
         )
     spec = GateProfileSpec(
         name=name,
@@ -710,12 +776,11 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Film gate 1 (肉厚調整ゲート)",
-            "Film gate 2 (肉厚調整ゲート・片側)",
+            *_FILM_GATES,
             "Direct gate (parametric)",
             "Profile gate (JSONスペック)",
         ],
-        index=1,
+        index=2,
         key="geom_source",
     )
 
@@ -790,10 +855,9 @@ with st.sidebar:
                 "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
                 "滑らかな3Dが要るときだけ下げる。"
             )
-    elif geom_source.startswith("Film gate 2"):
-        pg_inputs = _profile_gate_sidebar("f2", symmetric=False, d=_FILM_GATE2_DEFAULTS)
-    elif geom_source.startswith("Film gate 1"):
-        pg_inputs = _profile_gate_sidebar("f1", symmetric=True, d=_FILM_GATE1_DEFAULTS)
+    elif geom_source in _FILM_GATES:
+        _tag, _sym, _defaults, _ = _FILM_GATES[geom_source]
+        pg_inputs = _profile_gate_sidebar(_tag, symmetric=_sym, d=_defaults)
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
             spec_mode_pg = SPEC_MODE_BY_LABEL[
@@ -1209,14 +1273,9 @@ def build_geometry() -> tuple[Geometry, dict]:
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
-    if geom_source.startswith("Film gate"):
-        _name = (
-            "film_gate_1_parametric"
-            if geom_source.startswith("Film gate 1")
-            else "film_gate_2_parametric"
-        )
+    if geom_source in _FILM_GATES:
         try:
-            return _build_film_gate(_name, pg_inputs, geom_source)
+            return _build_film_gate(_FILM_GATES[geom_source][3], pg_inputs, geom_source)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()

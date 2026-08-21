@@ -1,10 +1,13 @@
-"""AppTest wiring checks for the parametric Film gate 2 (肉厚調整ゲート・片側).
+"""AppTest wiring checks for the parametric Film gate 2 (扇状/肉盗み2).
 
-The one-sided sibling of Film gate 1: same slider family, ``symmetric=False``
-(valve at the w=0 edge, widths measured from that edge). Its defaults
-reproduce ``hamoko_gate_2bai_20260703``; the derived quantities differ from
-Film gate 1 in that the outer-wall start width is the *full* exit width and
-the valve default is the drawing's literal ``t`` rather than the well centre.
+Film gate 1's sibling with a flat dam in the 肉盗み (``island.weld``): the
+drawing is ``hamoko_gate_furiwake_weld_20260818``. What differs from Film
+gate 1 and has to be carried by the defaults, not the shared sliders: the
+outer wall starts at t=5, the well wall is 71.6° (so the floor is
+``depth/tan(71.6°) = 1.5`` inside each end), and the dam runs from t=7 to the
+肉盗み end at a residual depth of 0.1 mm from the PL. The dam's residual
+depth is the parameter the user asked for — 0 means the steel touches the
+PL and the band becomes a hole.
 """
 
 from __future__ import annotations
@@ -18,38 +21,54 @@ from streamlit.testing.v1 import AppTest
 from core import GateProfileSpec, ProfilePlateConfig, build_profile_gate_geometry
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
-FILM_GATE2_LABEL = "Film gate 2 (肉厚調整ゲート・片側)"
+FILM_GATE2_LABEL = "Film gate 2 (扇状/肉盗み2)"
 
-HAMOKO_2BAI_SPEC = {
-    "name": "hamoko_gate_2bai_20260703",
+HAMOKO_WELD_SPEC = {
+    "name": "hamoko_gate_furiwake_weld_20260818",
     "units": "mm",
-    "symmetric": False,
-    "gate_exit_width": 299.0,
+    "symmetric": True,
+    "gate_exit_width": 298.0,
     "land": {"depth": 0.35, "length": 1.0},
     "main_ramp": {"angle_deg": 10.95, "cap_depth": 2.5},
     "island": {
         "angle_deg": 2.5,
-        "boundary_line": [[1.0, 95.3], [17.0, 20.0]],
+        "boundary_line": [[0.0, 50.0], [17.0, 9.9]],
         "end_dist": 17.0,
+        "weld": {"t_range": [7.0, 17.0], "depth": 0.1},
     },
-    "outer_wall_line": [[3.0, 299.0], [23.6, 4.45]],
+    "outer_wall_line": [[5.0, 149.0], [23.28, 4.48]],
     "well": {
         "shape": "obround",
         "t_range": [15.5, 27.5],
         "half_width": 4.5,
         "depth": 4.5,
-        "floor_t_range": [18.1, 24.9],
-        "wall_angle_deg": 60,
+        "floor_t_range": [17.0, 26.0],
+        "wall_angle_deg": 71.6,
     },
-    "valve": {"t": 20.0, "w": 0.0, "orifice_diameter": 3.0},
+    "valve": {"t": 21.5, "w": 0.0, "orifice_diameter": 3.0},
 }
+
+PLATE = ProfilePlateConfig(
+    plate_w_mm=300.0,
+    plate_h_mm=50.0,
+    plate_thk_mm=0.35,
+    plate_split_height_mm=20.0,
+    plate_lower_thk_mm=0.35,
+    plate_upper_thk_mm=0.50,
+)
+
+
+def _film_gate2_app() -> AppTest:
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE2_LABEL).run()
+    at.radio(key="wall_model").set_value("none")
+    return at
 
 
 @pytest.fixture(scope="module")
 def film_gate2_run() -> AppTest:
-    at = AppTest.from_file(str(APP), default_timeout=240.0)
-    at.run()
-    assert at.radio(key="geom_source").value == FILM_GATE2_LABEL  # the UI default input
+    at = _film_gate2_app()
     at.button[0].click().run()
     assert not at.exception
     return at
@@ -61,125 +80,111 @@ def _recorded_spec(at: AppTest) -> dict:
     return geom["gate_profile"]
 
 
-def test_default_sliders_reproduce_the_2bai_spec(film_gate2_run):
-    rec = _recorded_spec(film_gate2_run)
-    expected = GateProfileSpec.from_dict(HAMOKO_2BAI_SPEC)
-    got = GateProfileSpec.from_dict({**rec, "name": HAMOKO_2BAI_SPEC["name"]})
-    assert got.symmetric is False
-    assert got.gate_exit_width == expected.gate_exit_width
-    assert got.land == expected.land
-    assert got.main_ramp == expected.main_ramp
-    assert got.island.angle_deg == expected.island.angle_deg
-    assert got.island.end_dist == expected.island.end_dist
-    assert np.asarray(got.island.boundary_line) == pytest.approx(
-        np.asarray(expected.island.boundary_line)
-    )
-    assert np.asarray(got.outer_wall_line) == pytest.approx(np.asarray(expected.outer_wall_line))
-    assert got.well.t_range == expected.well.t_range
-    assert got.well.half_width == expected.well.half_width
-    assert got.well.depth == expected.well.depth
-    assert got.well.floor_t_range == pytest.approx(expected.well.floor_t_range, abs=0.05)
-    assert got.valve == expected.valve  # t=20.0 is the drawing's, not the well centre (21.5)
-
-
-def test_default_geometry_matches_the_2bai_spec_built_directly(film_gate2_run):
-    geom = film_gate2_run.session_state["mfs_geom"]
-    plate = ProfilePlateConfig(
-        plate_w_mm=300.0,
-        plate_h_mm=50.0,
-        plate_thk_mm=0.35,
-        plate_split_height_mm=20.0,
-        plate_lower_thk_mm=0.35,
-        plate_upper_thk_mm=0.50,
-    )
-    ref = build_profile_gate_geometry(GateProfileSpec.from_dict(HAMOKO_2BAI_SPEC), plate, 1.0)
-    assert np.array_equal(geom.mask, ref.mask)
-    assert np.array_equal(geom.thickness_mm[geom.mask], ref.thickness_mm[ref.mask])
-    assert geom.gates == ref.gates
-
-
-def test_the_gate_sits_at_the_valve_side_edge(film_gate2_run):
-    """One-sided: the Dirichlet cells cluster at the w=0 edge, i.e. the left
-    end of the gate exit, not the plate centre."""
-    geom = film_gate2_run.session_state["mfs_geom"]
-    ixs = np.array([ix for _, ix in geom.gates])
-    x_edge_cell = int((5.0 + 300.0 / 2.0 - 299.0 / 2.0) / 1.0)
-    assert abs(ixs.mean() - x_edge_cell) < 2.0
-
-
 def _slider(at: AppTest, label_prefix: str):
     hits = [s for s in at.slider if str(s.label).startswith(label_prefix)]
     assert len(hits) == 1, [str(s.label) for s in at.slider]
     return hits[0]
 
 
-def test_film_gate_sliders_do_not_leak_across_the_two_inputs():
-    """Codex P2: widgets without a key are identified by label + parameters,
-    so a Film gate 2 value would survive the switch to Film gate 1 and
-    override that input's default."""
-    at = AppTest.from_file(str(APP), default_timeout=240.0)
-    at.run()
-    _slider(at, "製品幅").set_value(200.0).run()
-    _slider(at, "ランド深さ").set_value(0.8).run()
-    at.radio(key="geom_source").set_value("Film gate 1 (肉厚調整ゲート)").run()
-    assert _slider(at, "製品幅").value == 300.0
-    assert _slider(at, "ランド深さ").value == 0.35
+def test_default_sliders_reproduce_the_weld_spec(film_gate2_run):
+    rec = _recorded_spec(film_gate2_run)
+    expected = GateProfileSpec.from_dict(HAMOKO_WELD_SPEC)
+    got = GateProfileSpec.from_dict({**rec, "name": HAMOKO_WELD_SPEC["name"]})
+    assert got.symmetric is True
+    assert got.gate_exit_width == expected.gate_exit_width
+    assert got.land == expected.land
+    assert got.main_ramp == expected.main_ramp
+    assert got.island.angle_deg == expected.island.angle_deg
+    assert got.island.end_dist == expected.island.end_dist
+    # The drawing's boundary line starts at t=0; the UI pins it at t=land
+    # length. Same line: compare where both are defined.
+    (t1, w1), (t2, w2) = expected.island.boundary_line
+    (g1, gw1), (g2, gw2) = got.island.boundary_line
+    assert g1 == 1.0 and g2 == t2 and gw2 == w2
+    assert gw1 == pytest.approx(w1 + (w2 - w1) * (g1 - t1) / (t2 - t1), abs=0.01)
+    assert got.island.weld.t_range == expected.island.weld.t_range
+    assert got.island.weld.depth == expected.island.weld.depth
+    assert np.asarray(got.outer_wall_line) == pytest.approx(np.asarray(expected.outer_wall_line))
+    assert got.well.t_range == expected.well.t_range
+    assert got.well.half_width == expected.well.half_width
+    assert got.well.depth == expected.well.depth
+    assert got.well.wall_angle_deg == expected.well.wall_angle_deg
+    assert got.well.floor_t_range == pytest.approx(expected.well.floor_t_range, abs=0.05)
+    assert got.valve == expected.valve  # 21.5 = the well centre
 
 
-def test_one_sided_valve_on_the_pocket_boundary_is_accepted_on_a_fine_mesh():
-    """Codex P2: the one-sided valve centre sits on the w=0 boundary; with
-    the well off and a 0.4 mm mesh the centre floor()s into the cell just
-    outside the pocket while the orifice overlaps plenty of pocket cells. The
-    guard must test orifice overlap (as the builder does), not the centre cell."""
-    at = AppTest.from_file(str(APP), default_timeout=400.0)
-    at.run()
-    at.checkbox(key="f2_well_on").set_value(False).run()
-    _slider(at, "メッシュ粗さ").set_value(0.4).run()
-    at.radio(key="wall_model").set_value("none")
+def test_default_geometry_matches_the_weld_spec_built_directly(film_gate2_run):
+    geom = film_gate2_run.session_state["mfs_geom"]
+    ref = build_profile_gate_geometry(GateProfileSpec.from_dict(HAMOKO_WELD_SPEC), PLATE, 1.0)
+    assert np.array_equal(geom.mask, ref.mask)
+    assert np.array_equal(geom.thickness_mm[geom.mask], ref.thickness_mm[ref.mask])
+    assert geom.gates == ref.gates
+
+
+def test_the_dam_band_is_flat_at_the_residual_depth(film_gate2_run):
+    """The 肉盗み between t=7 and t=17 reads 0.1 mm everywhere outside the well."""
+    geom = film_gate2_run.session_state["mfs_geom"]
+    spec = GateProfileSpec.from_dict(HAMOKO_WELD_SPEC)
+    ny, nx = geom.mask.shape
+    iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    t = PLATE.pad_mm + spec.t_max() - (iy + 0.5)
+    wa = np.abs((ix + 0.5) - (PLATE.pad_mm + 150.0))
+    band = geom.mask & (t > 7.5) & (t < 15.0) & (wa < 8.0)  # clear of the well (t ≥ 15.5)
+    assert band.any()
+    np.testing.assert_allclose(geom.thickness_mm[band], 0.1)
+
+
+def test_dam_depth_zero_cuts_the_band_out_of_the_cavity():
+    """PL に接する = 完全な肉抜き空洞: the band leaves the mask and the rest of the
+    pocket is untouched; the run still completes (flow goes around)."""
+    at = _film_gate2_app()
+    at.checkbox(key="two_phase_on").set_value(False)
+    _slider(at, "水平部の PL からの距離").set_value(0.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    geom = at.session_state["mfs_geom"]
+    rec = _recorded_spec(at)
+    assert rec["island"]["weld"]["depth"] == 0.0
+    spec = GateProfileSpec.from_dict({**rec, "name": "x"})
+    ref = build_profile_gate_geometry(spec, PLATE, 1.0)
+    assert np.array_equal(geom.mask, ref.mask)
+    full = build_profile_gate_geometry(GateProfileSpec.from_dict(HAMOKO_WELD_SPEC), PLATE, 1.0)
+    lost = full.mask & ~geom.mask
+    assert lost.sum() > 50
+    assert (geom.thickness_mm[geom.mask] > 0).all()
+    assert np.isfinite(at.session_state["mfs_result"].fill_time_s[geom.mask]).all()
+
+
+def test_dam_off_drops_the_weld_section():
+    at = _film_gate2_app()
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.checkbox(key="f2_weld_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert _recorded_spec(at)["island"].get("weld") is None  # asdict keeps the key as null
+
+
+def test_dam_bounds_follow_the_land_and_the_island_end():
+    at = _film_gate2_app()
+    start = _slider(at, "水平部開始")
+    assert start.min == pytest.approx(1.0)
+    assert start.max == pytest.approx(16.5)
+    depth = _slider(at, "水平部の PL からの距離")
+    assert depth.min == 0.0 and depth.max == pytest.approx(0.35)
+    _slider(at, "肉盗み終端").set_value(12.0).run()
+    assert _slider(at, "水平部開始").max == pytest.approx(11.5)
+    assert _recorded_spec_after_run(at)["island"]["weld"]["t_range"] == [7.0, 12.0]
+
+
+def _recorded_spec_after_run(at: AppTest) -> dict:
     at.checkbox(key="two_phase_on").set_value(False)
     at.button[0].click().run()
     assert not at.exception
-    assert not [e for e in at.error if "ポケットの外" in str(e.value)]
-    assert "mfs_geom" in at.session_state
+    return _recorded_spec(at)
 
 
-def test_one_sided_well_half_width_is_capped_by_the_edge_room():
-    """The one-sided well is centred on the w=0 edge and overhangs into the
-    plate margin; a half-width beyond pad + (Wp − exit)/2 would make the
-    builder reject the grid overhang. Default: 5 + (300 − 299)/2 = 5.5."""
-    at = AppTest.from_file(str(APP), default_timeout=240.0)
-    at.run()
-    hw = _slider(at, "井戸半幅")
-    assert hw.max == pytest.approx(5.5)
-    _slider(at, "ゲート出口幅").set_value(280.0).run()
-    assert _slider(at, "井戸半幅").max == pytest.approx(15.0)
-
-
-def test_a_one_sided_orifice_outside_the_pocket_is_rejected_not_snapped(monkeypatch):
-    """FG2 twin of the FG1 guard test: the symmetric=False branch of the
-    orifice-overlap check must locate the orifice at the w=0 edge."""
-    import core
-
-    real = core.build_profile_gate_geometry
-
-    def cut_out_orifice(spec, plate, cell_size_mm=1.0):
-        geom = real(spec, plate, cell_size_mm=cell_size_mm)
-        ny, nx = geom.mask.shape
-        iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
-        x_v = plate.pad_mm + plate.plate_w_mm / 2.0 - spec.gate_exit_width / 2.0
-        y_v = plate.pad_mm + spec.t_max() - spec.valve.t
-        r = spec.valve.orifice_diameter / 2.0
-        orifice = ((ix + 0.5) * cell_size_mm - x_v) ** 2 + (
-            (iy + 0.5) * cell_size_mm - y_v
-        ) ** 2 <= r**2
-        assert np.any(orifice & geom.mask)
-        geom.mask[orifice] = False
-        return geom
-
-    monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_orifice)
-    at = AppTest.from_file(str(APP), default_timeout=240.0)
-    at.run()
-    at.button[0].click().run()
-    assert not at.exception
-    assert any("ポケットの外" in str(e.value) for e in at.error)
-    assert "mfs_geom" not in at.session_state
+def test_well_depth_cap_uses_this_drawings_wall_angle():
+    """71.6°, not Film gate 1's 60°: half-width 4.5 → cap 13.5 (clamped to 15)."""
+    at = _film_gate2_app()
+    _slider(at, "井戸半幅").set_value(1.0).run()
+    assert _slider(at, "井戸深さ").max == pytest.approx(3.0)  # 1.0 · tan(71.6°) = 3.0

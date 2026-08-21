@@ -120,3 +120,56 @@ def test_island_and_well_can_be_switched_off():
     rec = _recorded_spec(at)
     assert rec["island"] is None
     assert rec["well"] is None
+
+
+def _film_gate1_app() -> AppTest:
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    at.radio(key="geom_source").set_value(FILM_GATE1_LABEL).run()
+    at.radio(key="wall_model").set_value("none")
+    return at
+
+
+def _slider(at: AppTest, label_prefix: str):
+    hits = [s for s in at.slider if str(s.label).startswith(label_prefix)]
+    assert len(hits) == 1, [str(s.label) for s in at.slider]
+    return hits[0]
+
+
+def test_well_depth_is_capped_by_what_the_sloped_wall_can_reach():
+    """Codex P1: depth > half_width·tan(60°) is accepted by the spec, recorded
+    in settings.json, and silently rasterised shallower. The slider's upper
+    bound must follow the half-width."""
+    at = _film_gate1_app()
+    _slider(at, "井戸半幅").set_value(0.5).run()
+    depth = _slider(at, "井戸深さ")
+    assert depth.max <= 0.5 * math.tan(math.radians(60.0)) + 1e-9
+    assert depth.value <= depth.max
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    assert rec["well"]["depth"] <= 0.5 * math.tan(math.radians(60.0)) + 1e-9
+
+
+def test_valve_position_is_bounded_by_the_pocket_end():
+    """Codex P1: a valve placed past both the outer wall and the well misses
+    the cavity, and the builder snaps the gate tens of mm away from the
+    recorded ``t``. The slider must not offer such positions."""
+    at = _film_gate1_app()
+    valve = _slider(at, "バルブ位置")
+    # defaults: outer wall ends at 23.3, well at 27.5, orifice Φ3 → ≤ 26.0
+    assert valve.max == pytest.approx(27.5 - 1.5)
+    assert valve.min == pytest.approx(1.5)
+    # shrinking the well pulls the bound back to the outer wall end
+    at.checkbox(key="f1_well_on").set_value(False).run()
+    valve = _slider(at, "バルブ位置")
+    assert valve.max == pytest.approx(23.3 - 1.5)
+    at.button[0].click().run()
+    assert not at.exception
+    geom = at.session_state["mfs_geom"]
+    rec = _recorded_spec(at)
+    # the Dirichlet gate sits where the record says it does (no snapping)
+    iy, ix = geom.gates[0]
+    y_gate = (iy + 0.5) * geom.cell_size_mm
+    t_gate = 5.0 + GateProfileSpec.from_dict({**rec, "name": "x"}).t_max() - y_gate
+    assert abs(t_gate - rec["valve"]["t"]) <= rec["valve"]["orifice_diameter"] / 2.0 + 1.0

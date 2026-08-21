@@ -505,6 +505,9 @@ def render_pressure_map(
     return output_path
 
 
+WELD_ALPHA_FLOOR = 0.35
+
+
 def render_weldlines(
     result: FlowResult,
     output_path: str | Path,
@@ -538,11 +541,15 @@ def render_weldlines(
             )
             ax.clabel(cs, inline=True, fontsize=7, fmt="%.2fs")
 
-    # weld lines (red overlay)
-    weld = result.weld_score
+    # weld lines (red overlay). Any flagged cell gets a visible floor: the
+    # score is the meeting angle, and a meld (small angle) is still a line
+    # worth seeing, just fainter than a head-on weld.
+    weld = np.clip(result.weld_score, 0.0, 1.0)
     weld_rgba = np.zeros((*weld.shape, 4))
     weld_rgba[..., 0] = 1.0  # red
-    weld_rgba[..., 3] = np.clip(weld, 0.0, 1.0) * 0.9
+    weld_rgba[..., 3] = np.where(
+        weld > 0.0, WELD_ALPHA_FLOOR + (0.9 - WELD_ALPHA_FLOOR) * weld, 0.0
+    )
     ax.imshow(weld_rgba, origin="lower", extent=extent, interpolation="nearest")
 
     # air traps (yellow X)

@@ -74,6 +74,13 @@ import scipy.sparse.linalg as spla
 from .geometry import Geometry
 from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 
+# Weld-line detector thresholds (opening angle between two converging flow
+# directions, degrees). Below MIN nothing is drawn (numerical jitter of nearly
+# parallel streams); at FULL the score saturates. 45 deg opening = the
+# conventional 135 deg "meeting angle" boundary between weld and meld.
+WELD_MIN_ANGLE_DEG = 30.0
+WELD_FULL_ANGLE_DEG = 45.0
+
 #: Fill time assumed when no injection rate is given, for the cavity as drawn.
 DEFAULT_FILL_TIME_S = 1.5
 
@@ -852,29 +859,133 @@ class HeleShawSolver:
         )
 
     @staticmethod
-    def _compute_weld_score(tau: np.ndarray) -> np.ndarray:
-        """Heuristic: a cell where many neighbors have *smaller* tau is a confluence."""
-        score = np.zeros_like(tau, dtype=float)
+    def _flow_direction(tau: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Unit vector of the front's advance (+grad tau) per cell.
+
+        Differences use only cavity neighbours: central where both sides
+        exist, one-sided at walls. Cells with no valid neighbour along an
+        axis get zero for that component; cells with no gradient at all
+        (isolated, or flat such as a gate plateau) come back NaN.
+        """
+        valid = ~np.isnan(tau)
+        t = np.where(valid, tau, 0.0)
+        comps = []
+        for axis in (1, 0):  # x then y
+            tp = np.roll(t, -1, axis=axis)
+            tm = np.roll(t, 1, axis=axis)
+            vp = np.roll(valid, -1, axis=axis)
+            vm = np.roll(valid, 1, axis=axis)
+            # np.roll wraps; the wrapped neighbour is never a real one
+            edge_p = np.zeros_like(valid)
+            edge_m = np.zeros_like(valid)
+            if axis == 1:
+                edge_p[:, -1] = True
+                edge_m[:, 0] = True
+            else:
+                edge_p[-1, :] = True
+                edge_m[0, :] = True
+            vp &= ~edge_p
+            vm &= ~edge_m
+            g = np.zeros_like(t)
+            both = valid & vp & vm
+            fwd = valid & vp & ~vm
+            bwd = valid & ~vp & vm
+            g[both] = 0.5 * (tp[both] - tm[both])
+            g[fwd] = tp[fwd] - t[fwd]
+            g[bwd] = t[bwd] - tm[bwd]
+            comps.append(g)
+        gx, gy = comps
+        norm = np.hypot(gx, gy)
+        ok = valid & (norm > 0)
+        safe = np.where(ok, norm, 1.0)
+        ux = np.where(ok, gx / safe, np.nan)
+        uy = np.where(ok, gy / safe, np.nan)
+        return ux, uy
+
+    @staticmethod
+    def _compute_weld_score(
+        tau: np.ndarray,
+        *,
+        min_angle_deg: float = WELD_MIN_ANGLE_DEG,
+        full_angle_deg: float = WELD_FULL_ANGLE_DEG,
+    ) -> np.ndarray:
+        """Weld / meld lines from the angle at which fronts meet.
+
+        For each cell, look at the four pairs of opposite neighbours (x, y,
+        both diagonals). A pair whose flow directions both point *toward*
+        the cell is a confluence; the angle between the two directions is
+        the opening angle of the notch that closes there (180 deg = head-on
+        collision, 0 deg = parallel streams that merely merge). The score is
+        that angle mapped linearly from ``min_angle_deg`` (0) to
+        ``full_angle_deg`` (1) and clipped -- the usual CAE convention is a
+        "weld" below a meeting angle of 135 deg (here: opening angle above
+        45 deg) and a fainter "meld" beyond, so the ramp reaches 1 where the
+        weld regime begins and fades across the meld regime.
+
+        The converging-flow requirement is what separates a weld from a
+        split: the two sides of an obstacle see the same opening angle, but
+        their flows point away from the cell, not into it. Cells within two
+        of a gate are zeroed -- the rasterised gate rim gives one-sided
+        differences whose directions are noise, and a weld cannot sit on
+        the gate anyway. For the same reason only directions measured by
+        central differences (cells whose 8-neighbourhood is all cavity) take
+        part: the pair on either side of a wall cell is still examined, but
+        a neighbour *on* the wall contributes nothing.
+
+        The older heuristic ("6 of 8 neighbours filled earlier") was a
+        near-local-maximum test and missed every weld that keeps flowing:
+        behind an obstacle the downstream row is always later, so at most
+        5 neighbours qualify and a straight weld behind a hole drew nothing.
+        """
+        if not 0.0 <= min_angle_deg < full_angle_deg <= 180.0:
+            raise ValueError(
+                "weld angles must satisfy 0 <= min_angle_deg < full_angle_deg <= 180, "
+                f"got {min_angle_deg}, {full_angle_deg}"
+            )
+        ux, uy = HeleShawSolver._flow_direction(tau)
         ny, nx = tau.shape
-        # 8-neighborhood
-        offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-        for iy in range(1, ny - 1):
-            for ix in range(1, nx - 1):
-                if np.isnan(tau[iy, ix]):
-                    continue
-                t_c = tau[iy, ix]
-                cnt_lower = 0
-                cnt_valid = 0
-                for di, dj in offsets:
-                    t_n = tau[iy + di, ix + dj]
-                    if np.isnan(t_n):
-                        continue
-                    cnt_valid += 1
-                    if t_n < t_c:
-                        cnt_lower += 1
-                if cnt_valid >= 6 and cnt_lower >= 6:
-                    # 6+ neighbors flowed in earlier => confluence ridge
-                    score[iy, ix] = (cnt_lower - 5) / 3.0
+        # A direction is trusted only where it came from central differences
+        # on both axes: at a rasterised wall the one-sided difference follows
+        # the staircase, and a diagonal edge then sprinkles isolated
+        # "confluences" along itself.
+        valid = ~np.isnan(tau)
+        interior = valid & ndi.binary_erosion(valid, structure=np.ones((3, 3), bool))
+        ux = np.where(interior, ux, np.nan)
+        uy = np.where(interior, uy, np.nan)
+
+        def shifted(a: np.ndarray, dy: int, dx: int) -> np.ndarray:
+            """Value of the neighbour at (iy+dy, ix+dx); NaN past the grid."""
+            out = np.full_like(a, np.nan)
+            ys = slice(max(dy, 0), ny + min(dy, 0))
+            xs = slice(max(dx, 0), nx + min(dx, 0))
+            yd = slice(max(-dy, 0), ny + min(-dy, 0))
+            xd = slice(max(-dx, 0), nx + min(-dx, 0))
+            out[yd, xd] = a[ys, xs]
+            return out
+
+        approach = np.sin(np.radians(0.5 * min_angle_deg))
+        best = np.full_like(tau, np.nan)
+        for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            ax, ay = shifted(ux, dy, dx), shifted(uy, dy, dx)
+            bx, by = shifted(ux, -dy, -dx), shifted(uy, -dy, -dx)
+            # offset direction from the centre to neighbour a (b is -that)
+            d = np.hypot(dx, dy)
+            ex, ey = dx / d, dy / d
+            # each stream must actually approach the cell, by at least the
+            # transverse component a symmetric confluence of the minimum
+            # opening angle would have; flow lines that merely bend around a
+            # corner graze the threshold from the wrong side otherwise
+            toward_a = ax * ex + ay * ey < -approach
+            toward_b = bx * (-ex) + by * (-ey) < -approach
+            with np.errstate(invalid="ignore"):
+                dot = np.clip(ax * bx + ay * by, -1.0, 1.0)
+                angle = np.degrees(np.arccos(dot))
+            best = np.fmax(best, np.where(toward_a & toward_b, angle, np.nan))
+
+        score = (best - min_angle_deg) / (full_angle_deg - min_angle_deg)
+        score = np.where(np.isnan(score), 0.0, score)
+        near_gate = ndi.binary_dilation(tau == 0.0, structure=np.ones((5, 5), bool))
+        score[near_gate | np.isnan(tau)] = 0.0
         return np.clip(score, 0.0, 1.0)
 
     @staticmethod

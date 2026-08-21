@@ -384,9 +384,19 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
     w_origin = "バルブ軸からの半幅" if symmetric else "バルブ側端（w=0）からの幅"
     v: dict = {"symmetric": symmetric}
 
+    # Every widget gets a tag-prefixed key. Without one Streamlit identifies a
+    # widget by its label + parameters, so a Film gate 2 slider's value would
+    # survive a switch to Film gate 1 (same label, same bounds) and override
+    # that input's default (Codex P2).
+    def slider(label: str, *args, **kwargs):
+        return st.slider(label, *args, key=f"{tag}_{label}", **kwargs)
+
+    def number_input(label: str, *args, **kwargs):
+        return st.number_input(label, *args, key=f"{tag}_{label}", **kwargs)
+
     with st.expander("製品形状", expanded=False):
-        v["plate_w"] = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
-        v["plate_h"] = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
+        v["plate_w"] = slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
+        v["plate_h"] = slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
         two_layer = st.checkbox(
             "製品肉厚を2層化する（ゲート側／反ゲート側）",
             value=True,
@@ -394,7 +404,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             key=f"{tag}_plate_2layer",
         )
         if two_layer:
-            v["plate_split"] = st.slider(
+            v["plate_split"] = slider(
                 "段差位置（製品長辺から）[mm]",
                 1.0,
                 float(v["plate_h"]),
@@ -402,11 +412,11 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 step=1.0,
                 help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
             )
-            v["plate_lower_thk"] = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
-            v["plate_upper_thk"] = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
+            v["plate_lower_thk"] = slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+            v["plate_upper_thk"] = slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
             v["plate_thk"] = float(v["plate_lower_thk"])
         else:
-            v["plate_thk"] = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+            v["plate_thk"] = slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
             v["plate_split"] = 0.0
             v["plate_lower_thk"] = v["plate_upper_thk"] = float(v["plate_thk"])
 
@@ -416,7 +426,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             + ("左右対称。" if symmetric else "片側のみ（バルブは端）。")
             + "深さ = 流路肉厚。"
         )
-        gew = st.slider(
+        gew = slider(
             "ゲート出口幅 [mm] (≤ 製品幅)",
             min_value=10.0,
             max_value=float(v["plate_w"]),
@@ -428,11 +438,11 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         w_full = gew / 2.0 if symmetric else gew
 
         st.markdown("**ランド（出口）**")
-        v["land_depth"] = st.slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
-        v["land_length"] = st.slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
+        v["land_depth"] = slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
+        v["land_length"] = slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
 
         st.markdown("**メインランプ**")
-        v["ramp_angle"] = st.number_input(
+        v["ramp_angle"] = number_input(
             "ランプ角 [deg]",
             min_value=1.0,
             max_value=45.0,
@@ -441,7 +451,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             format="%.2f",
             help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
         )
-        v["ramp_cap"] = st.slider(
+        v["ramp_cap"] = slider(
             "ランプ上限深さ [mm] (≥ ランド深さ)",
             min_value=float(v["land_depth"]),
             max_value=10.0,
@@ -461,7 +471,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             ),
         )
         if v["island_on"]:
-            v["island_angle"] = st.number_input(
+            v["island_angle"] = number_input(
                 "アイランド角 [deg] (≤ ランプ角)",
                 min_value=0.0,
                 max_value=float(v["ramp_angle"]),
@@ -469,21 +479,21 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 step=0.05,
                 format="%.2f",
             )
-            v["island_end"] = st.slider(
+            v["island_end"] = slider(
                 "アイランド終端 t_end [mm] (> ランド長)",
                 min_value=float(v["land_length"] + 0.5),
                 max_value=60.0,
                 value=float(max(17.0, v["land_length"] + 0.5)),
                 step=0.1,
             )
-            v["island_w_near"] = st.slider(
+            v["island_w_near"] = slider(
                 f"境界{w_word}（出口側、t=ランド長）[mm]",
                 min_value=1.0,
                 max_value=float(w_full),
                 value=float(min(d.island_w_near, w_full)),
                 step=0.1,
             )
-            v["island_w_far"] = st.slider(
+            v["island_w_far"] = slider(
                 f"境界{w_word}（終端側、t=t_end）[mm]",
                 min_value=0.5,
                 max_value=float(w_full),
@@ -493,15 +503,15 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
 
         st.markdown("**外壁線（ポケット外形）**")
         st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
-        v["wall_t1"] = st.slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
-        v["wall_t2"] = st.slider(
+        v["wall_t1"] = slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
+        v["wall_t2"] = slider(
             "外壁終端 t [mm] (> 開始)",
             min_value=float(v["wall_t1"] + 0.5),
             max_value=80.0,
             value=float(max(d.wall_t2, v["wall_t1"] + 0.5)),
             step=0.1,
         )
-        v["wall_w2"] = st.slider(
+        v["wall_w2"] = slider(
             f"外壁終端の{w_word} [mm]",
             min_value=0.5,
             max_value=float(w_full),
@@ -513,15 +523,15 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         st.markdown("**井戸（バルブ周りの長穴ポケット）**")
         v["well_on"] = st.checkbox("井戸を有効化", value=True, key=f"{tag}_well_on")
         if v["well_on"]:
-            v["well_t1"] = st.slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
-            v["well_t2"] = st.slider(
+            v["well_t1"] = slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
+            v["well_t2"] = slider(
                 "井戸終端 t [mm] (> 開始)",
                 min_value=float(v["well_t1"] + 0.5),
                 max_value=80.0,
                 value=float(max(27.5, v["well_t1"] + 0.5)),
                 step=0.1,
             )
-            v["well_half_w"] = st.slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
+            v["well_half_w"] = slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
             # The 60° wall climbs from the rim, so the deepest point the
             # pocket can reach is half_width·tan(60°) at the centreline. A
             # deeper request is rejected by validate() and would otherwise be
@@ -530,7 +540,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 min(15.0, v["well_half_w"] * math.tan(math.radians(_WELL_WALL_ANGLE_DEG)))
             )
             depth_max = max(0.5, math.floor(depth_max * 10.0) / 10.0)
-            v["well_depth"] = st.slider(
+            v["well_depth"] = slider(
                 "井戸深さ [mm] (≤ 半幅·tan60°)",
                 0.5,
                 depth_max,
@@ -545,14 +555,14 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             pocket_t_end = float(v["wall_t2"])
 
         st.markdown("**バルブゲート**")
-        v["valve_d"] = st.slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+        v["valve_d"] = slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
         # Keep the orifice inside the pocket along t. Outside it the builder
         # snaps the gate to the nearest masked cell and the solver injects
         # somewhere other than the recorded position (Codex P1).
         t_min = float(v["valve_d"] / 2.0)
         t_max = float(max(t_min + 0.1, pocket_t_end - v["valve_d"] / 2.0))
         t_default = well_t_mid if d.valve_t is None else d.valve_t
-        v["valve_t"] = st.slider(
+        v["valve_t"] = slider(
             "バルブ位置 t [mm] (ポケット内)",
             t_min,
             t_max,
@@ -564,7 +574,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             ),
         )
 
-        v["cell_size"] = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+        v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
         st.caption(
             "この形状の想定解像度は 1.0mm（ランド長 1mm が 1 セル）。"
             "細かいほど深さ場の再現精度が上がるが、解析が重くなる。"
@@ -628,14 +638,27 @@ def _profile_gate_from_inputs(
     return spec, plate, float(v["cell_size"])
 
 
-def _valve_centre_cell(spec: GateProfileSpec, plate: ProfilePlateConfig, dx: float) -> tuple:
-    """Grid cell holding the valve centre (the ``floor(y/dx)`` row/column)."""
-    iy = int((plate.pad_mm + spec.t_max() - spec.valve.t) / dx)
-    if spec.symmetric:
-        x_valve = plate.pad_mm + plate.plate_w_mm / 2.0
-    else:
-        x_valve = plate.pad_mm + plate.plate_w_mm / 2.0 - spec.gate_exit_width / 2.0
-    return iy, int(x_valve / dx)
+def _valve_orifice_hits_pocket(
+    geom: Geometry, spec: GateProfileSpec, plate: ProfilePlateConfig, dx: float
+) -> bool:
+    """Whether the valve orifice intersects the rasterised pocket.
+
+    The same test the builder applies before falling back to "snap to the
+    nearest masked cell"; mirroring it exactly means we reject precisely the
+    cases where that snap would have moved the gate. A centre-cell test is
+    too strict for the one-sided block, whose valve centre sits *on* the w=0
+    boundary and can floor() into the cell just outside (Codex P2).
+    """
+    ny, nx = geom.mask.shape
+    iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    xx = (ix + 0.5) * dx
+    yy = (iy + 0.5) * dx
+    cx = plate.pad_mm + plate.plate_w_mm / 2.0
+    x_valve = (cx if spec.symmetric else cx - spec.gate_exit_width / 2.0) + spec.valve.w
+    y_valve = plate.pad_mm + spec.t_max() - spec.valve.t
+    r = spec.valve.orifice_diameter / 2.0
+    in_valve = (xx - x_valve) ** 2 + (yy - y_valve) ** 2 <= r**2
+    return bool(np.any(in_valve & geom.mask))
 
 
 def _build_film_gate(name: str, v: dict, source: str) -> tuple[Geometry, dict]:
@@ -643,9 +666,8 @@ def _build_film_gate(name: str, v: dict, source: str) -> tuple[Geometry, dict]:
     geom = build_profile_gate_geometry(spec, plate, cell_size_mm=dx)
     # The builder snaps a gate whose orifice misses the pocket to the nearest
     # masked cell. The slider bounds keep the orifice inside the pocket along
-    # t; this catches the width-wise miss the bounds cannot express.
-    iy, ix = _valve_centre_cell(spec, plate, dx)
-    if not (0 <= iy < geom.mask.shape[0] and 0 <= ix < geom.mask.shape[1] and geom.mask[iy, ix]):
+    # t; this catches the miss the bounds cannot express.
+    if not _valve_orifice_hits_pocket(geom, spec, plate, dx):
         raise ValueError(
             f"バルブ位置 t={spec.valve.t:g} mm がポケットの外にある。"
             "外壁終端／井戸の範囲内に移動するか、外壁終端の幅を広げる。"

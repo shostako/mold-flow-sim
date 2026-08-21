@@ -744,22 +744,44 @@ with st.sidebar:
                     step=0.1,
                 )
                 well_half_w = st.slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
-                well_depth = st.slider("井戸深さ [mm]", 0.5, 15.0, 4.5, step=0.1)
+                # The 60° wall climbs from the rim, so the deepest point the
+                # pocket can reach is half_width·tan(60°) at the centreline.
+                # A deeper request would be accepted by the spec, recorded in
+                # settings.json, and silently built shallower (Codex P1).
+                _well_depth_max = float(
+                    min(15.0, well_half_w * math.tan(math.radians(_WELL_WALL_ANGLE_DEG)))
+                )
+                _well_depth_max = max(0.5, math.floor(_well_depth_max * 10.0) / 10.0)
+                well_depth = st.slider(
+                    "井戸深さ [mm] (≤ 半幅·tan60°)",
+                    0.5,
+                    _well_depth_max,
+                    float(min(4.5, _well_depth_max)),
+                    step=0.1,
+                    help="壁角 60° で到達できる最大深さ = 半幅 × tan(60°)。",
+                )
                 _well_t_mid = 0.5 * (well_t1 + well_t2)
+                _pocket_t_end = max(float(wall_t2), float(well_t2))
             else:
                 well_t1 = well_t2 = well_half_w = well_depth = 0.0
                 _well_t_mid = 0.5 * (wall_t1 + wall_t2)
+                _pocket_t_end = float(wall_t2)
 
             st.markdown("**バルブゲート**")
-            valve_t = st.slider(
-                "バルブ位置 t [mm]",
-                0.0,
-                80.0,
-                float(round(_well_t_mid, 1)),
-                step=0.1,
-                help="既定は井戸の中央。",
-            )
             valve_d = st.slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+            # Keep the orifice inside the pocket along t. Outside it the
+            # builder snaps the gate to the nearest masked cell and the solver
+            # injects somewhere other than the recorded position (Codex P1).
+            _valve_t_min = float(valve_d / 2.0)
+            _valve_t_max = float(max(_valve_t_min + 0.1, _pocket_t_end - valve_d / 2.0))
+            valve_t = st.slider(
+                "バルブ位置 t [mm] (ポケット内)",
+                _valve_t_min,
+                _valve_t_max,
+                float(min(max(round(_well_t_mid, 1), _valve_t_min), _valve_t_max)),
+                step=0.1,
+                help="既定は井戸の中央。上限はポケット終端（外壁終端／井戸終端の遠い方）− 半径。",
+            )
 
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
             st.caption(
@@ -1264,9 +1286,23 @@ def build_geometry() -> tuple[Geometry, dict]:
                 plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
-            return build_profile_gate_geometry(
-                spec_f1, plate_f1, cell_size_mm=cell_size
-            ), config_settings(
+            geom_f1 = build_profile_gate_geometry(spec_f1, plate_f1, cell_size_mm=cell_size)
+            # The builder snaps a gate whose orifice misses the pocket to the
+            # nearest masked cell. The slider bounds above keep the orifice
+            # inside the pocket along t; this catches the width-wise miss
+            # (orifice wider than the pocket tip) the bounds cannot express.
+            _iy_v = int((plate_f1.pad_mm + spec_f1.t_max() - float(valve_t)) / cell_size)
+            _ix_v = int((plate_f1.pad_mm + float(plate_w) / 2.0) / cell_size)
+            if not (
+                0 <= _iy_v < geom_f1.mask.shape[0]
+                and 0 <= _ix_v < geom_f1.mask.shape[1]
+                and geom_f1.mask[_iy_v, _ix_v]
+            ):
+                raise ValueError(
+                    f"バルブ位置 t={valve_t:g} mm がポケットの外にある。"
+                    "外壁終端／井戸の範囲内に移動するか、外壁終端の半幅を広げる。"
+                )
+            return geom_f1, config_settings(
                 geom_source,
                 plate_f1,
                 cell_size_mm=cell_size,

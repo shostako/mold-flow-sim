@@ -76,10 +76,44 @@ from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 
 # Weld-line detector thresholds (opening angle between two converging flow
 # directions, degrees). Below MIN nothing is drawn (numerical jitter of nearly
-# parallel streams); at FULL the score saturates. 45 deg opening = the
-# conventional 135 deg "meeting angle" boundary between weld and meld.
-WELD_MIN_ANGLE_DEG = 30.0
+# parallel streams; 0 draws every confluence the crest test admits); at FULL
+# the score saturates. 45 deg opening = the
+# conventional 135 deg "meeting angle" boundary between a weld (drawn solid)
+# and a meld (drawn faint). MIN is the UI's slider default; the angle field
+# itself is kept on the result so the threshold can move without re-solving.
+WELD_MIN_ANGLE_DEG = 0.0
 WELD_FULL_ANGLE_DEG = 45.0
+# A confluence cell must be later than both neighbours along the pair axis by
+# comparable amounts (smaller drop >= this fraction of the larger). Filters
+# the grazing ties of a flow turning around an obstacle corner.
+CREST_BALANCE = 0.1
+# Relative tolerance under which two neighbouring tau values count as the
+# same crest cell (symmetric geometries tie the two centre columns exactly).
+CREST_TIE_RTOL = 1e-9
+
+
+def weld_score_from_angle(
+    angle_deg: np.ndarray,
+    *,
+    min_angle_deg: float = WELD_MIN_ANGLE_DEG,
+    full_angle_deg: float = WELD_FULL_ANGLE_DEG,
+) -> np.ndarray:
+    """Map a meeting-angle field to a [0, 1] score (NaN -> 0).
+
+    Linear from ``min_angle_deg`` (0, nothing drawn) to ``full_angle_deg``
+    (1, saturated); angles above ``full_angle_deg`` stay at 1. Kept separate
+    from the angle computation so the UI can move the threshold on a solved
+    result without solving again.
+    """
+    if not 0.0 <= min_angle_deg < full_angle_deg <= 180.0:
+        raise ValueError(
+            "weld angles must satisfy 0 <= min_angle_deg < full_angle_deg <= 180, "
+            f"got {min_angle_deg}, {full_angle_deg}"
+        )
+    score = (angle_deg - min_angle_deg) / (full_angle_deg - min_angle_deg)
+    score = np.where(np.isnan(score), 0.0, score)
+    return np.clip(score, 0.0, 1.0)
+
 
 #: Fill time assumed when no injection rate is given, for the cavity as drawn.
 DEFAULT_FILL_TIME_S = 1.5
@@ -170,7 +204,7 @@ class FlowResult:
     tau: np.ndarray  # raw pseudo-conduction time field
     fill_time_s: np.ndarray  # actual fill time per cell [s]
     pressure_norm: np.ndarray  # normalized pressure (1 at gate, 0 at last fill)
-    weld_score: np.ndarray  # heuristic weld-line indicator [0..1]
+    weld_score: np.ndarray  # weld-line indicator [0..1] at the default thresholds
     air_traps: np.ndarray  # bool mask of air-trap cells (local tau maxima)
     total_fill_time_s: float  # T_fill from volume / Q (scaled when skin layer ON)
     viscosity_Pa_s: float  # effective representative viscosity used
@@ -184,6 +218,10 @@ class FlowResult:
     # from every gate. ``fill_time_s`` is NaN there, so no renderer can show
     # them arriving. None when the skin-layer model is off.
     unfillable_mask: np.ndarray | None = None
+    # Opening angle [deg] between the two converging flow directions at each
+    # cell, NaN where no confluence. ``weld_score`` is a thresholded view of
+    # this; renderers re-threshold it when the user moves the slider.
+    weld_angle_deg: np.ndarray | None = None
 
 
 @dataclass
@@ -782,7 +820,8 @@ class HeleShawSolver:
         tau_flow = tau
         if unfillable_mask is not None:
             tau_flow = np.where(unfillable_mask, np.nan, tau)
-        weld_score = self._compute_weld_score(tau_flow)
+        weld_angle = self._weld_meeting_angle(tau_flow)
+        weld_score = weld_score_from_angle(weld_angle)
         air_traps = self._compute_air_traps(tau_flow)
 
         metadata = {
@@ -847,6 +886,7 @@ class HeleShawSolver:
             fill_time_s=fill_time_s,
             pressure_norm=pressure_norm,
             weld_score=weld_score,
+            weld_angle_deg=weld_angle,
             air_traps=air_traps,
             total_fill_time_s=float(T_fill),
             viscosity_Pa_s=eta,
@@ -909,7 +949,16 @@ class HeleShawSolver:
         min_angle_deg: float = WELD_MIN_ANGLE_DEG,
         full_angle_deg: float = WELD_FULL_ANGLE_DEG,
     ) -> np.ndarray:
-        """Weld / meld lines from the angle at which fronts meet.
+        """Weld / meld score: the meeting angle, thresholded (see both halves)."""
+        return weld_score_from_angle(
+            HeleShawSolver._weld_meeting_angle(tau, min_angle_deg=min_angle_deg),
+            min_angle_deg=min_angle_deg,
+            full_angle_deg=full_angle_deg,
+        )
+
+    @staticmethod
+    def _weld_meeting_angle(tau: np.ndarray, *, min_angle_deg: float = 0.0) -> np.ndarray:
+        """Opening angle [deg] at which fronts meet, NaN where they do not.
 
         For each cell, look at the four pairs of opposite neighbours (x, y,
         both diagonals). A pair whose flow directions both point *toward*
@@ -927,7 +976,9 @@ class HeleShawSolver:
         their flows point away from the cell, not into it. Cells within two
         of a gate are zeroed -- the rasterised gate rim gives one-sided
         differences whose directions are noise, and a weld cannot sit on
-        the gate anyway. For the same reason only directions measured by
+        the gate anyway. ``min_angle_deg`` only sets the approach margin
+        below; thresholding into a score is :func:`weld_score_from_angle`.
+        For the same reason only directions measured by
         central differences (cells whose 8-neighbourhood is all cavity) take
         part: the pair on either side of a wall cell is still examined, but
         a neighbour *on* the wall contributes nothing.
@@ -937,11 +988,8 @@ class HeleShawSolver:
         behind an obstacle the downstream row is always later, so at most
         5 neighbours qualify and a straight weld behind a hole drew nothing.
         """
-        if not 0.0 <= min_angle_deg < full_angle_deg <= 180.0:
-            raise ValueError(
-                "weld angles must satisfy 0 <= min_angle_deg < full_angle_deg <= 180, "
-                f"got {min_angle_deg}, {full_angle_deg}"
-            )
+        if not 0.0 <= min_angle_deg <= 180.0:
+            raise ValueError(f"min_angle_deg must be within [0, 180], got {min_angle_deg}")
         ux, uy = HeleShawSolver._flow_direction(tau)
         ny, nx = tau.shape
         # A direction is trusted only where it came from central differences
@@ -977,16 +1025,40 @@ class HeleShawSolver:
             # corner graze the threshold from the wrong side otherwise
             toward_a = ax * ex + ay * ey < -approach
             toward_b = bx * (-ex) + by * (-ey) < -approach
+            # and both must have arrived earlier: the cell is the crest of the
+            # arrival time along this axis. A flow merely turning in front of
+            # an obstacle has one neighbour upstream and one downstream, and
+            # passes the direction test at small angles otherwise.
+            # "crest" means a crest on both sides: a cell sitting on the
+            # contour of one neighbour (drop ~ 0) while the other is far
+            # upstream is a flow turning a corner, not two streams closing.
+            with np.errstate(invalid="ignore"):
+                drop_a = tau - shifted(tau, dy, dx)
+                drop_b = tau - shifted(tau, -dy, -dx)
+                # A symmetric ridge on an even grid is two *exactly* tied
+                # columns wide (machine precision -- symmetric solves tie to
+                # ~1e-16). A tied side is the same crest cell, so its drop is
+                # read one cell further out. A merely small drop is not a
+                # tie: that is the grazing contour of a turning flow.
+                tie_tol = CREST_TIE_RTOL * np.abs(tau)
+                far_a = tau - shifted(tau, 2 * dy, 2 * dx)
+                far_b = tau - shifted(tau, -2 * dy, -2 * dx)
+                eff_a = np.where(np.abs(drop_a) <= tie_tol, far_a, drop_a)
+                eff_b = np.where(np.abs(drop_b) <= tie_tol, far_b, drop_b)
+                crest = (
+                    (drop_a >= 0.0)
+                    & (drop_b >= 0.0)
+                    & (eff_a >= CREST_BALANCE * eff_b)
+                    & (eff_b >= CREST_BALANCE * eff_a)
+                )
             with np.errstate(invalid="ignore"):
                 dot = np.clip(ax * bx + ay * by, -1.0, 1.0)
                 angle = np.degrees(np.arccos(dot))
-            best = np.fmax(best, np.where(toward_a & toward_b, angle, np.nan))
+            best = np.fmax(best, np.where(toward_a & toward_b & crest, angle, np.nan))
 
-        score = (best - min_angle_deg) / (full_angle_deg - min_angle_deg)
-        score = np.where(np.isnan(score), 0.0, score)
         near_gate = ndi.binary_dilation(tau == 0.0, structure=np.ones((5, 5), bool))
-        score[near_gate | np.isnan(tau)] = 0.0
-        return np.clip(score, 0.0, 1.0)
+        best[near_gate | np.isnan(tau)] = np.nan
+        return best
 
     @staticmethod
     def _compute_air_traps(tau: np.ndarray) -> np.ndarray:

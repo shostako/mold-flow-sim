@@ -118,3 +118,33 @@ def test_angle_arguments_are_validated():
         HeleShawSolver._compute_weld_score(tau, min_angle_deg=50.0, full_angle_deg=40.0)
     with pytest.raises(ValueError):
         HeleShawSolver._compute_weld_score(tau, min_angle_deg=-1.0)
+
+
+def test_angle_field_lets_the_renderer_rethreshold_without_resolving(tmp_path):
+    """The hole's meld tail is a matter of threshold, not of solving again."""
+    from core.visualizer import render_weldlines, weld_overlay_score
+
+    ny, nx = 80, 41
+    g = _plate(ny, nx, [(0, ix) for ix in range(nx)], hole=(20, 30, 15, 26))
+    r = _solve(g)
+    assert r.weld_angle_deg is not None
+    loose = weld_overlay_score(r, min_angle_deg=0.0)
+    tight = weld_overlay_score(r, min_angle_deg=30.0)
+    assert (loose > 0).sum() > (tight > 0).sum()
+    # tightening never invents cells, and the head-on cell survives both
+    assert not ((tight > 0) & ~(loose > 0)).any()
+    assert tight[31, nx // 2] == pytest.approx(1.0)  # first interior row above the hole
+    # the thresholds reach the figure (legend text), and the rendering runs
+    p = render_weldlines(r, tmp_path / "w.png", weld_min_angle_deg=30.0)
+    assert p.exists()
+
+
+def test_results_without_an_angle_field_fall_back_to_the_stored_score():
+    from dataclasses import replace
+
+    from core.visualizer import weld_overlay_score
+
+    ny, nx = 61, 9
+    g = _plate(ny, nx, [(0, ix) for ix in range(nx)] + [(ny - 1, ix) for ix in range(nx)])
+    r = replace(_solve(g), weld_angle_deg=None)
+    assert np.array_equal(weld_overlay_score(r, min_angle_deg=40.0), r.weld_score)

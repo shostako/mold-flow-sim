@@ -45,6 +45,7 @@ from core import (
 from core.geometry import Geometry
 from core.profile_gate import IslandSpec, LandSpec, MainRampSpec, ValveSpec, WeldSpec, WellSpec
 from core.settings_record import config_settings, file_fingerprint, settings_json
+from core.solver import WELD_MIN_ANGLE_DEG
 from core.spec_source import (
     SPEC_LINK_NAME,
     SpecMode,
@@ -1239,6 +1240,20 @@ with st.sidebar:
             help="同時に充填される位置を結んだ線。線が詰まる=流れが遅い、"
             "ぶつかる=ウェルド、途切れた先=最後に充填。0 で非表示。",
         )
+        # ウェルドは「2つの流れが出会う角度」で描く。45° 以上（商用 CAE の
+        # 合流角 135° 境界）は濃い赤＝ウェルド、そこから下限までは薄い赤＝
+        # メルド（ほぼ平行に合流する痕、強度欠陥より外観）。下限を下げるほど
+        # 長く描かれ、数値ノイズも拾う。
+        weld_min_angle = st.slider(
+            "メルド表示の下限角 [deg]",
+            0,
+            40,
+            int(WELD_MIN_ANGLE_DEG),
+            step=5,
+            help="2 つの流れが出会うときの開き角。45° 以上は濃い赤（ウェルド）、"
+            "この角度から 45° までは薄い赤（メルド）、未満は描かない。"
+            "穴の後ろに残る遅れ帯の痕を追いたいときは下げる。",
+        )
 
     # Version / build label.
     # Rendered here (end of the sidebar) rather than at the end of the script
@@ -1531,6 +1546,7 @@ if do_run:
                 "num_frames": num_frames,
                 "fill_cmap": fill_cmap,
                 "isochrone_levels": iso_levels,
+                "weld_min_angle_deg": float(weld_min_angle),
             },
         }
 
@@ -1563,7 +1579,9 @@ if do_run:
             fps=8,
         )
         _press_path = render_pressure_map(result, _tmp_dir / "pressure.png")
-        _weld_path = render_weldlines(result, _tmp_dir / "weld.png")
+        _weld_path = render_weldlines(
+            result, _tmp_dir / "weld.png", weld_min_angle_deg=float(weld_min_angle)
+        )
         _skin_path: Path | None = None
         _core_path: Path | None = None
         _layer_T_grid_path: Path | None = None
@@ -1735,7 +1753,10 @@ if "mfs_result" in st.session_state:
 
         with st.expander("等値線・ウェルドライン候補・エアトラップ"):
             st.image(str(weld_path))
-            st.caption("赤=合流（ウェルド）候補、黄×=最終充填位置（エアトラップ候補）")
+            st.caption(
+                "濃い赤=ウェルド（開き角 45° 以上）、薄い赤=メルド（下限角〜45°）、"
+                "黄×=最終充填位置（エアトラップ候補）。下限角はサイドバー「出力」で変えられる"
+            )
             _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
 
         if two_phase_skip is not None:

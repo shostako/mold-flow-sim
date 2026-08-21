@@ -15,7 +15,12 @@ from matplotlib.patches import Patch
 from scipy.ndimage import distance_transform_edt
 
 from .multilayer_solver import MultilayerFlowResult
-from .solver import FlowResult
+from .solver import (
+    WELD_FULL_ANGLE_DEG,
+    WELD_MIN_ANGLE_DEG,
+    FlowResult,
+    weld_score_from_angle,
+)
 
 # Explicit stacking for the fill renderers. matplotlib's defaults would
 # put contours (2) above images (0) whatever the call order, so the
@@ -505,14 +510,43 @@ def render_pressure_map(
     return output_path
 
 
-WELD_ALPHA_FLOOR = 0.35
+WELD_ALPHA_FLOOR = 0.35  # meld: faint but always visible once flagged
+WELD_ALPHA_FULL = 0.9  # weld: saturated
+
+
+def weld_overlay_score(
+    result: FlowResult,
+    *,
+    min_angle_deg: float = WELD_MIN_ANGLE_DEG,
+    full_angle_deg: float = WELD_FULL_ANGLE_DEG,
+) -> np.ndarray:
+    """Score [0..1] to draw: re-thresholded from the angle field when present.
+
+    Results solved before the angle field existed (or built by hand in
+    tests) fall back to the stored ``weld_score``.
+    """
+    if result.weld_angle_deg is None:
+        return np.clip(result.weld_score, 0.0, 1.0)
+    return weld_score_from_angle(
+        result.weld_angle_deg, min_angle_deg=min_angle_deg, full_angle_deg=full_angle_deg
+    )
 
 
 def render_weldlines(
     result: FlowResult,
     output_path: str | Path,
+    *,
+    weld_min_angle_deg: float = WELD_MIN_ANGLE_DEG,
+    weld_full_angle_deg: float = WELD_FULL_ANGLE_DEG,
 ) -> Path:
-    """Plot fill-time iso-contours plus weld score and air traps overlay."""
+    """Plot fill-time iso-contours plus weld / meld lines and air traps.
+
+    Confluences are drawn in red with the opening angle of the meeting
+    streams as opacity: saturated at ``weld_full_angle_deg`` and above (a
+    weld in the usual CAE sense), fading down to ``weld_min_angle_deg``
+    (a meld — streams that merge nearly parallel, a visible mark rather
+    than a strength defect), nothing below.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
@@ -544,13 +578,22 @@ def render_weldlines(
     # weld lines (red overlay). Any flagged cell gets a visible floor: the
     # score is the meeting angle, and a meld (small angle) is still a line
     # worth seeing, just fainter than a head-on weld.
-    weld = np.clip(result.weld_score, 0.0, 1.0)
+    weld = weld_overlay_score(
+        result, min_angle_deg=weld_min_angle_deg, full_angle_deg=weld_full_angle_deg
+    )
     weld_rgba = np.zeros((*weld.shape, 4))
     weld_rgba[..., 0] = 1.0  # red
     weld_rgba[..., 3] = np.where(
-        weld > 0.0, WELD_ALPHA_FLOOR + (0.9 - WELD_ALPHA_FLOOR) * weld, 0.0
+        weld > 0.0, WELD_ALPHA_FLOOR + (WELD_ALPHA_FULL - WELD_ALPHA_FLOOR) * weld, 0.0
     )
     ax.imshow(weld_rgba, origin="lower", extent=extent, interpolation="nearest")
+    legend_extra = [
+        Patch(facecolor=(1, 0, 0, WELD_ALPHA_FULL), label=f"weld (≥{weld_full_angle_deg:.0f}°)"),
+        Patch(
+            facecolor=(1, 0, 0, WELD_ALPHA_FLOOR),
+            label=f"meld ({weld_min_angle_deg:.0f}–{weld_full_angle_deg:.0f}°)",
+        ),
+    ]
 
     # air traps (yellow X)
     iy_arr, ix_arr = np.where(result.air_traps)
@@ -585,16 +628,17 @@ def render_weldlines(
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     ax.set_title(
-        f"Fill-time iso, weld lines (red), air traps (yellow x) — "
+        f"Fill-time iso, weld / meld (red), air traps (yellow x) — "
         f"T_fill = {result.total_fill_time_s:.3f} s, η ≈ {result.viscosity_Pa_s:.1f} Pa·s"
     )
 
     handles, labels = ax.get_legend_handles_labels()
-    if labels:
-        seen: dict[str, object] = {}
-        for handle, label in zip(handles, labels, strict=False):
-            seen[label] = handle
-        ax.legend(seen.values(), seen.keys(), loc="upper right", fontsize=8)
+    seen: dict[str, object] = {}
+    for handle, label in zip(handles, labels, strict=False):
+        seen[label] = handle
+    for patch in legend_extra:
+        seen[patch.get_label()] = patch
+    ax.legend(seen.values(), seen.keys(), loc="upper right", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(output_path)

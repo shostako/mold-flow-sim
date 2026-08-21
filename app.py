@@ -6,8 +6,10 @@ Run:
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
+import math
 import tempfile
 import zipfile
 from pathlib import Path
@@ -19,7 +21,6 @@ import streamlit.components.v1 as components
 from core import (
     DirectGateConfig,
     FilmGate2Config,
-    FilmGateConfig,
     GateProfileSpec,
     HeleShawSolver,
     MaterialDB,
@@ -28,7 +29,6 @@ from core import (
     build_direct_gate_geometry,
     build_fill_player_html,
     build_film_gate2_geometry,
-    build_film_gate_geometry,
     build_profile_gate_geometry,
     export_frames,
     fill_frame_fractions,
@@ -45,6 +45,7 @@ from core import (
     wrap_standalone_html,
 )
 from core.geometry import Geometry
+from core.profile_gate import IslandSpec, LandSpec, MainRampSpec, ValveSpec, WellSpec
 from core.settings_record import config_settings, file_fingerprint, settings_json
 from core.spec_source import (
     SPEC_LINK_NAME,
@@ -68,6 +69,9 @@ from core.visualizer import (
 
 APP_DIR = Path(__file__).parent
 DEMO_PROFILE_JSON = APP_DIR / "data" / "gate_profiles" / "demo_profile_gate.json"
+# Film gate 1: the well's sloped wall angle is fixed (a cutter-geometry
+# constant on the drawings this input reproduces, not a design variable).
+_WELL_WALL_ANGLE_DEG = 60.0
 
 # Radio labels live here, next to the rest of the UI text; the logic in
 # ``core.spec_source`` switches on :class:`SpecMode` so that rewording one of
@@ -341,7 +345,7 @@ with st.sidebar:
     geom_source = st.radio(
         "入力",
         [
-            "Film gate 1 (左右対称)",
+            "Film gate 1 (肉厚調整ゲート)",
             "Film gate 2 (ゲート位置可変)",
             "Direct gate (parametric)",
             "Profile gate (JSONスペック)",
@@ -591,181 +595,176 @@ with st.sidebar:
                 "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
                 "滑らかな3Dが要るときだけ下げる。"
             )
-    elif geom_source.startswith("Film gate"):
-        with st.expander("製品・ゲート形状", expanded=False):
-            plate_w = st.slider("製品幅 Wp [mm]", 40.0, 300.0, 300.0, step=5.0)
-            plate_h = st.slider("製品高さ Hp [mm]", 30.0, 160.0, 50.0, step=5.0)
+    elif geom_source.startswith("Film gate 1"):
+        # Parametric "肉厚調整ゲート" (ranner-block depth field) -- the same
+        # family as the Profile gate JSON (land / main ramp / island / well /
+        # outer wall), but driven by sliders and assembled into a
+        # ``GateProfileSpec`` here. The defaults reproduce
+        # hamoko_gate_furiwake_20260703 so the sliders start on a real
+        # balanced-gate design; the derived quantities below (boundary-line
+        # t-endpoints, outer-wall start half-width, well floor) are tied to
+        # the major dimensions the way that drawing ties them.
+        with st.expander("製品形状", expanded=False):
+            plate_w = st.slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
+            plate_h = st.slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
 
-            st.markdown("**製品肉厚（ゲート側／反ゲート側で2層化可）**")
-            plate_split = st.slider(
-                "段差位置 [mm]",
-                0.0,
-                float(plate_h),
-                min(20.0, float(plate_h)),
-                step=1.0,
-                help="ゲート側長辺からの距離。0 で均一肉厚（旧挙動）",
+            plate_2layer_f1 = st.checkbox(
+                "製品肉厚を2層化する（ゲート側／反ゲート側）",
+                value=True,
+                help="ONで段差位置を境にゲート側・反ゲート側を別肉厚に。OFFで均一肉厚。",
+                key="f1_plate_2layer",
             )
-            if plate_split > 0:
-                plate_lower_thk = st.slider(
-                    "ゲート側肉厚 [mm]",
-                    0.2,
-                    2.0,
-                    0.35,
-                    step=0.05,
+            if plate_2layer_f1:
+                plate_split = st.slider(
+                    "段差位置（製品長辺から）[mm]",
+                    1.0,
+                    float(plate_h),
+                    min(20.0, float(plate_h)),
+                    step=1.0,
+                    help="製品長辺からの距離。ここを境に肉厚が切り替わる。",
                 )
-                plate_upper_thk = st.slider(
-                    "反ゲート側肉厚 [mm]",
-                    0.2,
-                    2.0,
-                    0.50,
-                    step=0.05,
-                )
+                plate_lower_thk = st.slider("ゲート側肉厚 [mm]", 0.2, 2.0, 0.35, step=0.05)
+                plate_upper_thk = st.slider("反ゲート側肉厚 [mm]", 0.2, 2.0, 0.50, step=0.05)
                 plate_thk = float(plate_lower_thk)
             else:
                 plate_thk = st.slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
+                plate_split = 0.0
                 plate_lower_thk = float(plate_thk)
                 plate_upper_thk = float(plate_thk)
 
-            st.markdown("**ランナー上面投影**")
-            runner_long = st.slider(
-                "長辺 L_long [mm] (≤ 製品幅)",
+        with st.expander("ゲートブロック（肉厚調整ゲート）", expanded=False):
+            st.caption(
+                "t = ゲート出口（製品長辺）からの距離、w = バルブ軸からの半幅。"
+                "左右対称。深さ = 流路肉厚。"
+            )
+            gate_exit_width = st.slider(
+                "ゲート出口幅 [mm] (≤ 製品幅)",
                 min_value=10.0,
                 max_value=float(plate_w),
-                value=float(plate_w),
-                step=1.0,
-            )
-            runner_short_d = st.slider(
-                "短辺直径 d [mm] (≤ 長辺)",
-                min_value=4.0,
-                max_value=float(runner_long),
-                value=float(min(10.0, runner_long)),
-                step=0.5,
-            )
-            runner_depth = st.slider(
-                "ランナー高さ D [mm] (長辺〜短辺直径線距離)",
-                5.0,
-                60.0,
-                20.0,
+                value=float(min(298.0, plate_w)),
                 step=1.0,
             )
 
-            st.markdown("**ランナー肉厚**")
-            runner_thk_film = st.slider("厚肉部 h_runner [mm]", 1.0, 10.0, 2.5, step=0.1)
-            flat_ratio = st.slider(
-                "厚肉部の比率 D_flat / D",
-                0.0,
-                1.0,
-                0.35,
-                step=0.05,
-                help="0で全スロープ（製品まで連続変化）、1で全フラット（製品との段差大）",
-            )
+            st.markdown("**ランド（出口）**")
+            land_depth = st.slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
+            land_length = st.slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
 
-            st.markdown("**バルブゲート**")
-            valve_d = st.slider(
-                "バルブゲート径 [mm] (≤ d)",
+            st.markdown("**メインランプ**")
+            ramp_angle = st.number_input(
+                "ランプ角 [deg]",
                 min_value=1.0,
-                max_value=float(runner_short_d),
-                value=float(min(3.0, runner_short_d)),
-                step=0.5,
+                max_value=45.0,
+                value=10.95,
+                step=0.05,
+                format="%.2f",
+                help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
+            )
+            ramp_cap = st.slider(
+                "ランプ上限深さ [mm] (≥ ランド深さ)",
+                min_value=float(land_depth),
+                max_value=10.0,
+                value=float(max(2.5, land_depth)),
+                step=0.1,
             )
 
-            # 製品の長辺とランナー長辺は直接接続（くびれ＝ゲート土手なし）
-            gate_w = runner_long
-
-            st.markdown("**フローバランサー（中央肉盗み）**")
-            balancer_on = st.checkbox(
-                "肉盗み（▽）を有効化",
+            st.markdown("**アイランド（中央の浅い帯＝振り分け）**")
+            island_on = st.checkbox(
+                "アイランドを有効化",
                 value=True,
+                key="f1_island_on",
                 help=(
-                    "ランナー中央軸に逆三角形の薄領域を作り、中央への流れを"
-                    "意図的に阻害して長辺全体から均一に充填させるLGP系の手法。"
+                    "中央帯だけランプ角を緩くして流路を絞り、樹脂を両端へ振り分ける。"
+                    "境界線はランド終端 (t=ランド長) からアイランド終端 (t=end) まで"
+                    "の直線で、半幅を出口側・終端側の2点で指定する。"
                 ),
             )
-            if balancer_on:
-                bal_offset_ratio = st.slider(
-                    "底辺位置 / D（ゲートからの距離 ÷ ランナー深さ）",
-                    0.5,
-                    1.0,
-                    1.0,
+            if island_on:
+                island_angle = st.number_input(
+                    "アイランド角 [deg] (≤ ランプ角)",
+                    min_value=0.0,
+                    max_value=float(ramp_angle),
+                    value=float(min(2.5, ramp_angle)),
                     step=0.05,
-                    help="1.0で底辺が長辺と一致（製品まで肉盗みが届く）",
+                    format="%.2f",
                 )
-                bal_height_ratio = st.slider(
-                    "▽の高さ H_bal / D",
-                    0.1,
-                    0.95,
-                    0.70,
-                    step=0.05,
+                island_end = st.slider(
+                    "アイランド終端 t_end [mm] (> ランド長)",
+                    min_value=float(land_length + 0.5),
+                    max_value=60.0,
+                    value=float(max(17.0, land_length + 0.5)),
+                    step=0.1,
                 )
-
-                bal_stage_count = st.slider(
-                    "肉盗み段数",
-                    1,
-                    5,
-                    2,
-                    step=1,
-                    help=(
-                        "ネスト数。1=単一▽（旧挙動）、2以上で中央＋外側の階段状肉盗み。"
-                        "番号 1 が中央（最薄・最大抵抗）、番号 N が外側。"
-                    ),
+                island_w_near = st.slider(
+                    "境界半幅（出口側、t=ランド長）[mm]",
+                    min_value=1.0,
+                    max_value=float(gate_exit_width / 2.0),
+                    value=float(min(52.7, gate_exit_width / 2.0)),
+                    step=0.1,
                 )
-                # default presets: width as a ratio of L_long, thickness as
-                # absolute mm values (clamped to ≤ plate_lower_thk).
-                _w_defaults = {
-                    1: [0.60],
-                    2: [0.30, 0.60],
-                    3: [0.20, 0.45, 0.70],
-                    4: [0.15, 0.35, 0.55, 0.80],
-                    5: [0.10, 0.30, 0.50, 0.70, 0.95],
-                }
-                _h_defaults_abs = {
-                    1: [0.30],
-                    2: [0.25, 0.30],
-                    3: [0.20, 0.25, 0.30],
-                    4: [0.15, 0.20, 0.25, 0.30],
-                    5: [0.10, 0.15, 0.20, 0.25, 0.30],
-                }
-                bal_widths_mm: list[float] = []
-                bal_thks: list[float] = []
-                for _k in range(1, bal_stage_count + 1):
-                    _label = "中央" if _k == 1 else ("外側" if _k == bal_stage_count else "")
-                    _label_suffix = f"（{_label}）" if _label else ""
-                    _w_default = _w_defaults[bal_stage_count][_k - 1]
-                    _h_default = max(0.05, _h_defaults_abs[bal_stage_count][_k - 1])
-                    _w_ratio = st.slider(
-                        f"底辺幅{_k} / L_long{_label_suffix}",
-                        0.05,
-                        1.0,
-                        _w_default,
-                        step=0.05,
-                        key=f"bal_w_{_k}",
-                    )
-                    _h_val = st.slider(
-                        f"残り肉厚{_k} [mm]{_label_suffix}",
-                        0.05,
-                        1.0,
-                        float(_h_default),
-                        step=0.05,
-                        key=f"bal_h_{_k}",
-                        help=(
-                            "肉盗み(▽)内の残り肉厚。プレート側肉厚 "
-                            "(plate_lower_thk) より大きく取ると、その段は"
-                            "「肉盛り凸部」になる（流路を逆に広げる用途）。"
-                        ),
-                    )
-                    bal_widths_mm.append(_w_ratio * runner_long)
-                    bal_thks.append(float(_h_val))
+                island_w_far = st.slider(
+                    "境界半幅（終端側、t=t_end）[mm]",
+                    min_value=0.5,
+                    max_value=float(gate_exit_width / 2.0),
+                    value=float(min(10.0, gate_exit_width / 2.0)),
+                    step=0.1,
+                )
             else:
-                bal_offset_ratio = 1.0
-                bal_height_ratio = 0.7
-                bal_widths_mm = []
-                bal_thks = []
+                island_angle = 0.0
+                island_end = 0.0
+                island_w_near = 0.0
+                island_w_far = 0.0
 
-            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 0.5, step=0.1)
+            st.markdown("**外壁線（ポケット外形）**")
+            st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
+            wall_t1 = st.slider("外壁開始 t [mm]", 0.0, 30.0, 3.0, step=0.1)
+            wall_t2 = st.slider(
+                "外壁終端 t [mm] (> 開始)",
+                min_value=float(wall_t1 + 0.5),
+                max_value=80.0,
+                value=float(max(23.3, wall_t1 + 0.5)),
+                step=0.1,
+            )
+            wall_w2 = st.slider(
+                "外壁終端の半幅 [mm]",
+                min_value=0.5,
+                max_value=float(gate_exit_width / 2.0),
+                value=float(min(4.5, gate_exit_width / 2.0)),
+                step=0.1,
+            )
+
+            st.markdown("**井戸（バルブ周りの長穴ポケット）**")
+            well_on = st.checkbox("井戸を有効化", value=True, key="f1_well_on")
+            if well_on:
+                well_t1 = st.slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
+                well_t2 = st.slider(
+                    "井戸終端 t [mm] (> 開始)",
+                    min_value=float(well_t1 + 0.5),
+                    max_value=80.0,
+                    value=float(max(27.5, well_t1 + 0.5)),
+                    step=0.1,
+                )
+                well_half_w = st.slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
+                well_depth = st.slider("井戸深さ [mm]", 0.5, 15.0, 4.5, step=0.1)
+                _well_t_mid = 0.5 * (well_t1 + well_t2)
+            else:
+                well_t1 = well_t2 = well_half_w = well_depth = 0.0
+                _well_t_mid = 0.5 * (wall_t1 + wall_t2)
+
+            st.markdown("**バルブゲート**")
+            valve_t = st.slider(
+                "バルブ位置 t [mm]",
+                0.0,
+                80.0,
+                float(round(_well_t_mid, 1)),
+                step=0.1,
+                help="既定は井戸の中央。",
+            )
+            valve_d = st.slider("バルブオリフィス径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+
+            cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
             st.caption(
-                "細かいほど解析精度が上がり 3D 表示も滑らかになるが、解析が重くなる"
-                "（0.2mm・層別で1回数十秒）。普段は0.5で速く回し、精密な結果や"
-                "滑らかな3Dが要るときだけ下げる。"
+                "この形状の想定解像度は 1.0mm（ランド長 1mm が 1 セル）。"
+                "細かいほど深さ場の再現精度が上がるが、解析が重くなる。"
             )
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
@@ -1214,31 +1213,67 @@ def build_geometry() -> tuple[Geometry, dict]:
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
-    if geom_source.startswith("Film gate"):
+    if geom_source.startswith("Film gate 1"):
         try:
-            cfg = FilmGateConfig(
+            _t_land = float(land_length)
+            _well_f1 = None
+            if well_on:
+                # Floor extent follows from the sloped wall: the 60° wall eats
+                # depth/tan(60°) of t at each end. When the pocket is too short
+                # for a flat floor the floor range is simply not reported.
+                _wall_eat = float(well_depth) / math.tan(math.radians(_WELL_WALL_ANGLE_DEG))
+                _floor = (float(well_t1) + _wall_eat, float(well_t2) - _wall_eat)
+                _well_f1 = WellSpec(
+                    shape="obround",
+                    t_range=(float(well_t1), float(well_t2)),
+                    half_width=float(well_half_w),
+                    depth=float(well_depth),
+                    floor_t_range=_floor if _floor[1] > _floor[0] + 1e-6 else None,
+                    wall_angle_deg=_WELL_WALL_ANGLE_DEG,
+                )
+            _island_f1 = None
+            if island_on:
+                _island_f1 = IslandSpec(
+                    angle_deg=float(island_angle),
+                    boundary_line=(
+                        (_t_land, float(island_w_near)),
+                        (float(island_end), float(island_w_far)),
+                    ),
+                    end_dist=float(island_end),
+                )
+            spec_f1 = GateProfileSpec(
+                name="film_gate_1_parametric",
+                units="mm",
+                symmetric=True,
+                gate_exit_width=float(gate_exit_width),
+                land=LandSpec(depth=float(land_depth), length=_t_land),
+                main_ramp=MainRampSpec(angle_deg=float(ramp_angle), cap_depth=float(ramp_cap)),
+                outer_wall_line=(
+                    (float(wall_t1), float(gate_exit_width) / 2.0),
+                    (float(wall_t2), float(wall_w2)),
+                ),
+                valve=ValveSpec(t=float(valve_t), w=0.0, orifice_diameter=float(valve_d)),
+                island=_island_f1,
+                well=_well_f1,
+            )
+            plate_f1 = ProfilePlateConfig(
                 plate_w_mm=plate_w,
                 plate_h_mm=plate_h,
                 plate_thk_mm=plate_thk,
-                runner_long_mm=runner_long,
-                runner_short_diameter_mm=runner_short_d,
-                runner_depth_mm=runner_depth,
-                runner_thk_mm=runner_thk_film,
-                runner_flat_depth_mm=runner_depth * flat_ratio,
-                runner_slope_depth_mm=runner_depth * (1.0 - flat_ratio),
-                valve_gate_diameter_mm=valve_d,
-                gate_width_mm=gate_w,
-                cell_size_mm=cell_size,
-                balancer_enabled=balancer_on,
-                balancer_height_mm=runner_depth * bal_height_ratio,
-                balancer_base_distance_from_gate_mm=runner_depth * bal_offset_ratio,
-                balancer_base_widths_mm=tuple(bal_widths_mm),
-                balancer_thicknesses_mm=tuple(bal_thks),
                 plate_split_height_mm=plate_split if plate_split > 0 else 0.0,
                 plate_lower_thk_mm=plate_lower_thk if plate_split > 0 else None,
                 plate_upper_thk_mm=plate_upper_thk if plate_split > 0 else None,
             )
-            return build_film_gate_geometry(cfg), config_settings(geom_source, cfg)
+            return build_profile_gate_geometry(
+                spec_f1, plate_f1, cell_size_mm=cell_size
+            ), config_settings(
+                geom_source,
+                plate_f1,
+                cell_size_mm=cell_size,
+                # Slider values, not a drawing: record the assembled spec in
+                # full so the ZIP reproduces the geometry.
+                gate_profile=dataclasses.asdict(spec_f1),
+            )
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -1349,7 +1384,7 @@ with col_left:
     plt.close(fig)
     st.image(fig_buf.getvalue())
     st.caption(
-        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。半円部は y < 0 側。赤丸はバルブゲート位置。"
+        "原点 (x, y) = (0, 0) はゲート中央 = 製品中央。ゲートブロック／ランナーは y < 0 側。赤丸はバルブゲート位置。"
     )
 
 

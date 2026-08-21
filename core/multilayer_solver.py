@@ -53,7 +53,12 @@ from .multilayer_thermal import (
     poiseuille_shear_rates,
     shear_heating_temperature_rise,
 )
-from .solver import FlowResult, HeleShawSolver, check_gate_reachability
+from .solver import (
+    FlowResult,
+    HeleShawSolver,
+    check_gate_reachability,
+    weld_score_from_angle,
+)
 
 
 @dataclass
@@ -580,7 +585,8 @@ class MultilayerHeleShawSolver:
         fill_time_s = base._arrival_time_field(tau, msk, cell_volume, T_fill)
         pressure_norm = np.full_like(tau, np.nan)
         pressure_norm[msk] = 1.0 - tau[msk] / tau_max
-        weld_score = base._compute_weld_score(tau)
+        weld_angle = base._weld_meeting_angle(tau)
+        weld_score = weld_score_from_angle(weld_angle)
         air_traps = base._compute_air_traps(tau)
 
         metadata = {
@@ -681,6 +687,7 @@ class MultilayerHeleShawSolver:
             fill_time_s=fill_time_s,
             pressure_norm=pressure_norm,
             weld_score=weld_score,
+            weld_angle_deg=weld_angle,
             air_traps=air_traps,
             total_fill_time_s=float(T_fill),
             viscosity_Pa_s=eta_baseline,

@@ -451,7 +451,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             v["plate_split"] = 0.0
             v["plate_lower_thk"] = v["plate_upper_thk"] = float(v["plate_thk"])
 
-    with st.expander("ゲートブロック（肉厚調整ゲート）", expanded=False):
+    with st.expander("ゲート形状", expanded=False):
         st.caption(
             f"t = ゲート出口（製品長辺）からの距離、w = {w_origin}。"
             + ("左右対称。" if symmetric else "片側のみ（バルブは端）。")
@@ -781,7 +781,7 @@ with st.sidebar:
             "Direct gate (parametric)",
             "Profile gate (JSONスペック)",
         ],
-        index=2,
+        index=0,
         key="geom_source",
     )
 

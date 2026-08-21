@@ -340,6 +340,19 @@ def test_validation_rejects_non_obround_well() -> None:
         )
 
 
+def test_validation_rejects_well_deeper_than_the_wall_can_reach() -> None:
+    """The rasteriser saturates the well depth at half_width·tan(wall_angle)
+    on the centreline. A deeper request used to pass validation, be recorded
+    as asked, and be built shallower with no diagnostic (PR #64, Codex P1)."""
+    well = {"shape": "obround", "t_range": [14.0, 26.0], "half_width": 0.5, "depth": 4.0}
+    with pytest.raises(ValueError, match="well.depth"):
+        _minimal_spec(well=well)
+    # exactly at the reach is fine; a vertical wall has no reach limit
+    reach = 0.5 * math.tan(math.radians(60.0))
+    _minimal_spec(well={**well, "depth": reach})
+    _minimal_spec(well={**well, "wall_angle_deg": 90.0})
+
+
 def test_validation_rejects_island_steeper_than_ramp() -> None:
     with pytest.raises(ValueError, match="island.angle_deg"):
         _minimal_spec(

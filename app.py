@@ -780,7 +780,10 @@ with st.sidebar:
                 _valve_t_max,
                 float(min(max(round(_well_t_mid, 1), _valve_t_min), _valve_t_max)),
                 step=0.1,
-                help="既定は井戸の中央。上限はポケット終端（外壁終端／井戸終端の遠い方）− 半径。",
+                help=(
+                    "既定は井戸の中央（井戸 OFF なら外壁線の中点）。"
+                    "上限はポケット終端（外壁終端／井戸終端の遠い方）− 半径。"
+                ),
             )
 
             cell_size = st.slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)

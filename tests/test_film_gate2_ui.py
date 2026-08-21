@@ -141,3 +141,45 @@ def test_one_sided_valve_on_the_pocket_boundary_is_accepted_on_a_fine_mesh():
     assert not at.exception
     assert not [e for e in at.error if "ポケットの外" in str(e.value)]
     assert "mfs_geom" in at.session_state
+
+
+def test_one_sided_well_half_width_is_capped_by_the_edge_room():
+    """The one-sided well is centred on the w=0 edge and overhangs into the
+    plate margin; a half-width beyond pad + (Wp − exit)/2 would make the
+    builder reject the grid overhang. Default: 5 + (300 − 299)/2 = 5.5."""
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    hw = _slider(at, "井戸半幅")
+    assert hw.max == pytest.approx(5.5)
+    _slider(at, "ゲート出口幅").set_value(280.0).run()
+    assert _slider(at, "井戸半幅").max == pytest.approx(15.0)
+
+
+def test_a_one_sided_orifice_outside_the_pocket_is_rejected_not_snapped(monkeypatch):
+    """FG2 twin of the FG1 guard test: the symmetric=False branch of the
+    orifice-overlap check must locate the orifice at the w=0 edge."""
+    import core
+
+    real = core.build_profile_gate_geometry
+
+    def cut_out_orifice(spec, plate, cell_size_mm=1.0):
+        geom = real(spec, plate, cell_size_mm=cell_size_mm)
+        ny, nx = geom.mask.shape
+        iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+        x_v = plate.pad_mm + plate.plate_w_mm / 2.0 - spec.gate_exit_width / 2.0
+        y_v = plate.pad_mm + spec.t_max() - spec.valve.t
+        r = spec.valve.orifice_diameter / 2.0
+        orifice = ((ix + 0.5) * cell_size_mm - x_v) ** 2 + (
+            (iy + 0.5) * cell_size_mm - y_v
+        ) ** 2 <= r**2
+        assert np.any(orifice & geom.mask)
+        geom.mask[orifice] = False
+        return geom
+
+    monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_orifice)
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert any("ポケットの外" in str(e.value) for e in at.error)
+    assert "mfs_geom" not in at.session_state

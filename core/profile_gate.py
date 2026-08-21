@@ -19,7 +19,9 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    An optional ``weld`` sub-section models a **welded-in dam**: within
    ``t_range`` the island depth is overridden by a constant ``depth``
    (metal deposited on the pocket floor, so ``depth ≤ land.depth``). Its
-   entry/exit steps are sharp cuts like the island's own walls.
+   entry/exit steps are sharp cuts like the island's own walls. A weld depth
+  of 0 means the steel reaches the PL: those cells leave the cavity (a hole
+  in the part), except where the well cuts through them.
 4. **Outer wall** — a straight line in the (t, w) plane beyond which the
    pocket (cavity) ends. For ``t`` before the line's first point the pocket
    spans the full gate width.
@@ -507,8 +509,11 @@ class GateProfileSpec:
                         f"island.weld.t_range ({isl.weld.t_range}) must lie within "
                         f"[land.length ({self.land.length}), island.end_dist ({isl.end_dist})]"
                     )
-                if isl.weld.depth <= 0:
-                    raise ValueError(f"island.weld.depth must be positive, got {isl.weld.depth}")
+                if isl.weld.depth < 0:
+                    raise ValueError(
+                        f"island.weld.depth must be ≥ 0, got {isl.weld.depth} "
+                        "(0 = the steel touches the PL: no flow path, a hole in the part)"
+                    )
                 if isl.weld.depth > self.land.depth + _EPS:
                     raise ValueError(
                         f"island.weld.depth ({isl.weld.depth}) must be ≤ land.depth "
@@ -738,6 +743,12 @@ def build_profile_gate_geometry(
     # --- outer wall (pocket silhouette) ---
     w_wall = _line_eval(spec.outer_wall_line, t, before_value=full_half_width)
     in_gate_base = (t >= 0) & (t <= T) & (wa >= 0) & (wa <= w_wall)
+    # A dam welded up to the PL leaves no flow path: those cells are steel,
+    # not cavity (a zero-thickness cell in the mask would give S = 0 and a
+    # singular system). The well is machined through it, so cells the well
+    # still reaches stay cavity via ``in_well`` below.
+    if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
+        in_gate_base &= ~in_weld
 
     # --- well (obround capsule with sloped wall, distance field) ---
     in_well = np.zeros_like(in_gate_base)

@@ -504,6 +504,43 @@ def test_island_weld_volume_drop_matches_quadrature() -> None:
     assert removed == pytest.approx(expected, rel=0.03)
 
 
+def test_island_weld_to_the_pl_cuts_a_hole_but_not_through_the_well() -> None:
+    """depth 0 = the dam reaches the PL. Those cells are steel: out of the
+    mask, never a zero-thickness cavity cell (S = 0 → singular system). The
+    well is machined through the dam, so where the well reaches, the cells
+    stay cavity at the well's depth."""
+    ref = build_profile_gate_geometry(_weld_spec(), _plate(), cell_size_mm=0.5)
+    spec = _weld_spec(depth=0.0)
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.5)
+    yy, xx = _grid(g)
+    t = 5.0 + spec.t_max() - yy
+    wa = np.abs(xx - (5.0 + 150.0))
+    banded = ref.mask & (np.abs(t - 10.0) < 0.3) & (wa < 5.0)
+    assert banded.any()
+    assert not g.mask[banded].any()
+    assert (g.thickness_mm[g.mask] > 0).all()
+    # outside the band nothing moved
+    in_band = (t >= spec.island.weld.t_range[0]) & (t <= spec.island.weld.t_range[1])
+    assert np.array_equal(g.mask & ~in_band, ref.mask & ~in_band)
+    # the well still reaches its own depth inside the band
+    well_t = (t >= spec.well.t_range[0]) & (t <= spec.well.t_range[1])
+    on_axis = well_t & in_band & (wa < 0.3)
+    if on_axis.any():
+        assert g.mask[on_axis].all()
+        np.testing.assert_allclose(g.thickness_mm[on_axis], ref.thickness_mm[on_axis])
+    # the solver must still reach the plate around the hole
+    solver = HeleShawSolver(
+        geometry=g,
+        material=MaterialDB()["PP"],
+        melt_temperature_K=503.15,
+        mold_temperature_K=313.15,
+        injection_velocity_mms=100.0,
+        injection_volume_flow_cm3s=20.0,
+    )
+    res = solver.solve(num_frames=4)
+    assert np.isfinite(res.fill_time_s[g.mask]).all()
+
+
 def test_island_weld_absent_is_byte_identical_to_legacy() -> None:
     plate = _plate()
     a = build_profile_gate_geometry(_demo_spec(), plate, cell_size_mm=0.5)
@@ -527,7 +564,8 @@ def test_island_weld_validation() -> None:
     with pytest.raises(ValueError, match="weld.depth"):
         _weld_spec(depth=0.6)
     with pytest.raises(ValueError, match="weld.depth"):
-        _weld_spec(depth=0.0)
+        _weld_spec(depth=-0.1)
+    _weld_spec(depth=0.0)  # steel up to the PL: a hole, not an error
     # band must lie inside [land.length, end_dist]
     with pytest.raises(ValueError, match="weld.t_range"):
         _weld_spec(t_range=[6.0, 15.0])

@@ -1,4 +1,4 @@
-"""AppTest wiring checks for the parametric Film gate 1 (肉厚調整ゲート) input.
+"""AppTest wiring checks for the parametric Film gate 1 (扇状/肉盗み1) input.
 
 Film gate 1 assembles a ``GateProfileSpec`` from sliders and feeds it to the
 same builder as the Profile gate JSON input. Its defaults reproduce the
@@ -20,7 +20,7 @@ from streamlit.testing.v1 import AppTest
 from core import GateProfileSpec, ProfilePlateConfig, build_profile_gate_geometry
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
-FILM_GATE1_LABEL = "Film gate 1 (肉厚調整ゲート)"
+FILM_GATE1_LABEL = "Film gate 1 (扇状/肉盗み1)"
 
 # The drawing-derived spec the sliders default to.
 HAMOKO_SPEC = {

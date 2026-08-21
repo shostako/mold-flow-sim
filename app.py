@@ -531,7 +531,21 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 value=float(max(27.5, v["well_t1"] + 0.5)),
                 step=0.1,
             )
-            v["well_half_w"] = slider("井戸半幅 [mm]", 0.5, 20.0, 4.5, step=0.1)
+            # One-sided: the well is centred on the w=0 edge, so half of it
+            # overhangs past the pocket into the plate margin. Cap the
+            # half-width at the room available there or the builder rejects
+            # the grid overhang (a ValueError the slider can prevent).
+            hw_max = 20.0
+            if not symmetric:
+                edge_room = ProfilePlateConfig().pad_mm + (v["plate_w"] - gew) / 2.0
+                hw_max = max(0.5, min(20.0, math.floor(edge_room * 10.0) / 10.0))
+            v["well_half_w"] = slider(
+                "井戸半幅 [mm]" + ("" if symmetric else " (≤ 端の余白)"),
+                0.5,
+                float(hw_max),
+                float(min(4.5, hw_max)),
+                step=0.1,
+            )
             # The 60° wall climbs from the rim, so the deepest point the
             # pocket can reach is half_width·tan(60°) at the centreline. A
             # deeper request is rejected by validate() and would otherwise be
@@ -653,6 +667,10 @@ def _valve_orifice_hits_pocket(
     iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
     xx = (ix + 0.5) * dx
     yy = (iy + 0.5) * dx
+    # Same x_valve as the builder: plate centre (symmetric) or the valve-side
+    # edge cx - gew/2 (one-sided), plus the spec's w offset. The UI always
+    # passes w = 0; the offset is kept here so the two stay in step if that
+    # ever changes.
     cx = plate.pad_mm + plate.plate_w_mm / 2.0
     x_valve = (cx if spec.symmetric else cx - spec.gate_exit_width / 2.0) + spec.valve.w
     y_valve = plate.pad_mm + spec.t_max() - spec.valve.t

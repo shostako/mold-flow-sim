@@ -173,3 +173,29 @@ def test_valve_position_is_bounded_by_the_pocket_end():
     y_gate = (iy + 0.5) * geom.cell_size_mm
     t_gate = 5.0 + GateProfileSpec.from_dict({**rec, "name": "x"}).t_max() - y_gate
     assert abs(t_gate - rec["valve"]["t"]) <= rec["valve"]["orifice_diameter"] / 2.0 + 1.0
+
+
+def test_uniform_plate_thickness_branch_records_no_split():
+    at = _film_gate1_app()
+    at.checkbox(key="f1_plate_2layer").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    cfg = at.session_state["mfs_settings"]["geometry"]["config"]
+    assert cfg["plate_split_height_mm"] == 0.0
+    assert cfg["plate_lower_thk_mm"] is None and cfg["plate_upper_thk_mm"] is None
+    geom = at.session_state["mfs_geom"]
+    plate = geom.compression_mask & geom.mask
+    assert np.unique(geom.thickness_mm[plate]).size == 1
+
+
+def test_a_well_too_short_for_a_flat_floor_reports_no_floor_range():
+    """floor = t_range shrunk by depth/tan(60°) at each end; when that
+    inverts, the builder must not hand validate() an inverted range."""
+    at = _film_gate1_app()
+    _slider(at, "井戸開始").set_value(20.0).run()
+    _slider(at, "井戸終端").set_value(21.0).run()  # 1 mm long, depth 4.5 eats 2.6 per end
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    assert rec["well"]["t_range"] == [20.0, 21.0]
+    assert rec["well"]["floor_t_range"] is None

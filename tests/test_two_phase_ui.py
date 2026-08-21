@@ -83,7 +83,7 @@ def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
     Streamlit exception.
 
     Whether a given geometry actually rejects a given shot depends on its
-    gate-region volume (the default Film gate 2 sits at ~0.0094 cm3, just
+    gate-region volume (the default Film gate 3 sits at ~0.0094 cm3, just
     under the UI minimum), so the rejection is injected: ``app.py`` re-does
     ``from core.two_phase import ...`` on every AppTest run, which reads the
     patched module attribute — the except-path wiring is what is under test.

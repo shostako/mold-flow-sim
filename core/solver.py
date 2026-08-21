@@ -1046,8 +1046,8 @@ class HeleShawSolver:
                 eff_a = np.where(np.abs(drop_a) <= tie_tol, far_a, drop_a)
                 eff_b = np.where(np.abs(drop_b) <= tie_tol, far_b, drop_b)
                 crest = (
-                    (drop_a >= 0.0)
-                    & (drop_b >= 0.0)
+                    (drop_a >= -tie_tol)
+                    & (drop_b >= -tie_tol)
                     & (eff_a >= CREST_BALANCE * eff_b)
                     & (eff_b >= CREST_BALANCE * eff_a)
                 )

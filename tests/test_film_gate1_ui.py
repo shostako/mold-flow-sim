@@ -52,7 +52,7 @@ HAMOKO_SPEC = {
 def film_gate1_run() -> AppTest:
     at = AppTest.from_file(str(APP), default_timeout=240.0)
     at.run()
-    at.radio(key="geom_source").set_value(FILM_GATE1_LABEL).run()
+    assert at.radio(key="geom_source").value == FILM_GATE1_LABEL  # the UI default input
     at.radio(key="wall_model").set_value("none")
     at.button[0].click().run()
     assert not at.exception

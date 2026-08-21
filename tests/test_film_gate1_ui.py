@@ -199,3 +199,31 @@ def test_a_well_too_short_for_a_flat_floor_reports_no_floor_range():
     rec = _recorded_spec(at)
     assert rec["well"]["t_range"] == [20.0, 21.0]
     assert rec["well"]["floor_t_range"] is None
+
+
+def test_a_valve_centre_outside_the_pocket_is_rejected_not_snapped(monkeypatch):
+    """The post-build guard in app.py. Slider bounds make this unreachable by
+    hand (the centreline w=0 is always inside a pocket whose half-width is
+    ≥ 0.5 mm), so the miss is injected: the real builder runs, then the
+    valve-centre cell is cut out of the mask. ``app.py`` re-imports
+    ``build_profile_gate_geometry`` from ``core`` on every AppTest run, so
+    patching the module attribute reaches it."""
+    import core
+
+    real = core.build_profile_gate_geometry
+
+    def cut_out_valve_cell(spec, plate, cell_size_mm=1.0):
+        geom = real(spec, plate, cell_size_mm=cell_size_mm)
+        iy = int((plate.pad_mm + spec.t_max() - spec.valve.t) / cell_size_mm)
+        ix = int((plate.pad_mm + plate.plate_w_mm / 2.0) / cell_size_mm)
+        assert geom.mask[iy, ix], "the injected miss must start from a hit"
+        geom.mask[iy, ix] = False
+        return geom
+
+    monkeypatch.setattr(core, "build_profile_gate_geometry", cut_out_valve_cell)
+    at = _film_gate1_app()
+    at.button[0].click().run()
+    assert not at.exception
+    errors = "\n".join(str(e.value) for e in at.error)
+    assert "バルブ位置" in errors and "ポケットの外" in errors
+    assert "mfs_geom" not in at.session_state

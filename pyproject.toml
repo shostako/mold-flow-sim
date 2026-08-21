@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mold-flow-sim"
-version = "0.27.0"
+version = "0.28.0"
 description = "Simplified injection-molding flow analyzer (Hele-Shaw + Cross-WLF + Pseudo-Conduction). Educational / early-screening use."
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -29,6 +29,8 @@
 - UI が先回りする制約: 井戸深さ ≤ 半幅·tan(60°)（壁が届かない深さは spec が受理するのに
   浅く描かれる）、バルブ位置 ∈ [半径, ポケット終端 − 半径]（外れるとビルダーが最寄りセルへ
   黙ってスナップし、記録と注入位置がずれる）。幅方向の外れはビルド後に検出して拒否（Codex P1 ×2）
+- `GateProfileSpec.validate()` に井戸深さの到達可能性チェックを追加（`depth ≤ half_width·tan(wall_angle)`、
+  壁角 90° は無制限）。JSON 経路にも効く — 旧来は受理して浅く描いていた
 - 旧 Film gate 1 の `FilmGateConfig` / `build_film_gate_geometry` と CLI の
   `FILM_GATE_CASES`、43 テストはそのまま残る（CLI 専用）
 

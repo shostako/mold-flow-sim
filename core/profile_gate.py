@@ -528,6 +528,18 @@ class GateProfileSpec:
                 )
             if not (0.0 < w.wall_angle_deg <= 90.0):
                 raise ValueError(f"well.wall_angle_deg must be in (0, 90], got {w.wall_angle_deg}")
+            # The sloped wall climbs from the rim, so the rasterised depth
+            # saturates at half_width·tan(wall_angle) on the centreline. A
+            # deeper request would pass every other check, be recorded as
+            # asked, and be built shallower with no diagnostic.
+            if w.wall_angle_deg < 90.0:
+                reach = w.half_width * math.tan(math.radians(w.wall_angle_deg))
+                if w.depth > reach + _EPS:
+                    raise ValueError(
+                        f"well.depth ({w.depth}) exceeds what the {w.wall_angle_deg}° wall "
+                        f"can reach at half_width {w.half_width} "
+                        f"(max {reach:.3f}); widen the well or steepen the wall"
+                    )
             if w.floor_t_range is not None:
                 # reference metadata only (see WellSpec docstring) — still
                 # reject nonsensical ranges to catch extraction typos

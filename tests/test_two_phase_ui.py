@@ -166,3 +166,27 @@ def test_the_two_phase_run_ships_a_scrubber_and_its_standalone_player():
         page = zf.read("two_phase_player.html").decode("utf-8")
     assert "two_phase_player.html" in names
     assert page.startswith("<!doctype html>") and '<meta charset="utf-8">' in page
+
+
+def test_a_geometry_error_leaves_the_output_widgets_and_the_version_footer(monkeypatch):
+    """``build_geometry()`` now runs inside the sidebar (the shot-volume default
+    needs the cavity volume) and calls ``st.stop()`` on bad input. The
+    short-shot block is drawn through a placeholder container *after* the
+    output expander and the version footer, so a parameter error must not
+    take those with it — the footer lives in the sidebar precisely so it
+    survives ``st.stop()`` (Claude review on PR #70)."""
+    import core
+    from core.version import build_label
+
+    def explode(*_a, **_k):
+        raise ValueError("injected geometry failure")
+
+    monkeypatch.setattr(core, "build_profile_gate_geometry", explode)
+    at = _app()
+    assert not at.exception
+    errors = "\n".join(str(e.value) for e in at.error)
+    assert "injected geometry failure" in errors
+    assert "mfs_geom" not in at.session_state
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert build_label() in captions
+    assert any(str(s.label).startswith("アニメーションフレーム数") for s in at.slider)

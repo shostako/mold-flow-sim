@@ -101,7 +101,7 @@ def test_fingerprint_identifies_the_revision():
 
 
 def test_fingerprint_accepts_bytes_and_text_alike():
-    """Uploads arrive as bytes, pasted JSON as text; both must hash the same."""
+    """Uploads arrive as bytes, local files as text; both must hash the same."""
     text = '{"depth": 0.35}'
     assert file_fingerprint("s", text)["sha256"] == file_fingerprint("s", text.encode())["sha256"]
 

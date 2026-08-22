@@ -48,7 +48,6 @@ from core.settings_record import config_settings, file_fingerprint, settings_jso
 from core.solver import WELD_MIN_ANGLE_DEG
 from core.spec_source import (
     SPEC_LINK_NAME,
-    SpecMode,
     SpecOrigin,
     choose_spec_origin,
     list_spec_files,
@@ -67,17 +66,7 @@ from core.visualizer import (
 )
 
 APP_DIR = Path(__file__).parent
-DEMO_PROFILE_JSON = APP_DIR / "data" / "gate_profiles" / "demo_profile_gate.json"
 
-# Radio labels live here, next to the rest of the UI text; the logic in
-# ``core.spec_source`` switches on :class:`SpecMode` so that rewording one of
-# these cannot change which source a run reads from.
-SPEC_MODE_LABELS = {
-    SpecMode.DEMO: "デモプリセット（架空寸法）",
-    SpecMode.LOCAL: "ローカルから読込",
-    SpecMode.PASTE: "JSON貼り付け",
-}
-SPEC_MODE_BY_LABEL = {v: k for k, v in SPEC_MODE_LABELS.items()}
 #: Sentinel occupying index 0 of the spec dropdown. See
 #: ``choose_spec_origin`` for why the list does not default to a real file.
 SPEC_UNSELECTED = "— 未選択 —"
@@ -861,69 +850,51 @@ with st.sidebar:
         pg_inputs = _profile_gate_sidebar(_tag, symmetric=_sym, d=_defaults)
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
-            spec_mode_pg = SPEC_MODE_BY_LABEL[
-                st.radio(
-                    "スペック入力",
-                    list(SPEC_MODE_LABELS.values()),
-                    horizontal=True,
-                    key="spec_mode_pg",
-                    help=(
-                        "図面から抽出したゲートブロック深さ場の JSON スペックを読み込む。"
-                        "実図面由来のスペックはリポジトリに含めず、ここでローカル読込する運用。"
-                    ),
-                )
-            ]
+            st.caption(
+                "図面から抽出したゲートブロック深さ場の JSON スペックを読み込む。"
+                "実図面由来のスペックはリポジトリに含めず、ここでローカル読込する運用。"
+            )
             upload_pg = None
-            json_text_pg = ""
             local_spec_pg = None
 
-            if spec_mode_pg is SpecMode.LOCAL:
-                spec_root_pg = spec_root(APP_DIR)
-                # Read the uploader out of session state *before* drawing it, so
-                # the dropdown can be disabled in the same run the file lands
-                # rather than one rerun later. Streamlit writes widget state
-                # before rerunning the script, so this is the current value, not
-                # a stale one.
-                dropped_pg = st.session_state.get(SPEC_UPLOAD_KEY)
-                if spec_root_pg is not None:
-                    try:
-                        found_pg = list_spec_files(spec_root_pg)
-                    except OSError:
-                        # Never render the exception: its message carries the
-                        # absolute path, which names the customer and the job.
-                        found_pg = []
-                        st.error("スペックフォルダを読めない（権限またはマウント切れ）。")
-                    picked_pg = st.selectbox(
-                        "スペック",
-                        [SPEC_UNSELECTED] + [f.name for f in found_pg],
-                        index=0,
-                        disabled=dropped_pg is not None,
-                        key="spec_pick_pg",
-                        help="リポジトリ外のローカルフォルダにあるスペック。",
-                    )
-                    if picked_pg != SPEC_UNSELECTED:
-                        local_spec_pg = spec_root_pg / picked_pg
-                elif spec_link_exists(APP_DIR):
-                    # Something is at the link path but does not resolve to a
-                    # directory. Staying silent here would look identical to the
-                    # feature simply not existing, which is what the person who
-                    # set it up would least expect.
-                    st.caption(f"{SPEC_LINK_NAME} がディレクトリとして解決できない（リンク切れ）。")
-                upload_pg = st.file_uploader(
-                    "またはスペック JSON をドロップ", type=["json"], key=SPEC_UPLOAD_KEY
+            spec_root_pg = spec_root(APP_DIR)
+            # Read the uploader out of session state *before* drawing it, so
+            # the dropdown can be disabled in the same run the file lands
+            # rather than one rerun later. Streamlit writes widget state
+            # before rerunning the script, so this is the current value, not
+            # a stale one.
+            dropped_pg = st.session_state.get(SPEC_UPLOAD_KEY)
+            if spec_root_pg is not None:
+                try:
+                    found_pg = list_spec_files(spec_root_pg)
+                except OSError:
+                    # Never render the exception: its message carries the
+                    # absolute path, which names the customer and the job.
+                    found_pg = []
+                    st.error("スペックフォルダを読めない（権限またはマウント切れ）。")
+                picked_pg = st.selectbox(
+                    "スペック",
+                    [SPEC_UNSELECTED] + [f.name for f in found_pg],
+                    index=0,
+                    disabled=dropped_pg is not None,
+                    key="spec_pick_pg",
+                    help="リポジトリ外のローカルフォルダにあるスペック。",
                 )
-            elif spec_mode_pg is SpecMode.PASTE:
-                json_text_pg = st.text_area(
-                    "スペック JSON を貼り付け", height=240, placeholder='{\n  "name": ...\n}'
-                )
-            else:
-                st.caption(f"同梱デモ: {DEMO_PROFILE_JSON.name}（架空寸法）")
+                if picked_pg != SPEC_UNSELECTED:
+                    local_spec_pg = spec_root_pg / picked_pg
+            elif spec_link_exists(APP_DIR):
+                # Something is at the link path but does not resolve to a
+                # directory. Staying silent here would look identical to the
+                # feature simply not existing, which is what the person who
+                # set it up would least expect.
+                st.caption(f"{SPEC_LINK_NAME} がディレクトリとして解決できない（リンク切れ）。")
+            upload_pg = st.file_uploader(
+                "またはスペック JSON をドロップ", type=["json"], key=SPEC_UPLOAD_KEY
+            )
 
             spec_origin_pg = choose_spec_origin(
-                spec_mode_pg,
                 has_upload=upload_pg is not None,
                 has_local=local_spec_pg is not None,
-                has_paste=bool(json_text_pg.strip()),
             )
             # Say which source won, here in the sidebar where the controls are.
             # The geometry is built in the main column, so a notice raised there
@@ -1305,14 +1276,8 @@ def build_geometry() -> tuple[Geometry, dict]:
                 # File name only. The directory holding it names the customer
                 # and the job, and this record travels inside the results ZIP.
                 _spec_fp = file_fingerprint(local_spec_pg.name, _spec_text)
-            elif spec_origin_pg is SpecOrigin.PASTE:
-                _spec_text = json_text_pg
-                _spec_fp = file_fingerprint("(貼り付け)", _spec_text)
-            elif spec_origin_pg is SpecOrigin.DEMO:
-                _spec_text = DEMO_PROFILE_JSON.read_text(encoding="utf-8")
-                _spec_fp = file_fingerprint(DEMO_PROFILE_JSON.name, _spec_text)
             else:
-                st.warning("スペック JSON を一覧から選ぶか、アップロード／貼り付けしてください。")
+                st.warning("スペック JSON を一覧から選ぶか、アップロードしてください。")
                 st.stop()
             spec_pg = GateProfileSpec.from_json(_spec_text)
             plate_pg = ProfilePlateConfig(

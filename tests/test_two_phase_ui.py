@@ -132,10 +132,14 @@ def test_the_shot_volume_defaults_to_the_cavity_volume_and_follows_the_geometry(
     """The default shot is exactly the final cavity volume (a complete fill),
     tracks geometry changes while untouched, and stays put once edited."""
     at = _app()
-    geom = at.session_state["mfs_geom"] if "mfs_geom" in at.session_state else None
-    assert geom is None  # nothing has run yet; the default must not need a run
+    assert "mfs_geom" not in at.session_state  # the default must not need a run
     v0 = at.number_input(key="two_phase_shot_volume").value
     assert v0 > 0.01
+    # unrounded: a value rounded down would be a (tiny) short shot, not a
+    # complete fill — the solver compares against the raw volume (Codex P2)
+    at.button[0].click().run()
+    assert v0 == at.session_state["mfs_geom"].volume_cm3()
+    assert at.session_state["mfs_two_phase_result"].metadata["final_complete"]
     # change the plate width → new cavity volume → default follows
     _width(at).set_value(200.0)
     at.run()

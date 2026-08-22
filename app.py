@@ -1312,7 +1312,9 @@ with st.sidebar:
             if two_phase_on:
                 # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
                 # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
-                _v_cav = round(geom.volume_cm3(), 2)
+                # 丸めない: solver は素の体積と比較するので、下に丸めた既定は
+                # 「完全充填ちょうど」でなく極小のショートショットになる（Codex P2）。
+                _v_cav = float(geom.volume_cm3())
                 _prev_auto = st.session_state.get("mfs_shot_volume_auto")
                 _current = st.session_state.get("two_phase_shot_volume")
                 if _prev_auto is None or _current is None or _current == _prev_auto:

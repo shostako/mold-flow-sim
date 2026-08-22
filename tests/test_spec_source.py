@@ -25,7 +25,6 @@ import core.settings_record as settings_record
 import core.spec_source as spec_source
 from core.spec_source import (
     SPEC_LINK_NAME,
-    SpecMode,
     SpecOrigin,
     choose_spec_origin,
     list_spec_files,
@@ -38,7 +37,6 @@ APP = REPO / "app.py"
 DEMO_SPEC = REPO / "data" / "gate_profiles" / "demo_profile_gate.json"
 
 PROFILE_GATE_LABEL = "Profile gate (JSONスペック)"
-LOCAL_LABEL = "ローカルから読込"
 UNSELECTED = "— 未選択 —"
 
 needs_non_root = pytest.mark.skipif(
@@ -316,29 +314,17 @@ def test_list_spec_files_raises_rather_than_reporting_empty(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("mode", "flags", "expected"),
+    ("flags", "expected"),
     [
-        (SpecMode.DEMO, {}, SpecOrigin.DEMO),
-        # The demo is unconditional: no other source can displace it.
-        (SpecMode.DEMO, {"has_upload": True, "has_local": True}, SpecOrigin.DEMO),
-        (SpecMode.PASTE, {"has_paste": True}, SpecOrigin.PASTE),
-        (SpecMode.PASTE, {}, SpecOrigin.NONE),
-        (SpecMode.PASTE, {"has_upload": True}, SpecOrigin.NONE),
-        (SpecMode.LOCAL, {}, SpecOrigin.NONE),
-        (SpecMode.LOCAL, {"has_local": True}, SpecOrigin.LOCAL),
-        (SpecMode.LOCAL, {"has_upload": True}, SpecOrigin.UPLOAD),
+        ({}, SpecOrigin.NONE),
+        ({"has_local": True}, SpecOrigin.LOCAL),
+        ({"has_upload": True}, SpecOrigin.UPLOAD),
         # The conflict the notice exists to report.
-        (SpecMode.LOCAL, {"has_upload": True, "has_local": True}, SpecOrigin.UPLOAD),
-        (SpecMode.LOCAL, {"has_paste": True}, SpecOrigin.NONE),
+        ({"has_upload": True, "has_local": True}, SpecOrigin.UPLOAD),
     ],
 )
-def test_choose_spec_origin(mode: SpecMode, flags: dict, expected: SpecOrigin) -> None:
-    assert choose_spec_origin(mode, **flags) is expected
-
-
-def test_choose_spec_origin_rejects_an_unknown_mode() -> None:
-    with pytest.raises(ValueError):
-        choose_spec_origin("local")  # type: ignore[arg-type]
+def test_choose_spec_origin(flags: dict, expected: SpecOrigin) -> None:
+    assert choose_spec_origin(**flags) is expected
 
 
 def test_choose_spec_origin_does_no_io(tmp_path: Path, monkeypatch) -> None:
@@ -355,7 +341,7 @@ def test_choose_spec_origin_does_no_io(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "exists", explode)
     monkeypatch.setattr(Path, "is_dir", explode)
     monkeypatch.setattr(Path, "glob", explode)
-    assert choose_spec_origin(SpecMode.LOCAL, has_upload=True) is SpecOrigin.UPLOAD
+    assert choose_spec_origin(has_upload=True) is SpecOrigin.UPLOAD
 
 
 # --------------------------------------------------------------------------
@@ -381,7 +367,7 @@ def spec_dir(tmp_path: Path, monkeypatch) -> Path:
 
 
 def _profile_gate_app(timeout: float = 60.0) -> AppTest:
-    """Run ``app.py`` with the Profile gate input and the local-load mode.
+    """Run ``app.py`` with the Profile gate input.
 
     Widgets are addressed by key rather than by position: the sidebar holds
     several radios and selectboxes, so an index would silently start pointing
@@ -390,7 +376,6 @@ def _profile_gate_app(timeout: float = 60.0) -> AppTest:
     at = AppTest.from_file(str(APP), default_timeout=timeout)
     at.run()
     at.radio("geom_source").set_value(PROFILE_GATE_LABEL).run()
-    at.radio("spec_mode_pg").set_value(LOCAL_LABEL).run()
     return at
 
 

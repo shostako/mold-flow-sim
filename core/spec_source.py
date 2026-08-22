@@ -145,8 +145,8 @@ def choose_spec_origin(
 ) -> SpecOrigin:
     """Decide which source a run reads from. Performs no IO.
 
-    Both a dropped file and a dropdown selection
-    can be live at once, and an upload wins: it is the more recent explicit
+    Both a dropped file and a dropdown selection can be live at once, and an
+    upload wins: it is the more recent explicit
     act. The caller must show which one was used -- a precedence rule that
     silently discards the other input is the failure this ordering invites.
 

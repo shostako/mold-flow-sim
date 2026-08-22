@@ -122,3 +122,47 @@ def test_a_wall_cooling_model_skips_two_phase_with_a_warning():
     # the skip reason survives in session_state for the results pane
     assert "併用不可" in at.session_state["mfs_two_phase_skip"]
     assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {"enabled": False}
+
+
+def _width(at: AppTest):
+    return [s for s in at.slider if str(s.label).startswith("製品幅")][0]
+
+
+def test_the_shot_volume_defaults_to_the_cavity_volume_and_follows_the_geometry():
+    """The default shot is exactly the final cavity volume (a complete fill),
+    tracks geometry changes while untouched, and stays put once edited."""
+    at = _app()
+    geom = at.session_state["mfs_geom"] if "mfs_geom" in at.session_state else None
+    assert geom is None  # nothing has run yet; the default must not need a run
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    assert v0 > 0.01
+    # change the plate width → new cavity volume → default follows
+    _width(at).set_value(200.0)
+    at.run()
+    v1 = at.number_input(key="two_phase_shot_volume").value
+    assert v1 != v0
+    assert v1 == at.session_state["mfs_shot_volume_auto"]
+    # the user edits → a further geometry change must not clobber it
+    at.number_input(key="two_phase_shot_volume").set_value(v1 / 2).run()
+    _width(at).set_value(300.0)
+    at.run()
+    assert at.number_input(key="two_phase_shot_volume").value == v1 / 2
+    assert at.session_state["mfs_shot_volume_auto"] == v0
+
+
+def test_the_two_phase_run_ships_a_scrubber_and_its_standalone_player():
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="icm_on").set_value(True)
+    at.checkbox(key="two_phase_on").set_value(True).run()
+    at.number_input(key="two_phase_shot_volume").set_value(4.5)
+    at.button[0].click().run()
+    assert not at.exception
+    html = at.session_state["mfs_two_phase_player_html"]
+    assert html and "data:image/png;base64," in html
+    assert at.session_state["mfs_two_phase_player_height"] > 0
+    with zipfile.ZipFile(io.BytesIO(at.session_state["mfs_zip_bytes"])) as zf:
+        names = set(zf.namelist())
+        page = zf.read("two_phase_player.html").decode("utf-8")
+    assert "two_phase_player.html" in names
+    assert page.startswith("<!doctype html>") and '<meta charset="utf-8">' in page

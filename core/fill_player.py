@@ -65,12 +65,17 @@ def build_fill_player_html(
     *,
     fps: int = 8,
     autoplay: bool = True,
+    labels: Sequence[str] | None = None,
 ) -> str:
     """Build a standalone HTML player for the fill-front frames.
 
     ``frame_paths``, ``times_s`` and ``fill_fractions`` must be the same
     length and in frame order (use ``visualizer.fill_frame_times`` /
     ``fill_frame_fractions`` so the readout matches the rendered PNG).
+
+    ``labels`` replaces the default ``t = … s   充填 … %`` readout with one
+    string per frame. The two-phase animation uses it: its second phase has
+    no clock, only an order, so a time readout would be a lie there.
     """
     n = len(frame_paths)
     if n == 0:
@@ -80,6 +85,8 @@ def build_fill_player_html(
             f"frame_paths ({n}), times_s ({len(times_s)}) and "
             f"fill_fractions ({len(fill_fractions)}) must have equal length"
         )
+    if labels is not None and len(labels) != n:
+        raise ValueError(f"labels ({len(labels)}) must match frame_paths ({n})")
     if fps <= 0:
         raise ValueError(f"fps must be positive, got {fps}")
 
@@ -91,6 +98,7 @@ def build_fill_player_html(
             "fills": [float(f) for f in fill_fractions],
             "fps": int(fps),
             "autoplay": bool(autoplay),
+            "labels": [str(x) for x in labels] if labels is not None else None,
         }
     )
     native_w = _native_size(frame_paths[0])[0]
@@ -158,8 +166,9 @@ _TEMPLATE = """
     img.src=D.frames[idx];
     seek.value=idx;
     cnt.textContent=(idx+1)+' / '+N;
-    read.textContent='t = '+D.times[idx].toFixed(3)+' s   充填 '
-                     +(D.fills[idx]*100).toFixed(1)+' %';
+    read.textContent=D.labels ? D.labels[idx]
+                     : 't = '+D.times[idx].toFixed(3)+' s   充填 '
+                       +(D.fills[idx]*100).toFixed(1)+' %';
   }
   function stop(){ if(timer){clearInterval(timer);timer=null;} play.innerHTML='&#9654;'; }
   function start(){

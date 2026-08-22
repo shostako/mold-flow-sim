@@ -237,3 +237,18 @@ def test_standalone_leaves_no_template_placeholder(fragment):
     assert "__TITLE__" not in doc
     assert "__HEADING__" not in doc
     assert "__BODY__" not in doc
+
+
+def test_player_labels_replace_the_default_readout(result, tmp_path):
+    """Per-frame labels ride in the payload; the default readout stays ``null``
+    so the page script can tell the two modes apart."""
+    n = 4
+    paths = export_frames(result, tmp_path / "frames", num_frames=n)
+    zeros = [0.0] * n
+    plain = _payload(build_fill_player_html(paths, zeros, zeros))
+    assert plain["labels"] is None
+    labels = [f"step {i}" for i in range(n)]
+    d = _payload(build_fill_player_html(paths, zeros, zeros, labels=labels))
+    assert d["labels"] == labels
+    with pytest.raises(ValueError, match="labels"):
+        build_fill_player_html(paths, zeros, zeros, labels=labels[:-1])

@@ -1276,21 +1276,88 @@ def render_two_phase_animation(
     _draw_gate_markers(ax, result)
     T_inj = result.injection_time_s
 
-    def _title(fr) -> str:
-        if fr.phase == "injection":
-            return f"Injection  t = {fr.value:.3f} s / {T_inj:.3f} s"
-        return f"Compression (order only)  advance = {fr.value:.0%}"
-
-    ax.set_title(_title(frames[0]))
+    ax.set_title(_two_phase_frame_title(frames[0], T_inj))
     _two_phase_finalize_layout(fig)
 
     def _update(i):
         fr = frames[i]
         im.set_data(_two_phase_rgba(result, fr.injection_filled, fr.compression_filled))
-        ax.set_title(_title(fr))
+        ax.set_title(_two_phase_frame_title(fr, T_inj))
         return [im]
 
     anim = FuncAnimation(fig, _update, frames=len(frames), blit=False)
     anim.save(output_path, writer=PillowWriter(fps=fps))
     plt.close(fig)
     return output_path
+
+
+def _two_phase_frame_title(fr, T_inj: float) -> str:
+    if fr.phase == "injection":
+        return f"Injection  t = {fr.value:.3f} s / {T_inj:.3f} s"
+    return f"Compression (order only)  advance = {fr.value:.0%}"
+
+
+def two_phase_frame_labels(result, num_frames: int) -> list[str]:
+    """Per-frame readout for the scrubber, on the same frame series as the
+    GIF and the PNG frames (``frame_states`` is the single source).
+
+    Injection frames read a real time; compression frames read an advance
+    fraction, because the model has no compression clock — a ``t = …`` there
+    would invent one. Both carry the cavity fill fraction.
+    """
+    from .two_phase import frame_states
+
+    cells = max(int(result.geometry.mask.sum()), 1)
+    T_inj = result.injection_time_s
+    out: list[str] = []
+    for fr in frame_states(result, num_frames=num_frames):
+        filled = (fr.injection_filled | fr.compression_filled).sum() / cells
+        if fr.phase == "injection":
+            head = f"射出  t = {fr.value:.3f} s / {T_inj:.3f} s"
+        else:
+            head = f"圧縮（順序のみ）  前進 {fr.value * 100:.0f} %"
+        out.append(f"{head}   充填 {filled * 100:.1f} %")
+    return out
+
+
+def export_two_phase_frames(
+    result,
+    output_dir: str | Path,
+    num_frames: int = 24,
+) -> list[Path]:
+    """PNG snapshots of the two-phase history, one per ``frame_states`` frame.
+
+    Same figure, same titles and same frame series as
+    :func:`render_two_phase_animation`, so frame ``k`` of the scrubber is the
+    GIF's frame ``k``. The figure is built once and only the image data and
+    title change between saves.
+    """
+    from .two_phase import frame_states
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    frames = frame_states(result, num_frames=num_frames)
+    T_inj = result.injection_time_s
+
+    fig, ax = _build_two_phase_figure(result)
+    im = ax.imshow(
+        _two_phase_rgba(result, frames[0].injection_filled, frames[0].compression_filled),
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        zorder=_Z_FIELD,
+    )
+    _draw_gate_markers(ax, result)
+    ax.set_title(_two_phase_frame_title(frames[0], T_inj))
+    _two_phase_finalize_layout(fig)
+
+    paths: list[Path] = []
+    for i, fr in enumerate(frames):
+        im.set_data(_two_phase_rgba(result, fr.injection_filled, fr.compression_filled))
+        ax.set_title(_two_phase_frame_title(fr, T_inj))
+        path = output_dir / f"frame_{i:03d}.png"
+        fig.savefig(path)
+        paths.append(path)
+    plt.close(fig)
+    return paths

@@ -47,7 +47,6 @@ from pathlib import Path
 
 __all__ = [
     "SPEC_LINK_NAME",
-    "SpecMode",
     "SpecOrigin",
     "choose_spec_origin",
     "list_spec_files",
@@ -61,26 +60,11 @@ __all__ = [
 SPEC_LINK_NAME = "local_specs"
 
 
-class SpecMode(Enum):
-    """Which input the user picked in the spec-source radio.
-
-    The UI labels live in ``app.py``; this enum is what the logic switches on
-    so that rewording a label cannot change behaviour. The previous code
-    branched on ``label.startswith(...)``, which ties the two together.
-    """
-
-    DEMO = "demo"
-    LOCAL = "local"
-    PASTE = "paste"
-
-
 class SpecOrigin(Enum):
     """Where a run's spec text should be read from."""
 
-    DEMO = "demo"
     UPLOAD = "upload"
     LOCAL = "local"
-    PASTE = "paste"
     NONE = "none"
 
 
@@ -155,15 +139,13 @@ def list_spec_files(root: Path) -> list[Path]:
 
 
 def choose_spec_origin(
-    mode: SpecMode,
     *,
     has_upload: bool = False,
     has_local: bool = False,
-    has_paste: bool = False,
 ) -> SpecOrigin:
     """Decide which source a run reads from. Performs no IO.
 
-    Within :attr:`SpecMode.LOCAL` both a dropped file and a dropdown selection
+    Both a dropped file and a dropdown selection
     can be live at once, and an upload wins: it is the more recent explicit
     act. The caller must show which one was used -- a precedence rule that
     silently discards the other input is the failure this ordering invites.
@@ -174,14 +156,8 @@ def choose_spec_origin(
     hit this rule), and would read a customer spec on page load, since the
     geometry is built on every rerun rather than behind the run button.
     """
-    if mode is SpecMode.DEMO:
-        return SpecOrigin.DEMO
-    if mode is SpecMode.PASTE:
-        return SpecOrigin.PASTE if has_paste else SpecOrigin.NONE
-    if mode is SpecMode.LOCAL:
-        if has_upload:
-            return SpecOrigin.UPLOAD
-        if has_local:
-            return SpecOrigin.LOCAL
-        return SpecOrigin.NONE
-    raise ValueError(f"unknown spec mode: {mode!r}")
+    if has_upload:
+        return SpecOrigin.UPLOAD
+    if has_local:
+        return SpecOrigin.LOCAL
+    return SpecOrigin.NONE

@@ -59,10 +59,12 @@ from core.version import build_label
 from core.visualizer import (
     ISOCHRONE_LEVELS,
     THICKNESS_CMAP,
+    export_two_phase_frames,
     render_layer_grid,
     render_short_shot_map,
     render_two_phase_animation,
     render_two_phase_map,
+    two_phase_frame_labels,
 )
 
 APP_DIR = Path(__file__).parent
@@ -757,6 +759,92 @@ def _build_film_gate(name: str, v: dict, source: str) -> tuple[Geometry, dict]:
 
 
 # ----------------------- sidebar: inputs -----------------------
+def build_geometry() -> tuple[Geometry, dict]:
+    """Return the geometry and a record of the inputs that produced it.
+
+    The settings travel with the results ZIP so a downloaded run can be
+    reproduced without measuring the images and solving for the volume.
+    """
+    if geom_source.startswith("Direct gate"):
+        try:
+            cfg_dg = DirectGateConfig(
+                plate_w_mm=plate_w,
+                plate_h_mm=plate_h,
+                plate_thk_mm=plate_thk,
+                gate_diameter_mm=gate_diameter,
+                gate_offset_mm=gate_offset,
+                cell_size_mm=cell_size,
+                plate_split_height_mm=plate_split_dg if plate_split_dg > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_thk_dg if plate_split_dg > 0 else None,
+                plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
+            )
+            return build_direct_gate_geometry(cfg_dg), config_settings(geom_source, cfg_dg)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
+    if geom_source in _FILM_GATES:
+        try:
+            return _build_film_gate(_FILM_GATES[geom_source][3], pg_inputs, geom_source)
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
+    if geom_source.startswith("Profile gate"):
+        try:
+            if spec_origin_pg is SpecOrigin.UPLOAD:
+                _spec_text = upload_pg.read().decode("utf-8")
+                _spec_fp = file_fingerprint(upload_pg.name, _spec_text)
+            elif spec_origin_pg is SpecOrigin.LOCAL:
+                _spec_text = local_spec_pg.read_text(encoding="utf-8")
+                # File name only. The directory holding it names the customer
+                # and the job, and this record travels inside the results ZIP.
+                _spec_fp = file_fingerprint(local_spec_pg.name, _spec_text)
+            else:
+                st.warning("スペック JSON を一覧から選ぶか、アップロードしてください。")
+                st.stop()
+            spec_pg = GateProfileSpec.from_json(_spec_text)
+            plate_pg = ProfilePlateConfig(
+                plate_w_mm=plate_w_pg,
+                plate_h_mm=plate_h_pg,
+                plate_thk_mm=plate_thk_pg,
+                plate_split_height_mm=plate_split_pg if plate_split_pg > 0 else 0.0,
+                plate_lower_thk_mm=plate_lower_pg if plate_split_pg > 0 else None,
+                plate_upper_thk_mm=plate_upper_pg if plate_split_pg > 0 else None,
+            )
+            return build_profile_gate_geometry(
+                spec_pg, plate_pg, cell_size_mm=cell_size_pg
+            ), config_settings(
+                geom_source,
+                plate_pg,
+                cell_size_mm=cell_size_pg,
+                # The spec usually comes off a real drawing and this ZIP is
+                # made to be forwarded, so record which file it was -- not
+                # what was in it. That rules out the spec's own ``name``
+                # field too: it is content, and it is exactly the field that
+                # carries a part or customer identifier.
+                spec=_spec_fp,
+            )
+        except json.JSONDecodeError as exc:
+            st.error(f"JSON構文エラー: {exc}")
+            st.stop()
+        except UnicodeDecodeError:
+            # Before ValueError, which it subclasses.
+            st.error("スペックファイルを UTF-8 として読めない。")
+            st.stop()
+        except OSError:
+            # Deliberately drops the exception. Its message carries the absolute
+            # path, and ``client.showErrorDetails`` defaults to "full", so an
+            # uncaught OSError would print that path plus a traceback into the
+            # page -- the same directory name the fingerprint is careful to omit.
+            st.error("スペックファイルを読めない（権限またはマウント切れ）。")
+            st.stop()
+        except ValueError as exc:
+            st.error(f"パラメータ不整合: {exc}")
+            st.stop()
+    # Every branch above returns, so this is reachable only if a new entry is
+    # added to the input radio without a matching branch here.
+    raise AssertionError(f"no geometry builder for input: {geom_source!r}")
+
+
 with st.sidebar:
     _hdr_col, _run_col = st.columns([1.4, 1], vertical_alignment="bottom")
     with _hdr_col:
@@ -1140,6 +1228,12 @@ with st.sidebar:
             comp_stroke = None
             comp_frac = 0.0
 
+    # 形状はここで組む（従来はメインカラム）。計量体積の既定値を現在の
+    # キャビティ体積に合わせるには、ショートショット欄を描く前に形状が要る。
+    # build_geometry() は不整合で st.error + st.stop するので、その場合は
+    # 入力欄の隣にエラーが出て結果側は描かれない。
+    geom, geom_settings = build_geometry()
+
     with st.expander("ショートショット（計量制限）", expanded=False):
         # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
         # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
@@ -1164,25 +1258,29 @@ with st.sidebar:
                 "現在の設定では二相解析はスキップされる。"
             )
         if two_phase_on:
+            # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
+            # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
+            _v_cav = round(geom.volume_cm3(), 2)
+            _prev_auto = st.session_state.get("mfs_shot_volume_auto")
+            _current = st.session_state.get("two_phase_shot_volume")
+            if _prev_auto is None or _current is None or _current == _prev_auto:
+                st.session_state["two_phase_shot_volume"] = _v_cav
+            st.session_state["mfs_shot_volume_auto"] = _v_cav
             shot_volume_cm3 = st.number_input(
                 "計量体積 V_shot [cm³]",
                 min_value=0.01,
-                value=5.0,
                 step=0.1,
                 key="two_phase_shot_volume",
                 help=(
-                    "実機の計量値（ショット体積）。キャビティ体積との比較は"
-                    "実行後の結果ペインに出る。"
+                    "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
+                    "体積（完全充填ちょうど）。減らすとショートショットになる。"
                 ),
             )
-            _hint_geom = st.session_state.get("mfs_geom")
-            if _hint_geom is not None:
-                _v_fin = _hint_geom.volume_cm3()
-                _hint = f"参考（前回実行の形状）: 最終キャビティ体積 {_v_fin:.2f} cm³"
-                if icm and comp_stroke is not None:
-                    _v_open = _v_fin + comp_stroke * _hint_geom.compression_area_mm2() / 1000.0
-                    _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
-                st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
+            _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
+            if icm and comp_stroke is not None:
+                _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
+                _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
+            st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
         else:
             shot_volume_cm3 = None
 
@@ -1237,97 +1335,12 @@ with st.sidebar:
 
 
 # ----------------------- main panel -----------------------
-def build_geometry() -> tuple[Geometry, dict]:
-    """Return the geometry and a record of the inputs that produced it.
-
-    The settings travel with the results ZIP so a downloaded run can be
-    reproduced without measuring the images and solving for the volume.
-    """
-    if geom_source.startswith("Direct gate"):
-        try:
-            cfg_dg = DirectGateConfig(
-                plate_w_mm=plate_w,
-                plate_h_mm=plate_h,
-                plate_thk_mm=plate_thk,
-                gate_diameter_mm=gate_diameter,
-                gate_offset_mm=gate_offset,
-                cell_size_mm=cell_size,
-                plate_split_height_mm=plate_split_dg if plate_split_dg > 0 else 0.0,
-                plate_lower_thk_mm=plate_lower_thk_dg if plate_split_dg > 0 else None,
-                plate_upper_thk_mm=plate_upper_thk_dg if plate_split_dg > 0 else None,
-            )
-            return build_direct_gate_geometry(cfg_dg), config_settings(geom_source, cfg_dg)
-        except ValueError as exc:
-            st.error(f"パラメータ不整合: {exc}")
-            st.stop()
-    if geom_source in _FILM_GATES:
-        try:
-            return _build_film_gate(_FILM_GATES[geom_source][3], pg_inputs, geom_source)
-        except ValueError as exc:
-            st.error(f"パラメータ不整合: {exc}")
-            st.stop()
-    if geom_source.startswith("Profile gate"):
-        try:
-            if spec_origin_pg is SpecOrigin.UPLOAD:
-                _spec_text = upload_pg.read().decode("utf-8")
-                _spec_fp = file_fingerprint(upload_pg.name, _spec_text)
-            elif spec_origin_pg is SpecOrigin.LOCAL:
-                _spec_text = local_spec_pg.read_text(encoding="utf-8")
-                # File name only. The directory holding it names the customer
-                # and the job, and this record travels inside the results ZIP.
-                _spec_fp = file_fingerprint(local_spec_pg.name, _spec_text)
-            else:
-                st.warning("スペック JSON を一覧から選ぶか、アップロードしてください。")
-                st.stop()
-            spec_pg = GateProfileSpec.from_json(_spec_text)
-            plate_pg = ProfilePlateConfig(
-                plate_w_mm=plate_w_pg,
-                plate_h_mm=plate_h_pg,
-                plate_thk_mm=plate_thk_pg,
-                plate_split_height_mm=plate_split_pg if plate_split_pg > 0 else 0.0,
-                plate_lower_thk_mm=plate_lower_pg if plate_split_pg > 0 else None,
-                plate_upper_thk_mm=plate_upper_pg if plate_split_pg > 0 else None,
-            )
-            return build_profile_gate_geometry(
-                spec_pg, plate_pg, cell_size_mm=cell_size_pg
-            ), config_settings(
-                geom_source,
-                plate_pg,
-                cell_size_mm=cell_size_pg,
-                # The spec usually comes off a real drawing and this ZIP is
-                # made to be forwarded, so record which file it was -- not
-                # what was in it. That rules out the spec's own ``name``
-                # field too: it is content, and it is exactly the field that
-                # carries a part or customer identifier.
-                spec=_spec_fp,
-            )
-        except json.JSONDecodeError as exc:
-            st.error(f"JSON構文エラー: {exc}")
-            st.stop()
-        except UnicodeDecodeError:
-            # Before ValueError, which it subclasses.
-            st.error("スペックファイルを UTF-8 として読めない。")
-            st.stop()
-        except OSError:
-            # Deliberately drops the exception. Its message carries the absolute
-            # path, and ``client.showErrorDetails`` defaults to "full", so an
-            # uncaught OSError would print that path plus a traceback into the
-            # page -- the same directory name the fingerprint is careful to omit.
-            st.error("スペックファイルを読めない（権限またはマウント切れ）。")
-            st.stop()
-        except ValueError as exc:
-            st.error(f"パラメータ不整合: {exc}")
-            st.stop()
-    # Every branch above returns, so this is reachable only if a new entry is
-    # added to the input radio without a matching branch here.
-    raise AssertionError(f"no geometry builder for input: {geom_source!r}")
 
 
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
     st.subheader("成形品設計図")
-    geom, geom_settings = build_geometry()
     fig_data = np.where(geom.mask, geom.thickness_mm, np.nan)
     st.write(
         f"格子: {geom.nx} × {geom.ny}, セル {geom.cell_size_mm} mm, 体積 {geom.volume_cm3():.2f} cm³"
@@ -1569,6 +1582,8 @@ if do_run:
 
         _two_phase_path: Path | None = None
         _two_phase_gif_path: Path | None = None
+        _two_phase_player_html: str | None = None
+        _two_phase_player_height: int | None = None
         if two_phase_result is not None:
             _two_phase_path = render_two_phase_map(
                 two_phase_result, _tmp_dir / "two_phase_short_shot.png"
@@ -1579,6 +1594,20 @@ if do_run:
                 num_frames=num_frames,
                 fps=8,
             )
+            # 充填先端と同じスクラバ。フレーム系列は frame_states が単一ソース
+            # なので GIF のコマ k とプレイヤーのコマ k は同じ状態を指す。
+            _two_phase_frame_paths = export_two_phase_frames(
+                two_phase_result, _tmp_dir / "two_phase_frames", num_frames=num_frames
+            )
+            _n_tp = len(_two_phase_frame_paths)
+            _two_phase_player_html = build_fill_player_html(
+                _two_phase_frame_paths,
+                [0.0] * _n_tp,
+                [0.0] * _n_tp,
+                fps=8,
+                labels=two_phase_frame_labels(two_phase_result, num_frames),
+            )
+            _two_phase_player_height = fill_player_height_px(_two_phase_frame_paths)
 
         _zip_buf_run = io.BytesIO()
         with zipfile.ZipFile(_zip_buf_run, "w", zipfile.ZIP_DEFLATED) as _zf_run:
@@ -1618,6 +1647,15 @@ if do_run:
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
             )
             if two_phase_result is not None:
+                if _two_phase_player_html is not None:
+                    _zf_run.writestr(
+                        "two_phase_player.html",
+                        wrap_standalone_html(
+                            _two_phase_player_html,
+                            title="二相ショートショット アニメーション",
+                            note=build_label(),
+                        ),
+                    )
                 _zf_run.writestr(
                     "two_phase_metadata.json",
                     json.dumps(
@@ -1647,6 +1685,8 @@ if do_run:
         st.session_state["mfs_layer_short_shot_path"] = _layer_short_shot_path
         st.session_state["mfs_two_phase_path"] = _two_phase_path
         st.session_state["mfs_two_phase_gif_path"] = _two_phase_gif_path
+        st.session_state["mfs_two_phase_player_html"] = _two_phase_player_html
+        st.session_state["mfs_two_phase_player_height"] = _two_phase_player_height
         st.session_state["mfs_two_phase_result"] = two_phase_result
         st.session_state["mfs_two_phase_skip"] = two_phase_skip_reason
         st.session_state["mfs_zip_bytes"] = _zip_buf_run.getvalue()
@@ -1701,6 +1741,8 @@ if "mfs_result" in st.session_state:
     layer_short_shot_path = st.session_state.get("mfs_layer_short_shot_path")
     two_phase_path = st.session_state.get("mfs_two_phase_path")
     two_phase_gif_path = st.session_state.get("mfs_two_phase_gif_path")
+    two_phase_player_html = st.session_state.get("mfs_two_phase_player_html")
+    two_phase_player_height = st.session_state.get("mfs_two_phase_player_height")
     two_phase_result = st.session_state.get("mfs_two_phase_result")
     two_phase_skip = st.session_state.get("mfs_two_phase_skip")
     _zip_bytes = st.session_state["mfs_zip_bytes"]
@@ -1783,7 +1825,14 @@ if "mfs_result" in st.session_state:
                     st.info("この計量では圧縮後に完全充填する（ショートショットにならない）。")
                 if two_phase_gif_path is not None:
                     st.markdown("**二相アニメーション**")
-                    st.image(str(two_phase_gif_path))
+                    if two_phase_player_html:
+                        components.html(
+                            two_phase_player_html,
+                            height=two_phase_player_height,
+                            scrolling=False,
+                        )
+                    else:
+                        st.image(str(two_phase_gif_path))
                     st.caption(
                         "射出相は実時間で進む。圧縮相は前進の順序のみ"
                         "（モデルは圧縮の時間スケールを持たない）。"

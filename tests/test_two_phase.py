@@ -578,3 +578,35 @@ def test_the_animation_renders_the_requested_frames(tmp_path):
     assert path.exists() and path.stat().st_size > 0
     with Image.open(path) as im:
         assert im.n_frames == 10
+
+
+def test_frame_pngs_and_labels_ride_the_same_series_as_the_gif(tmp_path):
+    """The scrubber's frame k must be the GIF's frame k: PNG count, label
+    count and GIF frame count all come from one ``frame_states`` call."""
+    from PIL import Image
+
+    from core.two_phase import frame_states
+    from core.visualizer import (
+        export_two_phase_frames,
+        render_two_phase_animation,
+        two_phase_frame_labels,
+    )
+
+    res = _stroked_strip_result()
+    n = 10
+    frames = frame_states(res, num_frames=n)
+    paths = export_two_phase_frames(res, tmp_path / "frames", num_frames=n)
+    labels = two_phase_frame_labels(res, n)
+    gif = render_two_phase_animation(res, tmp_path / "two_phase.gif", num_frames=n)
+    with Image.open(gif) as im:
+        assert im.n_frames == len(frames) == len(paths) == len(labels) == n
+    assert all(p.exists() and p.stat().st_size > 0 for p in paths)
+    # injection frames read a clock, compression frames read an order — never
+    # a fabricated time — and the fill fraction never goes backwards
+    n_inj = sum(fr.phase == "injection" for fr in frames)
+    assert all("射出" in lab and " s" in lab for lab in labels[:n_inj])
+    assert all("圧縮" in lab and " s" not in lab for lab in labels[n_inj:])
+    fills = [float(lab.rsplit("充填 ", 1)[1].rstrip(" %")) for lab in labels]
+    assert fills == sorted(fills) and fills[-1] == pytest.approx(
+        100.0 * res.final_mask.sum() / res.geometry.mask.sum(), abs=0.05
+    )

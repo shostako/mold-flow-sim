@@ -1228,61 +1228,11 @@ with st.sidebar:
             comp_stroke = None
             comp_frac = 0.0
 
-    # 形状はここで組む（従来はメインカラム）。計量体積の既定値を現在の
-    # キャビティ体積に合わせるには、ショートショット欄を描く前に形状が要る。
-    # build_geometry() は不整合で st.error + st.stop するので、その場合は
-    # 入力欄の隣にエラーが出て結果側は描かれない。
-    geom, geom_settings = build_geometry()
-
-    with st.expander("ショートショット（計量制限）", expanded=False):
-        # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
-        # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
-        # 線形求解2回・時間積分なし。実機の計量値をそのまま入れて
-        # 段階ショートショットの現物形状と直接比較する用途。
-        two_phase_on = st.checkbox(
-            "二相ショートショット解析ON",
-            value=True,
-            key="two_phase_on",
-            help=(
-                "計量を意図的に絞ったショートショットの最終形状を予測する。"
-                "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
-                "溶融プールを前進、体積保存）の二相。壁面冷却モデル『なし』専用"
-                "（体積律速のショートショットは凍結の物理を含まない）。"
-            ),
-        )
-        if two_phase_on and wall_model != "none":
-            # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
-            # 出ない」に見える。設定と同じ場所に常時出す。
-            st.warning(
-                "壁面冷却モデルが『なし』のときだけ実行される。"
-                "現在の設定では二相解析はスキップされる。"
-            )
-        if two_phase_on:
-            # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
-            # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
-            _v_cav = round(geom.volume_cm3(), 2)
-            _prev_auto = st.session_state.get("mfs_shot_volume_auto")
-            _current = st.session_state.get("two_phase_shot_volume")
-            if _prev_auto is None or _current is None or _current == _prev_auto:
-                st.session_state["two_phase_shot_volume"] = _v_cav
-            st.session_state["mfs_shot_volume_auto"] = _v_cav
-            shot_volume_cm3 = st.number_input(
-                "計量体積 V_shot [cm³]",
-                min_value=0.01,
-                step=0.1,
-                key="two_phase_shot_volume",
-                help=(
-                    "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
-                    "体積（完全充填ちょうど）。減らすとショートショットになる。"
-                ),
-            )
-            _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
-            if icm and comp_stroke is not None:
-                _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
-                _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
-            st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
-        else:
-            shot_volume_cm3 = None
+    # ショートショット欄はこの位置に出すが、中身は版表示の後で埋める:
+    # build_geometry() は不整合で st.stop() するので、サイドバー内で先に呼ぶと
+    # 「出力」欄と版表示がエラーのたびに消える（版表示をサイドバーに置いた理由
+    # そのもの）。container は生成位置に描画されるので見た目の順序は変わらない。
+    _short_shot_slot = st.container()
 
     with st.expander("出力", expanded=False):
         num_frames = st.slider("アニメーションフレーム数", 12, 60, 60)
@@ -1332,6 +1282,59 @@ with st.sidebar:
     # screenshots an error and asks which build produced it.
     st.divider()
     st.caption(build_label())
+
+    with _short_shot_slot:
+        geom, geom_settings = build_geometry()
+
+        with st.expander("ショートショット（計量制限）", expanded=False):
+            # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
+            # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
+            # 線形求解2回・時間積分なし。実機の計量値をそのまま入れて
+            # 段階ショートショットの現物形状と直接比較する用途。
+            two_phase_on = st.checkbox(
+                "二相ショートショット解析ON",
+                value=True,
+                key="two_phase_on",
+                help=(
+                    "計量を意図的に絞ったショートショットの最終形状を予測する。"
+                    "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
+                    "溶融プールを前進、体積保存）の二相。壁面冷却モデル『なし』専用"
+                    "（体積律速のショートショットは凍結の物理を含まない）。"
+                ),
+            )
+            if two_phase_on and wall_model != "none":
+                # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
+                # 出ない」に見える。設定と同じ場所に常時出す。
+                st.warning(
+                    "壁面冷却モデルが『なし』のときだけ実行される。"
+                    "現在の設定では二相解析はスキップされる。"
+                )
+            if two_phase_on:
+                # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
+                # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
+                _v_cav = round(geom.volume_cm3(), 2)
+                _prev_auto = st.session_state.get("mfs_shot_volume_auto")
+                _current = st.session_state.get("two_phase_shot_volume")
+                if _prev_auto is None or _current is None or _current == _prev_auto:
+                    st.session_state["two_phase_shot_volume"] = _v_cav
+                st.session_state["mfs_shot_volume_auto"] = _v_cav
+                shot_volume_cm3 = st.number_input(
+                    "計量体積 V_shot [cm³]",
+                    min_value=0.01,
+                    step=0.1,
+                    key="two_phase_shot_volume",
+                    help=(
+                        "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
+                        "体積（完全充填ちょうど）。減らすとショートショットになる。"
+                    ),
+                )
+                _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
+                if icm and comp_stroke is not None:
+                    _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
+                    _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
+                st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
+            else:
+                shot_volume_cm3 = None
 
 
 # ----------------------- main panel -----------------------

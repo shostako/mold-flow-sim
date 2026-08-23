@@ -10,6 +10,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 公開リポジトリ: https://github.com/shostako/mold-flow-sim (MIT License)
 
+## docs/ と logs/ は private リポ
+
+`docs/`（顧客向け解説）と `logs/`（作業ログ）は public リポに置かない。実体は private リポ
+`shostako/mold-flow-sim-private` で、`private/`（gitignore 済み）に clone し
+`docs → private/docs`、`logs → private/logs` の symlink で従来パスを維持する。
+2026-08-22 に public 側の全履歴から `git filter-repo` で除去済み（206→174 コミット、タグ張り替え）。
+別 PC で checkout するときは `git clone .../mold-flow-sim-private private && ln -s private/docs docs && ln -s private/logs logs`。
+作業ログの規則（`logs/yyyy-MM.md`）はそのまま。private 側のコミット/push は git-sync（manifest 登録済み）か手動。
+
 ## 実行コマンド
 
 `.venv/` は **uv 製**（`uv 0.11.7`）。pip は入っていない。`uv pip install ...` を使え。
@@ -313,7 +322,7 @@ y = pad                     ← ゲート側辺（gate-side edge）
 `tests/` 配下に 26 ファイル、合計 **509 テスト** (508 pass + 1 skip — skip はショートショット 高 threshold ケース)：
 
 - `test_smoke.py` — 4件: import / MaterialDB / build_demo_geometry / Cross-WLF 単調性
-- `test_solver_1d.py` — 12件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証 / **行列の構造** — 非対称エントリがゲート行に限られること、固定点を消去した内部ブロックが対称正定値であること（`docs/流動解析の仕組み_想定問答_技術編.md` が顧客に約束している性質なので、散文だけに置かない）、ゲートに繋がらない成分があるとその保証が崩れること（数学の性質であって、修正後も不変）、**`solve()` がゲート未到達成分を入口で拒否すること（Issue #58 修正。旧実装は特異な純 Neumann ブロックを `spsolve` に渡してもっともらしいゴミを返していた。strict xfail が XPASS に転じたのを機にマーカーを外して現在形の assert に書き換えた）**、全ゲートが mask 外に落ちたときも拒否すること、**対角接触だけの「橋」を連結と数えないこと（到達性チェックは5点ステンシルと同じ4近傍。8近傍でラベリングすると特異ブロックを見逃す）**、ゲート列の消去が解を動かさないこと（消去は厳密）。**mask に穴を開けた形状で組む**のが要点で、mask が全 True だと圧縮行列インデックスと生グリッドインデックスが一致してしまい、両者を取り違えたテストも通る（`Geometry.gates` はグリッド座標、`A` はそうでない）
+- `test_solver_1d.py` — 12件: 1Dストリップの解析解 `τ(x) = x(2L−x)/(2S)` との比較。max誤差 <2%、メッシュ細分化で誤差減少を保証 / **行列の構造** — 非対称エントリがゲート行に限られること、固定点を消去した内部ブロックが対称正定値であること（顧客向け技術資料（private リポ `mold-flow-sim-private` の `docs/流動解析の仕組み_想定問答_技術編.md`、`docs/` symlink 経由）が顧客に約束している性質なので、散文だけに置かない）、ゲートに繋がらない成分があるとその保証が崩れること（数学の性質であって、修正後も不変）、**`solve()` がゲート未到達成分を入口で拒否すること（Issue #58 修正。旧実装は特異な純 Neumann ブロックを `spsolve` に渡してもっともらしいゴミを返していた。strict xfail が XPASS に転じたのを機にマーカーを外して現在形の assert に書き換えた）**、全ゲートが mask 外に落ちたときも拒否すること、**対角接触だけの「橋」を連結と数えないこと（到達性チェックは5点ステンシルと同じ4近傍。8近傍でラベリングすると特異ブロックを見逃す）**、ゲート列の消去が解を動かさないこと（消去は厳密）。**mask に穴を開けた形状で組む**のが要点で、mask が全 True だと圧縮行列インデックスと生グリッドインデックスが一致してしまい、両者を取り違えたテストも通る（`Geometry.gates` はグリッド座標、`A` はそうでない）
 - `test_geometry_film_gate.py` — 43件: シルエット / 厚み / ゲート土手 / 体積スケール / バリデーション / バランサー（1段スカラー形 + N段ネスト） / プレート分割（ゲート側/反ゲート側2層） / solver 統合 / **compression_mask（プレート本体のみ膨張、ランナー・ゲートは不変）**
 - `test_geometry_direct_gate.py` — 26件: シルエット（プレート単体・ランナー無し） / ゲート位置（左右中央＋ゲート側辺から `g_off` mm 内側） / ゲート径 / 体積 / 圧縮マスク（プレート全体） / バリデーション（ゲート円の突き抜けチェック含む） / solver 統合 / 圧縮成形による T_fill 短縮 / **プレート分割（ゲート側／反ゲート側2層、resolved_plate_zones、None フォールバック、バリデーション）**
 - `test_geometry_film_gate2.py` — 33件: 直角台形シルエット / 厚み場のプロファイル（連続性・段差の有無・x非依存性）/ ゲート位置可変 / 2段テーパ / 深ランナー / `resolved_*` フォールバック / バリデーション / solver 統合

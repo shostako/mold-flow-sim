@@ -221,7 +221,7 @@ def test_the_system_without_the_pinned_unknowns_is_spd() -> None:
     """Dropping the gate rows *and* columns leaves a symmetric positive-definite block.
 
     This is the claim the customer-facing Q&A makes
-    (``docs/流動解析の仕組み_想定問答_技術編.md``): existence and uniqueness are
+    (the customer-facing technical Q&A in the private docs repo): existence and uniqueness are
     guaranteed. The guarantee is real, but it belongs to the reduced system, not
     to ``A`` as assembled -- so it is asserted here rather than left as prose. A
     document that promises a mathematical property to a customer should not be

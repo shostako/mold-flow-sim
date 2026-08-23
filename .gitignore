@@ -27,6 +27,14 @@ outputs/
 local_specs
 local_specs/
 
+# Customer-facing docs and work logs live in the private repo
+# shostako/mold-flow-sim-private, cloned at private/ and reached through the
+# docs -> private/docs and logs -> private/logs symlinks. Their history was
+# removed from this public repo on 2026-08-22 (git filter-repo).
+private/
+docs
+logs
+
 # External tool markers
 .codex
 

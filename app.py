@@ -347,6 +347,10 @@ material_keys = list(db.keys())
 #                                (``sub_gates``) fed by a runner from the
 #                                valve well; the steel between the fans is a
 #                                full cut-out (hamoko_gate_furiwake_twin_mini_20260824)
+#   Film gate 5 (振り分け/L字ランナー) same twin fans, but the runner runs
+#                                sideways from the valve and enters each fan
+#                                tip from below, perpendicular and centred
+#                                (hamoko_gate_furiwake_twin_mini_L_20260824)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -424,6 +428,13 @@ class _TwinFanDefaults:
     island_far: tuple[float, float]  # (inner, outer) half-widths at t = island end
     runner_depth: float
     well_wall_angle_deg: float
+    # "straight": valve -> fan tip in one segment (Film gate 4).
+    # "L": valve -> sideways at the valve's t -> up into the fan tip from
+    # below (Film gate 5). The perpendicular, centred entry keeps the flow
+    # path from the tip to both base corners of the fan equal, which is the
+    # whole point of the variant: the straight runner grazes the fan's inner
+    # wall and biases the fill toward the centre.
+    runner_style: str = "straight"
 
 
 _FILM_GATE4_DEFAULTS = _TwinFanDefaults(
@@ -437,6 +448,11 @@ _FILM_GATE4_DEFAULTS = _TwinFanDefaults(
     runner_depth=2.5,
     well_wall_angle_deg=60.0,
 )
+
+# Film gate 5 = the same design study with the runner L-shaped
+# (hamoko_gate_furiwake_twin_mini_L_20260824): every dimension is identical,
+# only the runner path differs.
+_FILM_GATE5_DEFAULTS = dataclasses.replace(_FILM_GATE4_DEFAULTS, runner_style="L")
 
 
 def _tagged_widgets(tag: str):
@@ -786,16 +802,18 @@ def _profile_gate_from_inputs(
 
 
 def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
-    """Film gate 4: two mirrored mini fans fed by a runner from the valve well.
+    """Film gate 4 / 5: two mirrored mini fans fed by a runner from the well.
 
     The centre of the block is steel at the PL (a full cut-out shaped like a
     deformed rhombus): each fan's inner wall starts on the land at w = 0 and
     runs out to the fan tip, the outer wall starts at the gate-exit edge and
     runs in to the tip. The runner leaves the valve and enters each fan at
     the tip's centre, so its path is derived from the valve position and the
-    tip, not dimensioned separately.
+    tip, not dimensioned separately. ``d.runner_style`` picks the route:
+    "straight" (Film gate 4) or "L" (Film gate 5, sideways then up into the
+    tip from below).
     """
-    v: dict = {"symmetric": True}
+    v: dict = {"symmetric": True, "runner_style": d.runner_style}
     slider, number_input = _tagged_widgets(tag)
 
     _plate_shape_inputs(tag, v)
@@ -944,7 +962,15 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
             )
 
         st.markdown("**ランナー（井戸 → 扇先端）**")
-        st.caption("経路はバルブ位置 (t_valve, 0) から扇先端の中心 (t_tip, 中心半幅) への直線。")
+        if d.runner_style == "L":
+            st.caption(
+                "経路は L字: バルブ (t_valve, 0) → 真横 (t_valve, 中心半幅) → "
+                "垂直に扇先端 (t_tip, 中心半幅)。扇先端に下から中央接続する。"
+            )
+        else:
+            st.caption(
+                "経路はバルブ位置 (t_valve, 0) から扇先端の中心 (t_tip, 中心半幅) への直線。"
+            )
         # The band reaches w = 中心半幅 + 幅/2, and the builder rejects a pocket
         # that overhangs the raster (x_valve + reach > pad + Wp/2). Every other
         # Film gate keeps its sliders inside what the builder accepts, so this
@@ -1054,10 +1080,33 @@ def _twin_fan_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfileP
         runner=RunnerSpec(
             width=float(v["runner_width"]),
             depth=float(v["runner_depth"]),
-            path=((float(v["valve_t"]), 0.0), (tip_t, axis)),
+            path=_twin_fan_runner_path(
+                str(v.get("runner_style", "straight")), float(v["valve_t"]), tip_t, axis
+            ),
         ),
     )
     return spec, _plate_from_inputs(v), float(v["cell_size"])
+
+
+def _twin_fan_runner_path(
+    style: str, valve_t: float, tip_t: float, axis: float
+) -> tuple[tuple[float, float], ...]:
+    """The runner route from the valve to the fan tip.
+
+    "straight" is one segment. "L" goes sideways at the valve's t and then
+    perpendicular into the tip from below -- and when the valve sits exactly
+    on the tip line the middle corner coincides with the end, which would be
+    a zero-length segment ``validate()`` rejects, so consecutive duplicate
+    points are dropped (the collapsed 2-point path is the same route).
+    """
+    if style != "L":
+        return ((valve_t, 0.0), (tip_t, axis))
+    points = [(valve_t, 0.0), (valve_t, axis), (tip_t, axis)]
+    path = [points[0]]
+    for p in points[1:]:
+        if p != path[-1]:
+            path.append(p)
+    return tuple(path)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1095,6 +1144,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f4",
         "film_gate_4_parametric",
         lambda: _twin_fan_sidebar("f4", _FILM_GATE4_DEFAULTS),
+        _twin_fan_from_inputs,
+    ),
+    "Film gate 5 (振り分け/L字ランナー)": _FilmGate(
+        "f5",
+        "film_gate_5_parametric",
+        lambda: _twin_fan_sidebar("f5", _FILM_GATE5_DEFAULTS),
         _twin_fan_from_inputs,
     ),
 }

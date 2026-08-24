@@ -404,6 +404,13 @@ _FILM_GATE3_DEFAULTS = _ProfileGateDefaults(
 )
 
 
+# Narrowest fan tip the Film gate 4 sliders offer. It also sets how close the
+# tip axis may come to the valve axis or the exit edge: the room for the tip
+# width is 2·min(axis, w_full − axis), and a slider whose min equals its max
+# is a StreamlitAPIException, not a disabled control.
+_MIN_TIP_WIDTH = 1.0
+
+
 @dataclasses.dataclass(frozen=True)
 class _TwinFanDefaults:
     """Film gate 4: two mirrored mini fans + runner, steel rhombus between."""
@@ -844,19 +851,30 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
             step=0.1,
             help="扇が終わりランナーが入る位置。",
         )
+        # The tip width available is 2·min(axis, w_full − axis): the axis must
+        # stay far enough from both the valve axis and the exit edge to leave
+        # a fan wider than the width slider's own minimum. At axis = w_full
+        # that room is zero, and a slider whose min equals its max raises a
+        # StreamlitAPIException that kills the rest of the sidebar.
+        # A full _MIN_TIP_WIDTH of margin, not half: at half the room comes to
+        # exactly _MIN_TIP_WIDTH and min == max is the very case that raises.
+        axis_margin = _MIN_TIP_WIDTH
         v["tip_axis_w"] = slider(
             "扇先端の中心半幅 [mm]",
-            min_value=2.0,
-            max_value=float(w_full),
-            value=float(min(d.tip_axis_w, w_full)),
+            min_value=float(axis_margin),
+            max_value=float(w_full - axis_margin),
+            value=float(min(d.tip_axis_w, w_full - axis_margin)),
             step=0.5,
-            help="扇先端（＝ランナー接続点）のバルブ軸からの半幅。",
+            help=(
+                "扇先端（＝ランナー接続点）のバルブ軸からの半幅。"
+                "上下限は扇先端幅を最小値ぶん残せる範囲。"
+            ),
         )
         tip_w_max = 2.0 * float(min(v["tip_axis_w"], w_full - v["tip_axis_w"]))
-        tip_w_max = max(1.0, math.floor(tip_w_max * 10.0) / 10.0)
+        tip_w_max = max(_MIN_TIP_WIDTH, math.floor(tip_w_max * 10.0) / 10.0)
         v["tip_width"] = slider(
             "扇先端幅 [mm]",
-            min_value=1.0,
+            min_value=float(_MIN_TIP_WIDTH),
             max_value=float(tip_w_max),
             value=float(min(d.tip_width, tip_w_max)),
             step=0.5,
@@ -890,11 +908,17 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
             )
             near_in, near_out = d.island_near
             far_in, far_out = d.island_far
+            # The outer slider's min is inner + 0.5 and its max is w_full +
+            # 0.5, so an inner at the full half-width collapses it to
+            # min == max -- a StreamlitAPIException, not a clamp. Leave the
+            # gap here rather than padding the outer bound, which would offer
+            # island lines outside the fan.
+            island_in_max = max(0.5, w_full - 0.5)
             v["island_near_in"] = slider(
                 "内側線 半幅（出口側、t=ランド長）[mm]",
                 0.0,
-                float(w_full),
-                float(min(near_in, w_full)),
+                float(island_in_max),
+                float(min(near_in, island_in_max)),
                 step=0.1,
             )
             v["island_near_out"] = slider(
@@ -907,8 +931,8 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
             v["island_far_in"] = slider(
                 "内側線 半幅（終端側、t=t_end）[mm]",
                 0.0,
-                float(w_full),
-                float(min(far_in, w_full)),
+                float(island_in_max),
+                float(min(far_in, island_in_max)),
                 step=0.1,
             )
             v["island_far_out"] = slider(
@@ -921,13 +945,38 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
 
         st.markdown("**ランナー（井戸 → 扇先端）**")
         st.caption("経路はバルブ位置 (t_valve, 0) から扇先端の中心 (t_tip, 中心半幅) への直線。")
+        # The band reaches w = 中心半幅 + 幅/2, and the builder rejects a pocket
+        # that overhangs the raster (x_valve + reach > pad + Wp/2). Every other
+        # Film gate keeps its sliders inside what the builder accepts, so this
+        # one must too -- otherwise the tip-axis slider at its far end turns a
+        # legal-looking runner width into a パラメータ不整合 error.
+        reach_room = (
+            ProfilePlateConfig().pad_mm + float(v["plate_w"]) / 2.0 - float(v["tip_axis_w"])
+        )
+        # The band has to survive rasterisation: below roughly one cell
+        # diagonal it passes between cell centres and breaks into islands,
+        # which the builder rejects. The mesh slider is drawn after this one,
+        # so read its current value out of session state (the same trick the
+        # Profile gate uses for its uploader) and fall back to the default on
+        # the first run.
+        dx_now = float(st.session_state.get(f"{tag}_メッシュ粗さ [mm/cell]", 1.0))
+        runner_w_min = max(1.0, math.ceil(dx_now * math.sqrt(2.0) * 2.0) / 2.0)
+        runner_w_max = max(runner_w_min + 0.5, min(30.0, math.floor(2.0 * reach_room * 2.0) / 2.0))
+        # Keep the label static: it is part of the widget key, so a label that
+        # changes with the bound would re-key the slider and drop the value
+        # the user set.
         v["runner_width"] = slider(
             "ランナー幅 [mm]",
-            1.0,
-            30.0,
-            float(d.tip_width),
+            float(runner_w_min),
+            float(runner_w_max),
+            float(min(max(d.tip_width, runner_w_min), runner_w_max)),
             step=0.5,
-            help="初期値は扇先端幅と同じ（先端でランナーが扇に接続する想定）。先端幅を変えても自動では追従しない。",
+            help=(
+                "初期値は扇先端幅と同じ（先端でランナーが扇に接続する想定）。"
+                "先端幅を変えても自動では追従しない。"
+                "上限は帯の外側 (中心半幅 + 幅/2) がプレート外へ出ない範囲、"
+                "下限はメッシュで解像できる幅（細いと帯が点線状に千切れる）。"
+            ),
         )
         v["runner_depth"] = slider(
             "ランナー深さ [mm]",
@@ -1794,7 +1843,16 @@ if do_run:
                 skin_max_iterations=skin_max_iter,
                 skin_convergence_tol=skin_tol,
             )
-        result = solver.solve(num_frames=num_frames)
+        try:
+            result = solver.solve(num_frames=num_frames)
+        except ValueError as exc:
+            # The solver rejects a cavity whose cells cannot all be reached
+            # from a gate (Issue #58). The builders catch the shapes they can
+            # name, but a combination they do not model still has to reach the
+            # user as a message -- an uncaught exception here renders as a raw
+            # traceback in the app.
+            st.error(f"解析できない形状: {exc}")
+            st.stop()
 
         # 二相ショートショット。プレーンな HeleShawSolver 専用 —
         # 体積律速の短絡は凍結を含まないので、壁面冷却モデルとは組まない。

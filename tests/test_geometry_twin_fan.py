@@ -589,3 +589,98 @@ def test_the_raster_guard_does_not_count_the_mirror_halves_as_breakage() -> None
     band = (np.abs(t - 20.0) < 2.0) & (wa > 8.0) & (wa < 42.0) & g.mask
     assert ndi.label(band)[1] == 2
     assert band[xx < x_valve].any() and band[xx > x_valve].any()
+
+
+# -------------------------- edge channels (縁部深彫り) --------------------------
+
+
+def _fan_ec(**overrides) -> dict:
+    ec = {"width": 2.0, "depth": 3.5, "side": "outer"}
+    ec.update(overrides)
+    return ec
+
+
+def _twin_with_ec(*ecs) -> GateProfileSpec:
+    d = _twin_dict()
+    d["sub_gates"][0] = {**d["sub_gates"][0], "edge_channels": list(ecs)}
+    return GateProfileSpec.from_dict(d)
+
+
+def _wall_distance(t: np.ndarray, wa: np.ndarray, line, tip_t: float) -> np.ndarray:
+    """Independent oracle: distance to a densely sampled clamped wall line."""
+    (t1, w1), (t2, w2) = line
+    ts = np.linspace(0.0, tip_t, 1201)
+    ws = np.where(ts < t1, w1, w1 + (w2 - w1) / (t2 - t1) * (ts - t1))
+    best = np.full(t.shape, np.inf)
+    for tv, wv in zip(ts, ws, strict=True):
+        best = np.minimum(best, np.hypot(t - tv, wa - wv))
+    return best
+
+
+def test_fan_edge_channel_outer_hugs_the_outer_wall_only() -> None:
+    base = _twin()
+    spec = _twin_with_ec(_fan_ec())
+    plate = ProfilePlateConfig(plate_w_mm=300.0, plate_h_mm=50.0, plate_thk_mm=0.4)
+    g0 = build_profile_gate_geometry(base, plate)
+    g1 = build_profile_gate_geometry(spec, plate)
+    assert np.array_equal(g0.mask, g1.mask)  # silhouette untouched
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    iy, ix = np.indices(g1.shape)
+    t = (5.0 + base.t_max()) - (iy + 0.5) * g1.cell_size_mm
+    wa = np.abs((ix + 0.5) * g1.cell_size_mm - (5.0 + 150.0))
+    sg = base.sub_gates[0]
+    d_out = _wall_distance(t, wa, sg.outer_wall_line, sg.tip_t)
+    d_in = _wall_distance(t, wa, sg.inner_wall_line, sg.tip_t)
+    assert d_out[diff].max() <= 2.0 + g1.cell_size_mm
+    # the inner wall keeps its distance: nothing near it changed
+    assert d_in[diff].min() > 2.0
+
+
+def test_fan_edge_channel_inner_and_both_sides() -> None:
+    plate = ProfilePlateConfig(plate_w_mm=300.0, plate_h_mm=50.0, plate_thk_mm=0.4)
+    g0 = build_profile_gate_geometry(_twin(), plate)
+    g_out = build_profile_gate_geometry(_twin_with_ec(_fan_ec()), plate)
+    g_in = build_profile_gate_geometry(_twin_with_ec(_fan_ec(side="inner")), plate)
+    g_both = build_profile_gate_geometry(_twin_with_ec(_fan_ec(), _fan_ec(side="inner")), plate)
+    d_out = g_out.thickness_mm != g0.thickness_mm
+    d_in = g_in.thickness_mm != g0.thickness_mm
+    d_both = g_both.thickness_mm != g0.thickness_mm
+    assert d_out.any() and d_in.any()
+    assert not (d_out & d_in).any()  # the two bands are disjoint here
+    assert np.array_equal(d_both, d_out | d_in)  # both = the union
+
+
+def test_fan_edge_channel_stays_inside_the_fan() -> None:
+    """The band must not resurrect steel: outside the fan nothing changes,
+    and in particular the rhombus cut-out between the mirrored fans stays
+    at the PL even though the inner wall borders it."""
+    plate = ProfilePlateConfig(plate_w_mm=300.0, plate_h_mm=50.0, plate_thk_mm=0.4)
+    g0 = build_profile_gate_geometry(_twin(), plate)
+    g1 = build_profile_gate_geometry(_twin_with_ec(_fan_ec(side="inner")), plate)
+    assert np.array_equal(g0.mask, g1.mask)
+    changed = g1.thickness_mm != g0.thickness_mm
+    assert not changed[~g0.mask].any()
+
+
+def test_fan_edge_channel_roundtrip_both_paths() -> None:
+    spec = _twin_with_ec(_fan_ec(t_range=[3.0, 10.0]), _fan_ec(side="inner"))
+    assert GateProfileSpec.from_json(spec.to_json()) == spec
+    assert GateProfileSpec.from_dict(json.loads(json.dumps(dataclasses.asdict(spec)))) == spec
+    assert spec.sub_gates[0].edge_channels[0].t_range == (3.0, 10.0)
+    assert spec.sub_gates[0].edge_channels[1].t_range is None
+
+
+def test_fan_edge_channel_validation() -> None:
+    with pytest.raises(ValueError, match="side"):
+        _twin_with_ec(_fan_ec(side="top"))
+    with pytest.raises(ValueError, match="tip_t"):
+        _twin_with_ec(_fan_ec(t_range=[3.0, 99.0]))
+    with pytest.raises(ValueError, match="increasing"):
+        _twin_with_ec(_fan_ec(t_range=[10.0, 3.0]))
+
+
+def test_demo_twin_fan_spec_has_no_edge_channels() -> None:
+    spec = GateProfileSpec.from_json_file(DEMO_JSON)
+    assert all(sg.edge_channels == () for sg in spec.sub_gates)
+    assert "edge_channels" not in spec.to_dict()["sub_gates"][0]

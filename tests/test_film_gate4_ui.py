@@ -242,3 +242,23 @@ def test_the_tip_axis_slider_never_collapses_the_tip_width_slider():
     at.button[0].click().run()
     assert not at.exception
     assert not [str(e.value) for e in at.error]
+
+
+def test_edge_channel_both_sides_land_on_the_fan():
+    """縁部深彫り ON + 両側: the fan carries two channels (outer, inner) with
+    the slider values; the top-level list stays empty (fans own the walls)."""
+    at = _film_gate4_app()
+    at.checkbox(key="f4_ec_on").set_value(True).run()
+    at.radio(key="f4_ec_side").set_value("両側")
+    _slider(at, "帯幅").set_value(2.0)
+    _slider(at, "帯深さ").set_value(4.0)
+    _slider(at, "範囲 t").set_value((2.0, 12.0)).run()
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    got = GateProfileSpec.from_dict({**rec, "name": "x"})
+    assert got.edge_channels == ()
+    ecs = got.sub_gates[0].edge_channels
+    assert [ec.side for ec in ecs] == ["outer", "inner"]
+    for ec in ecs:
+        assert (ec.width, ec.depth, ec.t_range) == (2.0, 4.0, (2.0, 12.0))

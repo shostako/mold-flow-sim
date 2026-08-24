@@ -12,6 +12,7 @@ import json
 import math
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,17 @@ from core import (
     wrap_standalone_html,
 )
 from core.geometry import Geometry
-from core.profile_gate import IslandSpec, LandSpec, MainRampSpec, ValveSpec, WeldSpec, WellSpec
+from core.profile_gate import (
+    IslandSpec,
+    LandSpec,
+    MainRampSpec,
+    RunnerSpec,
+    SubGateSpec,
+    SubIslandSpec,
+    ValveSpec,
+    WeldSpec,
+    WellSpec,
+)
 from core.settings_record import config_settings, file_fingerprint, settings_json
 from core.solver import WELD_MIN_ANGLE_DEG
 from core.spec_source import (
@@ -323,8 +334,8 @@ db = _load_db()
 material_keys = list(db.keys())
 
 
-# ----------------------- Film gate 1 / 2 / 3: parametric gate-block inputs -----------------------
-# All three Film gates are the same family as the Profile gate JSON (land /
+# ----------------------- Film gate 1–4: parametric gate-block inputs -----------------------
+# All Film gates are the same family as the Profile gate JSON (land /
 # main ramp / island (肉盗み) / well / outer wall), driven by sliders and
 # assembled into a ``GateProfileSpec``:
 #   Film gate 1 (扇状/肉盗み1)   symmetric, hamoko_gate_furiwake_20260703
@@ -332,6 +343,10 @@ material_keys = list(db.keys())
 #                                (the 肉盗み has a flat dam: ``island.weld``)
 #   Film gate 3 (片側/二倍流動長) one-sided (valve at the w=0 edge),
 #                                hamoko_gate_2bai_20260703
+#   Film gate 4 (振り分け/ミニ扇×2) symmetric, two mirrored mini fans
+#                                (``sub_gates``) fed by a runner from the
+#                                valve well; the steel between the fans is a
+#                                full cut-out (hamoko_gate_furiwake_twin_mini_20260824)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -388,35 +403,56 @@ _FILM_GATE3_DEFAULTS = _ProfileGateDefaults(
     well_wall_angle_deg=60.0,
 )
 
-# radio label -> (widget key tag, symmetric, defaults, recorded geometry name)
-_FILM_GATES: dict[str, tuple[str, bool, _ProfileGateDefaults, str]] = {
-    "Film gate 1 (扇状/肉盗み1)": ("f1", True, _FILM_GATE1_DEFAULTS, "film_gate_1_parametric"),
-    "Film gate 2 (扇状/肉盗み2)": ("f2", True, _FILM_GATE2_DEFAULTS, "film_gate_2_parametric"),
-    "Film gate 3 (片側/二倍流動長)": ("f3", False, _FILM_GATE3_DEFAULTS, "film_gate_3_parametric"),
-}
+
+@dataclasses.dataclass(frozen=True)
+class _TwinFanDefaults:
+    """Film gate 4: two mirrored mini fans + runner, steel rhombus between."""
+
+    gate_exit_width: float
+    tip_t: float  # fan tip (where the runner enters)
+    tip_axis_w: float  # half-width of the fan axis at the tip
+    tip_width: float  # fan width at the tip (= runner width by default)
+    island_end: float
+    island_near: tuple[float, float]  # (inner, outer) half-widths at t = land length
+    island_far: tuple[float, float]  # (inner, outer) half-widths at t = island end
+    runner_depth: float
+    well_wall_angle_deg: float
 
 
-def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
-    """Draw the Film gate sidebar and return the raw slider values.
+_FILM_GATE4_DEFAULTS = _TwinFanDefaults(
+    gate_exit_width=298.0,
+    tip_t=14.0,
+    tip_axis_w=74.5,
+    tip_width=8.0,
+    island_end=10.0,
+    island_near=(48.2, 100.8),
+    island_far=(69.5, 79.5),
+    runner_depth=2.5,
+    well_wall_angle_deg=60.0,
+)
 
-    ``tag`` prefixes widget keys so the Film gates never share state.
-    Width-type values are half-widths from the valve axis when ``symmetric``,
-    else widths from the valve-side (w=0) edge -- the labels say which.
+
+def _tagged_widgets(tag: str):
+    """``st.slider`` / ``st.number_input`` with ``tag``-prefixed keys.
+
+    Every widget gets a tag-prefixed key. Without one Streamlit identifies a
+    widget by its label + parameters, so a Film gate 3 slider's value would
+    survive a switch to Film gate 1 (same label, same bounds) and override
+    that input's default (Codex P2).
     """
-    w_word = "半幅" if symmetric else "幅"
-    w_origin = "バルブ軸からの半幅" if symmetric else "バルブ側端（w=0）からの幅"
-    v: dict = {"symmetric": symmetric}
 
-    # Every widget gets a tag-prefixed key. Without one Streamlit identifies a
-    # widget by its label + parameters, so a Film gate 3 slider's value would
-    # survive a switch to Film gate 1 (same label, same bounds) and override
-    # that input's default (Codex P2).
     def slider(label: str, *args, **kwargs):
         return st.slider(label, *args, key=f"{tag}_{label}", **kwargs)
 
     def number_input(label: str, *args, **kwargs):
         return st.number_input(label, *args, key=f"{tag}_{label}", **kwargs)
 
+    return slider, number_input
+
+
+def _plate_shape_inputs(tag: str, v: dict) -> None:
+    """The 製品形状 expander shared by every Film gate (fills ``v`` in place)."""
+    slider, _ = _tagged_widgets(tag)
     with st.expander("製品形状", expanded=False):
         v["plate_w"] = slider("製品幅 Wp [mm]", 40.0, 400.0, 300.0, step=5.0)
         v["plate_h"] = slider("製品高さ Hp [mm]", 30.0, 200.0, 50.0, step=5.0)
@@ -442,6 +478,102 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             v["plate_thk"] = slider("製品肉厚 [mm]", 0.2, 2.0, 0.4, step=0.1)
             v["plate_split"] = 0.0
             v["plate_lower_thk"] = v["plate_upper_thk"] = float(v["plate_thk"])
+
+
+def _plate_from_inputs(v: dict) -> ProfilePlateConfig:
+    return ProfilePlateConfig(
+        plate_w_mm=v["plate_w"],
+        plate_h_mm=v["plate_h"],
+        plate_thk_mm=v["plate_thk"],
+        plate_split_height_mm=v["plate_split"] if v["plate_split"] > 0 else 0.0,
+        plate_lower_thk_mm=v["plate_lower_thk"] if v["plate_split"] > 0 else None,
+        plate_upper_thk_mm=v["plate_upper_thk"] if v["plate_split"] > 0 else None,
+    )
+
+
+def _well_inputs(tag: str, v: dict, *, symmetric: bool, wall_angle_deg: float) -> None:
+    """The 井戸 block shared by every Film gate (fills ``v`` in place).
+
+    Sets ``v["well_on"]`` and, when on, ``well_t1 / well_t2 / well_half_w /
+    well_depth / well_wall_angle``.
+    """
+    slider, _ = _tagged_widgets(tag)
+    st.markdown("**井戸（バルブ周りの長穴ポケット）**")
+    v["well_on"] = st.checkbox("井戸を有効化", value=True, key=f"{tag}_well_on")
+    if not v["well_on"]:
+        return
+    v["well_t1"] = slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
+    v["well_t2"] = slider(
+        "井戸終端 t [mm] (> 開始)",
+        min_value=float(v["well_t1"] + 0.5),
+        max_value=80.0,
+        value=float(max(27.5, v["well_t1"] + 0.5)),
+        step=0.1,
+    )
+    # One-sided: the well is centred on the w=0 edge, so half of it
+    # overhangs past the pocket into the plate margin. Cap the
+    # half-width at the room available there or the builder rejects
+    # the grid overhang (a ValueError the slider can prevent).
+    hw_max = 20.0
+    if not symmetric:
+        edge_room = ProfilePlateConfig().pad_mm + (v["plate_w"] - v["gate_exit_width"]) / 2.0
+        hw_max = max(0.5, min(20.0, math.floor(edge_room * 10.0) / 10.0))
+    v["well_half_w"] = slider(
+        "井戸半幅 [mm]" + ("" if symmetric else " (≤ 端の余白)"),
+        0.5,
+        float(hw_max),
+        float(min(4.5, hw_max)),
+        step=0.1,
+    )
+    # The sloped wall climbs from the rim, so the deepest point the
+    # pocket can reach is half_width·tan(angle) at the centreline. A
+    # deeper request is rejected by validate() and would otherwise be
+    # recorded as asked and built shallower (Codex P1).
+    tan_wall = math.tan(math.radians(wall_angle_deg))
+    depth_max = float(min(15.0, v["well_half_w"] * tan_wall))
+    depth_max = max(0.5, math.floor(depth_max * 10.0) / 10.0)
+    v["well_depth"] = slider(
+        f"井戸深さ [mm] (≤ 半幅·tan{wall_angle_deg:g}°)",
+        0.5,
+        depth_max,
+        float(min(4.5, depth_max)),
+        step=0.1,
+        help=(f"壁角 {wall_angle_deg:g}° で到達できる最大深さ = 半幅 × tan({wall_angle_deg:g}°)。"),
+    )
+    v["well_wall_angle"] = float(wall_angle_deg)
+
+
+def _well_from_inputs(v: dict) -> WellSpec | None:
+    if not v["well_on"]:
+        return None
+    # Floor extent follows from the sloped wall: it eats depth/tan(angle)
+    # of t at each end. When the pocket is too short for a flat floor the
+    # floor range is simply not reported.
+    eat = float(v["well_depth"]) / math.tan(math.radians(v["well_wall_angle"]))
+    floor = (float(v["well_t1"]) + eat, float(v["well_t2"]) - eat)
+    return WellSpec(
+        shape="obround",
+        t_range=(float(v["well_t1"]), float(v["well_t2"])),
+        half_width=float(v["well_half_w"]),
+        depth=float(v["well_depth"]),
+        floor_t_range=floor if floor[1] > floor[0] + 1e-6 else None,
+        wall_angle_deg=float(v["well_wall_angle"]),
+    )
+
+
+def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
+    """Draw the Film gate sidebar and return the raw slider values.
+
+    ``tag`` prefixes widget keys so the Film gates never share state.
+    Width-type values are half-widths from the valve axis when ``symmetric``,
+    else widths from the valve-side (w=0) edge -- the labels say which.
+    """
+    w_word = "半幅" if symmetric else "幅"
+    w_origin = "バルブ軸からの半幅" if symmetric else "バルブ側端（w=0）からの幅"
+    v: dict = {"symmetric": symmetric}
+    slider, number_input = _tagged_widgets(tag)
+
+    _plate_shape_inputs(tag, v)
 
     with st.expander("ゲート形状", expanded=False):
         st.caption(
@@ -569,51 +701,8 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         )
         v["wall_w1"] = float(w_full)
 
-        st.markdown("**井戸（バルブ周りの長穴ポケット）**")
-        v["well_on"] = st.checkbox("井戸を有効化", value=True, key=f"{tag}_well_on")
+        _well_inputs(tag, v, symmetric=symmetric, wall_angle_deg=d.well_wall_angle_deg)
         if v["well_on"]:
-            v["well_t1"] = slider("井戸開始 t [mm]", 0.0, 60.0, 15.5, step=0.1)
-            v["well_t2"] = slider(
-                "井戸終端 t [mm] (> 開始)",
-                min_value=float(v["well_t1"] + 0.5),
-                max_value=80.0,
-                value=float(max(27.5, v["well_t1"] + 0.5)),
-                step=0.1,
-            )
-            # One-sided: the well is centred on the w=0 edge, so half of it
-            # overhangs past the pocket into the plate margin. Cap the
-            # half-width at the room available there or the builder rejects
-            # the grid overhang (a ValueError the slider can prevent).
-            hw_max = 20.0
-            if not symmetric:
-                edge_room = ProfilePlateConfig().pad_mm + (v["plate_w"] - gew) / 2.0
-                hw_max = max(0.5, min(20.0, math.floor(edge_room * 10.0) / 10.0))
-            v["well_half_w"] = slider(
-                "井戸半幅 [mm]" + ("" if symmetric else " (≤ 端の余白)"),
-                0.5,
-                float(hw_max),
-                float(min(4.5, hw_max)),
-                step=0.1,
-            )
-            # The sloped wall climbs from the rim, so the deepest point the
-            # pocket can reach is half_width·tan(angle) at the centreline. A
-            # deeper request is rejected by validate() and would otherwise be
-            # recorded as asked and built shallower (Codex P1).
-            tan_wall = math.tan(math.radians(d.well_wall_angle_deg))
-            depth_max = float(min(15.0, v["well_half_w"] * tan_wall))
-            depth_max = max(0.5, math.floor(depth_max * 10.0) / 10.0)
-            v["well_depth"] = slider(
-                f"井戸深さ [mm] (≤ 半幅·tan{d.well_wall_angle_deg:g}°)",
-                0.5,
-                depth_max,
-                float(min(4.5, depth_max)),
-                step=0.1,
-                help=(
-                    f"壁角 {d.well_wall_angle_deg:g}° で到達できる最大深さ "
-                    f"= 半幅 × tan({d.well_wall_angle_deg:g}°)。"
-                ),
-            )
-            v["well_wall_angle"] = float(d.well_wall_angle_deg)
             well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"])
             pocket_t_end = max(float(v["wall_t2"]), float(v["well_t2"]))
         else:
@@ -653,21 +742,7 @@ def _profile_gate_from_inputs(
 ) -> tuple[GateProfileSpec, ProfilePlateConfig, float]:
     """Assemble the spec + plate from ``_profile_gate_sidebar`` values."""
     t_land = float(v["land_length"])
-    well = None
-    if v["well_on"]:
-        # Floor extent follows from the sloped wall: it eats depth/tan(angle)
-        # of t at each end. When the pocket is too short for a flat floor the
-        # floor range is simply not reported.
-        eat = float(v["well_depth"]) / math.tan(math.radians(v["well_wall_angle"]))
-        floor = (float(v["well_t1"]) + eat, float(v["well_t2"]) - eat)
-        well = WellSpec(
-            shape="obround",
-            t_range=(float(v["well_t1"]), float(v["well_t2"])),
-            half_width=float(v["well_half_w"]),
-            depth=float(v["well_depth"]),
-            floor_t_range=floor if floor[1] > floor[0] + 1e-6 else None,
-            wall_angle_deg=float(v["well_wall_angle"]),
-        )
+    well = _well_from_inputs(v)
     island = None
     if v["island_on"]:
         weld = None
@@ -700,15 +775,280 @@ def _profile_gate_from_inputs(
         island=island,
         well=well,
     )
-    plate = ProfilePlateConfig(
-        plate_w_mm=v["plate_w"],
-        plate_h_mm=v["plate_h"],
-        plate_thk_mm=v["plate_thk"],
-        plate_split_height_mm=v["plate_split"] if v["plate_split"] > 0 else 0.0,
-        plate_lower_thk_mm=v["plate_lower_thk"] if v["plate_split"] > 0 else None,
-        plate_upper_thk_mm=v["plate_upper_thk"] if v["plate_split"] > 0 else None,
+    return spec, _plate_from_inputs(v), float(v["cell_size"])
+
+
+def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
+    """Film gate 4: two mirrored mini fans fed by a runner from the valve well.
+
+    The centre of the block is steel at the PL (a full cut-out shaped like a
+    deformed rhombus): each fan's inner wall starts on the land at w = 0 and
+    runs out to the fan tip, the outer wall starts at the gate-exit edge and
+    runs in to the tip. The runner leaves the valve and enters each fan at
+    the tip's centre, so its path is derived from the valve position and the
+    tip, not dimensioned separately.
+    """
+    v: dict = {"symmetric": True}
+    slider, number_input = _tagged_widgets(tag)
+
+    _plate_shape_inputs(tag, v)
+
+    with st.expander("ゲート形状", expanded=False):
+        st.caption(
+            "t = ゲート出口（製品長辺）からの距離、w = バルブ軸からの半幅。左右対称。"
+            "深さ = 流路肉厚。中央（扇の内壁より内側）は鋼材が PL に接した完全な肉盗み。"
+        )
+        gew = slider(
+            "ゲート出口幅 [mm] (≤ 製品幅)",
+            min_value=10.0,
+            max_value=float(v["plate_w"]),
+            value=float(min(d.gate_exit_width, v["plate_w"])),
+            step=1.0,
+        )
+        v["gate_exit_width"] = gew
+        w_full = gew / 2.0
+
+        st.markdown("**ランド（出口）**")
+        v["land_depth"] = slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
+        v["land_length"] = slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
+        t_land = float(v["land_length"])
+
+        st.markdown("**メインランプ（扇の中）**")
+        v["ramp_angle"] = number_input(
+            "ランプ角 [deg]",
+            min_value=1.0,
+            max_value=45.0,
+            value=10.95,
+            step=0.05,
+            format="%.2f",
+            help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
+        )
+        v["ramp_cap"] = slider(
+            "ランプ上限深さ [mm] (≥ ランド深さ)",
+            min_value=float(v["land_depth"]),
+            max_value=10.0,
+            value=float(max(2.5, v["land_depth"])),
+            step=0.1,
+        )
+
+        st.markdown("**ミニ扇（左右対称に2つ）**")
+        st.caption(
+            "内壁はランド終端の w=0 から扇先端へ、外壁はゲート出口端から扇先端へ走る直線。"
+            "2つの扇の内壁に挟まれた菱形が完全肉盗み（0 mm）。"
+        )
+        v["tip_t"] = slider(
+            "扇先端 t [mm] (> ランド長)",
+            min_value=float(t_land + 1.0),
+            max_value=40.0,
+            value=float(max(d.tip_t, t_land + 1.0)),
+            step=0.1,
+            help="扇が終わりランナーが入る位置。",
+        )
+        v["tip_axis_w"] = slider(
+            "扇先端の中心半幅 [mm]",
+            min_value=2.0,
+            max_value=float(w_full),
+            value=float(min(d.tip_axis_w, w_full)),
+            step=0.5,
+            help="扇先端（＝ランナー接続点）のバルブ軸からの半幅。",
+        )
+        tip_w_max = 2.0 * float(min(v["tip_axis_w"], w_full - v["tip_axis_w"]))
+        tip_w_max = max(1.0, math.floor(tip_w_max * 10.0) / 10.0)
+        v["tip_width"] = slider(
+            "扇先端幅 [mm]",
+            min_value=1.0,
+            max_value=float(tip_w_max),
+            value=float(min(d.tip_width, tip_w_max)),
+            step=0.5,
+            help="扇先端での内壁〜外壁の幅。上限は中心半幅で決まる（内壁が w=0 を越えない）。",
+        )
+
+        v["island_on"] = st.checkbox(
+            "肉盗み（扇の中の浅い帯）を有効化",
+            value=True,
+            key=f"{tag}_island_on",
+            help=(
+                "各扇の中央帯だけランプ角を緩くして流路を絞る。境界は内側線・外側線の2本で、"
+                "出口側 (t=ランド長) と終端側 (t=t_end) の半幅で指定する。"
+            ),
+        )
+        if v["island_on"]:
+            v["island_angle"] = number_input(
+                "肉盗み角 [deg] (≤ ランプ角)",
+                min_value=0.0,
+                max_value=float(v["ramp_angle"]),
+                value=float(min(2.5, v["ramp_angle"])),
+                step=0.05,
+                format="%.2f",
+            )
+            v["island_end"] = slider(
+                "肉盗み終端 t_end [mm] (> ランド長、≤ 扇先端)",
+                min_value=float(t_land + 0.5),
+                max_value=float(v["tip_t"]),
+                value=float(min(max(d.island_end, t_land + 0.5), v["tip_t"])),
+                step=0.1,
+            )
+            near_in, near_out = d.island_near
+            far_in, far_out = d.island_far
+            v["island_near_in"] = slider(
+                "内側線 半幅（出口側、t=ランド長）[mm]",
+                0.0,
+                float(w_full),
+                float(min(near_in, w_full)),
+                step=0.1,
+            )
+            v["island_near_out"] = slider(
+                "外側線 半幅（出口側、t=ランド長）[mm] (> 内側)",
+                min_value=float(v["island_near_in"] + 0.5),
+                max_value=float(w_full + 0.5),
+                value=float(min(max(near_out, v["island_near_in"] + 0.5), w_full + 0.5)),
+                step=0.1,
+            )
+            v["island_far_in"] = slider(
+                "内側線 半幅（終端側、t=t_end）[mm]",
+                0.0,
+                float(w_full),
+                float(min(far_in, w_full)),
+                step=0.1,
+            )
+            v["island_far_out"] = slider(
+                "外側線 半幅（終端側、t=t_end）[mm] (> 内側)",
+                min_value=float(v["island_far_in"] + 0.5),
+                max_value=float(w_full + 0.5),
+                value=float(min(max(far_out, v["island_far_in"] + 0.5), w_full + 0.5)),
+                step=0.1,
+            )
+
+        st.markdown("**ランナー（井戸 → 扇先端）**")
+        st.caption("経路はバルブ位置 (t_valve, 0) から扇先端の中心 (t_tip, 中心半幅) への直線。")
+        v["runner_width"] = slider(
+            "ランナー幅 [mm]",
+            1.0,
+            30.0,
+            float(d.tip_width),
+            step=0.5,
+            help="初期値は扇先端幅と同じ（先端でランナーが扇に接続する想定）。先端幅を変えても自動では追従しない。",
+        )
+        v["runner_depth"] = slider(
+            "ランナー深さ [mm]",
+            0.5,
+            10.0,
+            float(d.runner_depth),
+            step=0.1,
+            help="ランナー帯の中では深さ = max(扇の深さ, この値)。既定はランプ上限深さ。",
+        )
+
+        _well_inputs(tag, v, symmetric=True, wall_angle_deg=d.well_wall_angle_deg)
+        well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"]) if v["well_on"] else v["tip_t"] + 7.5
+
+        st.markdown("**バルブゲート**")
+        v["valve_d"] = slider("バルブゲート径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+        # The runner starts at the valve, so the orifice always sits in the
+        # pocket; only the block extent bounds the position.
+        t_min = float(v["valve_d"] / 2.0)
+        t_max = float(max(t_min + 0.1, 60.0 - v["valve_d"] / 2.0))
+        v["valve_t"] = slider(
+            "バルブ位置 t [mm]",
+            t_min,
+            t_max,
+            float(min(max(round(well_t_mid, 1), t_min), t_max)),
+            step=0.1,
+            help="既定は井戸の中央。ランナーはここから各扇先端へ走る。",
+        )
+
+        v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)
+        st.caption(
+            "この形状の想定解像度は 1.0mm（ランド長 1mm が 1 セル）。"
+            "細かいほど深さ場の再現精度が上がるが、解析が重くなる。"
+        )
+    return v
+
+
+def _twin_fan_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfilePlateConfig, float]:
+    """Assemble the spec + plate from ``_twin_fan_sidebar`` values."""
+    t_land = float(v["land_length"])
+    w_full = float(v["gate_exit_width"]) / 2.0
+    tip_t = float(v["tip_t"])
+    axis = float(v["tip_axis_w"])
+    half_tip = float(v["tip_width"]) / 2.0
+    island = None
+    if v["island_on"]:
+        island = SubIslandSpec(
+            angle_deg=float(v["island_angle"]),
+            inner_line=(
+                (t_land, float(v["island_near_in"])),
+                (float(v["island_end"]), float(v["island_far_in"])),
+            ),
+            outer_line=(
+                (t_land, float(v["island_near_out"])),
+                (float(v["island_end"]), float(v["island_far_out"])),
+            ),
+            end_dist=float(v["island_end"]),
+        )
+    fan = SubGateSpec(
+        inner_wall_line=((t_land, 0.0), (tip_t, axis - half_tip)),
+        outer_wall_line=((t_land, w_full), (tip_t, axis + half_tip)),
+        tip_t=tip_t,
+        island=island,
     )
-    return spec, plate, float(v["cell_size"])
+    spec = GateProfileSpec(
+        name=name,
+        units="mm",
+        symmetric=True,
+        gate_exit_width=float(v["gate_exit_width"]),
+        land=LandSpec(depth=float(v["land_depth"]), length=t_land),
+        main_ramp=MainRampSpec(angle_deg=float(v["ramp_angle"]), cap_depth=float(v["ramp_cap"])),
+        outer_wall_line=None,
+        valve=ValveSpec(t=float(v["valve_t"]), w=0.0, orifice_diameter=float(v["valve_d"])),
+        well=_well_from_inputs(v),
+        sub_gates=(fan,),
+        runner=RunnerSpec(
+            width=float(v["runner_width"]),
+            depth=float(v["runner_depth"]),
+            path=((float(v["valve_t"]), 0.0), (tip_t, axis)),
+        ),
+    )
+    return spec, _plate_from_inputs(v), float(v["cell_size"])
+
+
+@dataclasses.dataclass(frozen=True)
+class _FilmGate:
+    """One entry of the Film gate radio: how to draw its sidebar and build it."""
+
+    tag: str  # widget key prefix
+    record_name: str  # geometry name recorded in settings.json
+    sidebar: Callable[[], dict]
+    assemble: Callable[[str, dict], tuple[GateProfileSpec, ProfilePlateConfig, float]]
+
+
+# radio label -> entry. Single source for the radio options, the sidebar
+# branch and the geometry branch.
+_FILM_GATES: dict[str, _FilmGate] = {
+    "Film gate 1 (扇状/肉盗み1)": _FilmGate(
+        "f1",
+        "film_gate_1_parametric",
+        lambda: _profile_gate_sidebar("f1", True, _FILM_GATE1_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 2 (扇状/肉盗み2)": _FilmGate(
+        "f2",
+        "film_gate_2_parametric",
+        lambda: _profile_gate_sidebar("f2", True, _FILM_GATE2_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 3 (片側/二倍流動長)": _FilmGate(
+        "f3",
+        "film_gate_3_parametric",
+        lambda: _profile_gate_sidebar("f3", False, _FILM_GATE3_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 4 (振り分け/ミニ扇×2)": _FilmGate(
+        "f4",
+        "film_gate_4_parametric",
+        lambda: _twin_fan_sidebar("f4", _FILM_GATE4_DEFAULTS),
+        _twin_fan_from_inputs,
+    ),
+}
 
 
 def _valve_orifice_hits_pocket(
@@ -738,8 +1078,8 @@ def _valve_orifice_hits_pocket(
     return bool(np.any(in_valve & geom.mask))
 
 
-def _build_film_gate(name: str, v: dict, source: str) -> tuple[Geometry, dict]:
-    spec, plate, dx = _profile_gate_from_inputs(name, v)
+def _build_film_gate(entry: _FilmGate, v: dict, source: str) -> tuple[Geometry, dict]:
+    spec, plate, dx = entry.assemble(entry.record_name, v)
     geom = build_profile_gate_geometry(spec, plate, cell_size_mm=dx)
     # The builder snaps a gate whose orifice misses the pocket to the nearest
     # masked cell. The slider bounds keep the orifice inside the pocket along
@@ -785,7 +1125,7 @@ def build_geometry() -> tuple[Geometry, dict]:
             st.stop()
     if geom_source in _FILM_GATES:
         try:
-            return _build_film_gate(_FILM_GATES[geom_source][3], pg_inputs, geom_source)
+            return _build_film_gate(_FILM_GATES[geom_source], pg_inputs, geom_source)
         except ValueError as exc:
             st.error(f"パラメータ不整合: {exc}")
             st.stop()
@@ -935,8 +1275,7 @@ with st.sidebar:
                 "滑らかな3Dが要るときだけ下げる。"
             )
     elif geom_source in _FILM_GATES:
-        _tag, _sym, _defaults, _ = _FILM_GATES[geom_source]
-        pg_inputs = _profile_gate_sidebar(_tag, symmetric=_sym, d=_defaults)
+        pg_inputs = _FILM_GATES[geom_source].sidebar()
     elif geom_source.startswith("Profile gate"):
         with st.expander("ゲートプロファイル (JSON)", expanded=False):
             st.caption(

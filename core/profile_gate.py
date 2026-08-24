@@ -32,6 +32,20 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
 6. ``symmetric=True`` mirrors the half-width profile about the valve axis;
    ``symmetric=False`` places the valve at the ``w=0`` end of a one-sided
    band (the well may overhang past the ``w=0`` edge).
+7. **Sub-gates** (optional, replaces the outer wall) — ``sub_gates`` is a
+   list of fan-shaped pockets, each bounded by an ``inner_wall_line`` and an
+   ``outer_wall_line`` in the (t, w) plane and ending at ``tip_t``. Inside a
+   fan the depth is the land + main ramp, optionally overridden by the fan's
+   own ``island`` (a shallow band between ``inner_line`` and ``outer_line``,
+   ending at ``end_dist``). Everything outside the fans is steel at the PL:
+   with two mirrored fans whose inner walls meet on the land at ``w=0`` the
+   steel between them is the "deformed rhombus" full cut-out. Exactly one of
+   ``outer_wall_line`` / ``sub_gates`` must be given.
+8. **Runner** (optional) — a constant-depth band of ``width`` along a
+   ``path`` polyline in (t, w); ``d = max(d, depth)`` within ``width/2`` of
+   the path, so it can cross steel (where it *is* the pocket) or a fan. With
+   sub-gates it is the channel that carries the melt from the valve well to
+   each fan tip.
 
 Confidentiality note: this repository ships only the format definition,
 the builder, and a **fictional-dimension demo spec**
@@ -127,6 +141,49 @@ class ValveSpec:
     t: float
     w: float
     orifice_diameter: float
+
+
+Line = tuple[tuple[float, float], tuple[float, float]]
+
+
+@dataclass(frozen=True)
+class SubIslandSpec:
+    """Shallow band inside one sub-gate fan, bounded on both sides.
+
+    Unlike :class:`IslandSpec` (which runs from the valve axis out to a
+    single boundary line) a fan's island is a band between two lines,
+    ``inner_line`` and ``outer_line``, both ``((t1, w1), (t2, w2))``.
+    """
+
+    angle_deg: float
+    inner_line: Line
+    outer_line: Line
+    end_dist: float
+
+
+@dataclass(frozen=True)
+class SubGateSpec:
+    """One fan-shaped pocket of a multi-fan gate block.
+
+    The fan is the set ``t ∈ [0, tip_t]``, ``inner_wall(t) ≤ w ≤
+    outer_wall(t)``; before a line's first point its width clamps to that
+    point's ``w`` (so a wall starting at ``(land.length, 0)`` lets the land
+    strip run to the valve axis and the fans meet there in a sharp apex).
+    """
+
+    inner_wall_line: Line
+    outer_wall_line: Line
+    tip_t: float
+    island: SubIslandSpec | None = None
+
+
+@dataclass(frozen=True)
+class RunnerSpec:
+    """Constant-depth runner band along a (t, w) polyline."""
+
+    width: float
+    depth: float
+    path: tuple[tuple[float, float], ...]
 
 
 # ---------------------------------------------------------------------------
@@ -249,10 +306,14 @@ class GateProfileSpec:
     gate_exit_width: float
     land: LandSpec
     main_ramp: MainRampSpec
-    outer_wall_line: tuple[tuple[float, float], tuple[float, float]]
+    # Single-pocket form: the silhouette line. ``None`` when ``sub_gates``
+    # describe the pocket instead (exactly one of the two must be given).
+    outer_wall_line: Line | None
     valve: ValveSpec
     island: IslandSpec | None = None
     well: WellSpec | None = None
+    sub_gates: tuple[SubGateSpec, ...] = ()
+    runner: RunnerSpec | None = None
 
     # ---- JSON I/O ----
 
@@ -273,6 +334,8 @@ class GateProfileSpec:
                 "outer_wall_line",
                 "well",
                 "valve",
+                "sub_gates",
+                "runner",
             },
             "",
         )
@@ -318,7 +381,63 @@ class GateProfileSpec:
                 weld=weld,
             )
 
-        outer_wall_line = _line(d, "outer_wall_line", "")
+        outer_wall_line = (
+            _line(d, "outer_wall_line", "") if d.get("outer_wall_line") is not None else None
+        )
+
+        sub_gates: list[SubGateSpec] = []
+        sg_val = d.get("sub_gates")
+        if sg_val is not None:
+            if isinstance(sg_val, (str, bytes, dict)) or not isinstance(sg_val, (list, tuple)):
+                raise ValueError(
+                    f"gate profile JSON: 'sub_gates' must be a list of objects, got {sg_val!r}"
+                )
+            for i, sg_d in enumerate(sg_val):
+                p = f"sub_gates[{i}]"
+                if not isinstance(sg_d, dict):
+                    raise ValueError(
+                        f"gate profile JSON: '{p}' must be an object, got {type(sg_d).__name__}"
+                    )
+                _check_unknown(sg_d, {"inner_wall_line", "outer_wall_line", "tip_t", "island"}, p)
+                sub_island: SubIslandSpec | None = None
+                si_d = _section(sg_d, "island", required=False)
+                if si_d is not None:
+                    _check_unknown(
+                        si_d, {"angle_deg", "inner_line", "outer_line", "end_dist"}, f"{p}.island"
+                    )
+                    sub_island = SubIslandSpec(
+                        angle_deg=_num(si_d, "angle_deg", f"{p}.island."),
+                        inner_line=_line(si_d, "inner_line", f"{p}.island."),
+                        outer_line=_line(si_d, "outer_line", f"{p}.island."),
+                        end_dist=_num(si_d, "end_dist", f"{p}.island."),
+                    )
+                sub_gates.append(
+                    SubGateSpec(
+                        inner_wall_line=_line(sg_d, "inner_wall_line", f"{p}."),
+                        outer_wall_line=_line(sg_d, "outer_wall_line", f"{p}."),
+                        tip_t=_num(sg_d, "tip_t", f"{p}."),
+                        island=sub_island,
+                    )
+                )
+
+        runner: RunnerSpec | None = None
+        rn_d = _section(d, "runner", required=False)
+        if rn_d is not None:
+            _check_unknown(rn_d, {"width", "depth", "path"}, "runner")
+            path_val = _req(rn_d, "path", "runner.")
+            if isinstance(path_val, (str, bytes)) or not isinstance(path_val, (list, tuple)):
+                raise ValueError(
+                    f"gate profile JSON: 'runner.path' must be [[t, w], ...], got {path_val!r}"
+                )
+            path = []
+            for pt in path_val:
+                a, b = _elements(pt, 2, "runner.path", "[[t, w], ...]")
+                path.append((_scalar(a, "runner.path"), _scalar(b, "runner.path")))
+            runner = RunnerSpec(
+                width=_num(rn_d, "width", "runner."),
+                depth=_num(rn_d, "depth", "runner."),
+                path=tuple(path),
+            )
 
         well: WellSpec | None = None
         well_d = _section(d, "well", required=False)
@@ -362,6 +481,8 @@ class GateProfileSpec:
             valve=valve,
             island=island,
             well=well,
+            sub_gates=tuple(sub_gates),
+            runner=runner,
         )
         spec.validate()
         return spec
@@ -385,13 +506,36 @@ class GateProfileSpec:
                 "angle_deg": self.main_ramp.angle_deg,
                 "cap_depth": self.main_ramp.cap_depth,
             },
-            "outer_wall_line": [list(p) for p in self.outer_wall_line],
             "valve": {
                 "t": self.valve.t,
                 "w": self.valve.w,
                 "orifice_diameter": self.valve.orifice_diameter,
             },
         }
+        if self.outer_wall_line is not None:
+            d["outer_wall_line"] = [list(p) for p in self.outer_wall_line]
+        if self.sub_gates:
+            d["sub_gates"] = []
+            for sg in self.sub_gates:
+                sg_d: dict[str, Any] = {
+                    "inner_wall_line": [list(p) for p in sg.inner_wall_line],
+                    "outer_wall_line": [list(p) for p in sg.outer_wall_line],
+                    "tip_t": sg.tip_t,
+                }
+                if sg.island is not None:
+                    sg_d["island"] = {
+                        "angle_deg": sg.island.angle_deg,
+                        "inner_line": [list(p) for p in sg.island.inner_line],
+                        "outer_line": [list(p) for p in sg.island.outer_line],
+                        "end_dist": sg.island.end_dist,
+                    }
+                d["sub_gates"].append(sg_d)
+        if self.runner is not None:
+            d["runner"] = {
+                "width": self.runner.width,
+                "depth": self.runner.depth,
+                "path": [list(p) for p in self.runner.path],
+            }
         if self.island is not None:
             d["island"] = {
                 "angle_deg": self.island.angle_deg,
@@ -430,14 +574,32 @@ class GateProfileSpec:
     def t_max(self) -> float:
         """Total t-extent of the gate block."""
         candidates = [
-            self.outer_wall_line[1][0],
             self.ramp_cap_t(),
             self.valve.t + self.valve.orifice_diameter / 2.0,
         ]
+        if self.outer_wall_line is not None:
+            candidates.append(self.outer_wall_line[1][0])
+        for sg in self.sub_gates:
+            candidates.append(sg.tip_t)
+            if sg.island is not None:
+                candidates.append(sg.island.end_dist)
+        if self.runner is not None:
+            candidates.append(max(t for t, _w in self.runner.path) + self.runner.width / 2.0)
         if self.well is not None:
             candidates.append(self.well.t_range[1])
         if self.island is not None:
             candidates.append(self.island.end_dist)
+        return max(candidates)
+
+    def w_max(self) -> float:
+        """Largest width coordinate any pocket feature reaches (grid-fit bound)."""
+        candidates = [0.0]
+        if self.outer_wall_line is not None:
+            candidates += [self.outer_wall_line[0][1], self.outer_wall_line[1][1]]
+        for sg in self.sub_gates:
+            candidates += [sg.outer_wall_line[0][1], sg.outer_wall_line[1][1]]
+        if self.runner is not None:
+            candidates.append(max(w for _t, w in self.runner.path) + self.runner.width / 2.0)
         return max(candidates)
 
     # ---- validation ----
@@ -473,13 +635,92 @@ class GateProfileSpec:
                 f"main_ramp.cap_depth ({self.main_ramp.cap_depth}) must be ≥ "
                 f"land.depth ({self.land.depth})"
             )
-        (wt1, ww1), (wt2, ww2) = self.outer_wall_line
-        if wt2 <= wt1 + _EPS:
-            raise ValueError(f"outer_wall_line t must be increasing, got {wt1} → {wt2}")
-        if ww1 <= 0 or ww2 <= 0:
-            raise ValueError(f"outer_wall_line w must be positive, got {ww1}, {ww2}")
+        if (self.outer_wall_line is None) == (not self.sub_gates):
+            raise ValueError(
+                "exactly one of outer_wall_line (single pocket) or sub_gates (fans) "
+                "must describe the pocket silhouette"
+            )
+        if self.outer_wall_line is not None:
+            (wt1, ww1), (wt2, ww2) = self.outer_wall_line
+            if wt2 <= wt1 + _EPS:
+                raise ValueError(f"outer_wall_line t must be increasing, got {wt1} → {wt2}")
+            if ww1 <= 0 or ww2 <= 0:
+                raise ValueError(f"outer_wall_line w must be positive, got {ww1}, {ww2}")
         if self.valve.t < 0:
             raise ValueError(f"valve.t must be ≥ 0, got {self.valve.t}")
+
+        if self.sub_gates and self.island is not None:
+            raise ValueError(
+                "a top-level island needs the single-pocket form; with sub_gates each fan "
+                "carries its own island"
+            )
+        for i, sg in enumerate(self.sub_gates):
+            p = f"sub_gates[{i}]"
+            if sg.tip_t <= self.land.length + _EPS:
+                raise ValueError(
+                    f"{p}.tip_t ({sg.tip_t}) must be > land.length ({self.land.length})"
+                )
+            for label, line in (
+                ("inner_wall_line", sg.inner_wall_line),
+                ("outer_wall_line", sg.outer_wall_line),
+            ):
+                (t1, w1), (t2, w2) = line
+                if t2 <= t1 + _EPS:
+                    raise ValueError(f"{p}.{label} t must be increasing, got {t1} → {t2}")
+                if t1 < -_EPS:
+                    raise ValueError(f"{p}.{label} t must be ≥ 0, got {t1}")
+                if w1 < 0 or w2 < 0:
+                    raise ValueError(f"{p}.{label} w must be ≥ 0, got {w1}, {w2}")
+            # the fan must have positive width at its tip, or it is a slit that
+            # the raster may drop entirely
+            w_in_tip = _line_w(sg.inner_wall_line, sg.tip_t)
+            w_out_tip = _line_w(sg.outer_wall_line, sg.tip_t)
+            if w_out_tip <= w_in_tip + _EPS:
+                raise ValueError(
+                    f"{p}: outer wall ({w_out_tip:.3f}) must be wider than the inner wall "
+                    f"({w_in_tip:.3f}) at tip_t = {sg.tip_t}"
+                )
+            if sg.island is not None:
+                si = sg.island
+                if si.angle_deg < 0:
+                    raise ValueError(f"{p}.island.angle_deg must be ≥ 0, got {si.angle_deg}")
+                if si.angle_deg > self.main_ramp.angle_deg + _EPS:
+                    raise ValueError(
+                        f"{p}.island.angle_deg ({si.angle_deg}) must be ≤ main_ramp.angle_deg "
+                        f"({self.main_ramp.angle_deg}); the island is the shallow side"
+                    )
+                if si.end_dist <= self.land.length + _EPS:
+                    raise ValueError(
+                        f"{p}.island.end_dist ({si.end_dist}) must be > land.length "
+                        f"({self.land.length})"
+                    )
+                for label, line in (("inner_line", si.inner_line), ("outer_line", si.outer_line)):
+                    (t1, _w1), (t2, _w2) = line
+                    if t2 <= t1 + _EPS:
+                        raise ValueError(
+                            f"{p}.island.{label} t must be increasing, got {t1} → {t2}"
+                        )
+                for t_chk in (self.land.length, si.end_dist):
+                    if _line_w(si.outer_line, t_chk) <= _line_w(si.inner_line, t_chk) + _EPS:
+                        raise ValueError(
+                            f"{p}.island: outer_line must stay outside inner_line over "
+                            f"[land.length, end_dist]; they cross by t = {t_chk}"
+                        )
+
+        if self.runner is not None:
+            rn = self.runner
+            if rn.width <= 0 or rn.depth <= 0:
+                raise ValueError(
+                    f"runner.width and runner.depth must be positive, got {rn.width}, {rn.depth}"
+                )
+            if len(rn.path) < 2:
+                raise ValueError(f"runner.path needs at least 2 points, got {len(rn.path)}")
+            for t, w in rn.path:
+                if t < -_EPS or w < -_EPS:
+                    raise ValueError(f"runner.path points must have t ≥ 0 and w ≥ 0, got {(t, w)}")
+            for (t1, w1), (t2, w2) in zip(rn.path[:-1], rn.path[1:], strict=True):
+                if math.hypot(t2 - t1, w2 - w1) <= _EPS:
+                    raise ValueError(f"runner.path has a zero-length segment at {(t1, w1)}")
 
         if self.island is not None:
             isl = self.island
@@ -624,6 +865,24 @@ class ProfilePlateConfig:
 # ---------------------------------------------------------------------------
 
 
+def _line_w(line: Line, t: float) -> float:
+    """Scalar evaluation of a (t, w) line at ``t`` (extrapolated, no clamp)."""
+    (t1, w1), (t2, w2) = line
+    return w1 + (w2 - w1) / max(t2 - t1, 1e-12) * (t - t1)
+
+
+def _polyline_distance(
+    path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
+) -> np.ndarray:
+    """Distance from each (t, w) to the nearest point of a polyline."""
+    best = np.full(t.shape, np.inf)
+    for (pt, pw), (qt, qw) in zip(path[:-1], path[1:], strict=True):
+        vt, vw = qt - pt, qw - pw
+        s = np.clip(((t - pt) * vt + (w - pw) * vw) / (vt * vt + vw * vw), 0.0, 1.0)
+        best = np.minimum(best, np.hypot(t - (pt + s * vt), w - (pw + s * vw)))
+    return best
+
+
 def _line_eval(
     line: tuple[tuple[float, float], tuple[float, float]],
     t: np.ndarray,
@@ -703,7 +962,7 @@ def build_profile_gate_geometry(
     # --- grid-fit check: the pocket must not overhang the raster grid ---
     # (otherwise it would silently truncate at the array edge and produce
     # wrong volume / conductance with no diagnostic)
-    w_wall_max = max(full_half_width, spec.outer_wall_line[0][1], spec.outer_wall_line[1][1])
+    w_wall_max = max(full_half_width, spec.w_max())
     well_hw = spec.well.half_width if spec.well is not None else 0.0
     if spec.symmetric:
         x_lo = x_valve - max(w_wall_max, well_hw)
@@ -740,15 +999,55 @@ def build_profile_gate_geometry(
             in_weld = in_island & (t >= wt_lo) & (t <= wt_hi)
             d_base = np.where(in_weld, isl.weld.depth, d_base)
 
-    # --- outer wall (pocket silhouette) ---
-    w_wall = _line_eval(spec.outer_wall_line, t, before_value=full_half_width)
-    in_gate_base = (t >= 0) & (t <= T) & (wa >= 0) & (wa <= w_wall)
-    # A dam welded up to the PL leaves no flow path: those cells are steel,
-    # not cavity (a zero-thickness cell in the mask would give S = 0 and a
-    # singular system). The well is machined through it, so cells the well
-    # still reaches stay cavity via ``in_well`` below.
-    if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
-        in_gate_base &= ~in_weld
+    # --- pocket silhouette: one outer wall, or the union of the fans ---
+    if spec.outer_wall_line is not None:
+        w_wall = _line_eval(spec.outer_wall_line, t, before_value=full_half_width)
+        in_gate_base = (t >= 0) & (t <= T) & (wa >= 0) & (wa <= w_wall)
+        # A dam welded up to the PL leaves no flow path: those cells are
+        # steel, not cavity (a zero-thickness cell in the mask would give
+        # S = 0 and a singular system). The well is machined through it, so
+        # cells the well still reaches stay cavity via ``in_well`` below.
+        if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
+            in_gate_base &= ~in_weld
+    else:
+        # Sub-gate fans: outside every fan is steel at the PL. Each fan
+        # carries the land + main ramp, overridden by its own island band.
+        in_gate_base = np.zeros(t.shape, dtype=bool)
+        d_fans = np.zeros_like(d_base)
+        for sg in spec.sub_gates:
+            w_in = _line_eval(sg.inner_wall_line, t, before_value=sg.inner_wall_line[0][1])
+            w_out = _line_eval(sg.outer_wall_line, t, before_value=sg.outer_wall_line[0][1])
+            in_fan = (t >= 0) & (t <= sg.tip_t) & (wa >= w_in) & (wa <= w_out)
+            d_fan = d_base
+            if sg.island is not None:
+                si = sg.island
+                tan_si = math.tan(math.radians(si.angle_deg))
+                w_si_in = _line_eval(si.inner_line, t, before_value=si.inner_line[0][1])
+                w_si_out = _line_eval(si.outer_line, t, before_value=si.outer_line[0][1])
+                in_si = (
+                    in_fan
+                    & (t > land_len)
+                    & (t <= si.end_dist)
+                    & (wa >= w_si_in)
+                    & (wa <= w_si_out)
+                )
+                d_fan = np.where(in_si, land_depth + tan_si * (t - land_len), d_base)
+            # Overlapping fans: the deeper (more open) one wins, as a machined
+            # union would.
+            d_fans = np.where(in_fan, np.maximum(d_fans, d_fan), d_fans)
+            in_gate_base |= in_fan
+        d_base = d_fans
+
+    # --- runner band: d = max(d, depth) within width/2 of the path ---
+    if spec.runner is not None:
+        rn = spec.runner
+        in_runner = (
+            (t >= 0) & (t <= T) & (_polyline_distance(rn.path, t, wa) <= rn.width / 2.0 + 1e-9)
+        )
+        d_base = np.where(
+            in_runner, np.maximum(np.where(in_gate_base, d_base, 0.0), rn.depth), d_base
+        )
+        in_gate_base |= in_runner
 
     # --- well (obround capsule with sloped wall, distance field) ---
     in_well = np.zeros_like(in_gate_base)

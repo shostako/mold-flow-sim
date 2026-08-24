@@ -820,3 +820,142 @@ def test_display_origin_x_follows_a_symmetric_valve_offset() -> None:
     g = build_profile_gate_geometry(spec, _plate())
     x0, _y0 = g.display_origin_mm()
     assert x0 == pytest.approx(5.0 + 150.0 + 10.0)
+
+
+# -------------------------- edge channels (縁部深彫り) --------------------------
+#
+# A band of pocket cells within ``width`` (perpendicular distance) of the
+# outer wall gets ``d = max(d, depth)``. The minimal spec's wall is the
+# vertical line w = 100 over the whole block, so the band geometry has a
+# closed form: a w ∈ [100 − width, 100] rectangle over t_range plus a
+# quarter-disc at each end (the wall side of the end circles is steel).
+
+
+def _ec_dict(**overrides) -> dict:
+    ec = {"width": 3.0, "depth": 4.0, "t_range": [17.0, 21.0]}
+    ec.update(overrides)
+    return ec
+
+
+def test_edge_channel_deepens_the_band_only_and_mirrors() -> None:
+    base = _minimal_spec()
+    spec = _minimal_spec(edge_channels=[_ec_dict()])
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    # silhouette untouched: the band only deepens existing cavity cells
+    assert np.array_equal(g0.mask, g1.mask)
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    yy, xx = _grid(g1)
+    wa = np.abs(xx - (5.0 + 150.0))  # symmetric: |x − x_valve|
+    # every changed cell hugs the wall (w = 100) within width + a cell slop
+    assert wa[diff].min() >= 100.0 - 3.0 - g1.cell_size_mm
+    assert wa[diff].max() <= 100.0
+    # changed cells get exactly the channel depth (the base there is capped
+    # at 2.4 < 4.0, so the floor always wins inside the band)
+    assert np.allclose(g1.thickness_mm[diff], 4.0)
+    # symmetric: the band stands on both mirrored edges
+    nx = diff.shape[1]
+    assert diff[:, : nx // 2].sum() == diff[:, (nx + 1) // 2 :].sum() > 0
+
+
+def test_edge_channel_volume_increment_matches_closed_form() -> None:
+    """t_range (17, 21) keeps band + end discs inside the capped-ramp zone
+    (t ∈ [14, 24], base depth 2.4 everywhere), so ΔV is exact:
+    ΔV = (depth − cap) · (width·len + 2·(π/4)·width²) · 2 sides."""
+    base = _minimal_spec()
+    spec = _minimal_spec(edge_channels=[_ec_dict()])
+    g0 = build_profile_gate_geometry(base, _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    dv_mm3 = (g1.volume_cm3() - g0.volume_cm3()) * 1000.0
+    expected = (4.0 - 2.4) * (3.0 * 4.0 + 2.0 * (math.pi / 4.0) * 3.0**2) * 2.0
+    assert dv_mm3 == pytest.approx(expected, rel=0.03)
+
+
+def test_edge_channel_depth_is_a_floor_not_an_override() -> None:
+    """A channel shallower than the local depth changes nothing there."""
+    base = _minimal_spec()
+    spec = _minimal_spec(edge_channels=[_ec_dict(depth=1.0)])  # < cap 2.4
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    assert np.array_equal(g0.thickness_mm, g1.thickness_mm)
+
+
+def test_edge_channel_default_t_range_spans_the_wall() -> None:
+    base = _minimal_spec()
+    spec = _minimal_spec(edge_channels=[_ec_dict(t_range=None)])
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g1.thickness_mm != g0.thickness_mm
+    rows = np.where(diff.any(axis=1))[0]
+    yy, _xx = _grid(g1)
+    t = (5.0 + 24.0) - yy[:, 0]  # y_plate_bottom − y
+    ts = t[rows]
+    assert ts.min() < 1.0  # reaches the gate exit end of the wall
+    assert ts.max() > 23.0  # ... and the far end (t_max = 24)
+
+
+def test_edge_channel_respects_t_range() -> None:
+    base = _minimal_spec()
+    spec = _minimal_spec(edge_channels=[_ec_dict()])
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g1.thickness_mm != g0.thickness_mm
+    yy, _xx = _grid(g1)
+    t = (5.0 + 24.0) - yy[:, 0]
+    ts = t[np.where(diff.any(axis=1))[0]]
+    # band + end discs live in t ∈ [14, 24]; nothing changes before that
+    assert ts.min() >= 14.0 - g1.cell_size_mm
+
+
+def test_edge_channel_asymmetric_builds_a_single_band() -> None:
+    base = _minimal_spec(symmetric=False, gate_exit_width=100.0)
+    spec = _minimal_spec(symmetric=False, gate_exit_width=100.0, edge_channels=[_ec_dict()])
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    # one contiguous column cluster, not a mirrored pair
+    cols = np.where(diff.any(axis=0))[0]
+    assert cols.max() - cols.min() + 1 == cols.size
+
+
+def test_edge_channel_json_roundtrip_and_default_omitted() -> None:
+    spec = _minimal_spec(edge_channels=[_ec_dict(), _ec_dict(t_range=None, width=1.5)])
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.edge_channels[0].side == "outer"  # side omitted → default
+    assert again.edge_channels[1].t_range is None
+    # absent in the JSON → empty tuple, and to_dict leaves the key out
+    legacy = _minimal_spec()
+    assert legacy.edge_channels == ()
+    assert "edge_channels" not in legacy.to_dict()
+    assert "edge_channels" not in _demo_spec().to_dict()
+
+
+def test_edge_channel_validation() -> None:
+    with pytest.raises(ValueError, match="side"):
+        _minimal_spec(edge_channels=[_ec_dict(side="inner")])  # no inner wall here
+    with pytest.raises(ValueError, match="positive"):
+        _minimal_spec(edge_channels=[_ec_dict(width=0.0)])
+    with pytest.raises(ValueError, match="positive"):
+        _minimal_spec(edge_channels=[_ec_dict(depth=-1.0)])
+    with pytest.raises(ValueError, match="increasing"):
+        _minimal_spec(edge_channels=[_ec_dict(t_range=[21.0, 17.0])])
+    with pytest.raises(ValueError, match="t_max"):
+        _minimal_spec(edge_channels=[_ec_dict(t_range=[17.0, 999.0])])
+    with pytest.raises(ValueError, match="unknown key"):
+        _minimal_spec(edge_channels=[{**_ec_dict(), "bogus": 1}])
+    with pytest.raises(ValueError, match="must be a list"):
+        _minimal_spec(edge_channels="3")
+    with pytest.raises(ValueError, match="must be an object"):
+        _minimal_spec(edge_channels=[3.0])
+
+
+def test_edge_channel_zero_cell_raster_is_rejected() -> None:
+    """A band that misses every cell centre must fail loudly: the spec would
+    be recorded as asked while the built geometry silently lacks the
+    feature (same false-green class as the sub-mesh runner)."""
+    spec = _minimal_spec(edge_channels=[_ec_dict(width=0.01, t_range=[20.0, 20.05])])
+    with pytest.raises(ValueError, match="edge_channels\\[0\\].*zero cells"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)

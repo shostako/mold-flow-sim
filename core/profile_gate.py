@@ -46,6 +46,15 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    the path, so it can cross steel (where it *is* the pocket) or a fan. With
    sub-gates it is the channel that carries the melt from the valve well to
    each fan tip.
+9. **Edge channels** (optional) — deepened bands hugging a pocket wall
+   (縁部深彫り): ``d = max(d, depth)`` for pocket cells within ``width``
+   (perpendicular distance) of the effective wall polyline, clipped to
+   ``t_range``. Top-level ``edge_channels`` follow the single-pocket
+   ``outer_wall_line`` (mirrored with the pocket when ``symmetric``); each
+   sub-gate fan carries its own list with ``side`` = ``"outer"`` /
+   ``"inner"``. Unlike the runner they never extend the silhouette — they
+   only deepen existing cavity cells, turning the rim into a
+   low-resistance raceway (S ∝ h³).
 
 Confidentiality note: this repository ships only the format definition,
 the builder, and a **fictional-dimension demo spec**
@@ -175,6 +184,7 @@ class SubGateSpec:
     outer_wall_line: Line
     tip_t: float
     island: SubIslandSpec | None = None
+    edge_channels: tuple[EdgeChannelSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -184,6 +194,31 @@ class RunnerSpec:
     width: float
     depth: float
     path: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class EdgeChannelSpec:
+    """Deepened band hugging a pocket wall (edge channel / 縁部深彫り).
+
+    A strip of constant channel thickness ``depth`` along a wall line,
+    ``width`` mm wide measured as the perpendicular distance to the wall
+    in the (t, w) plane. It only *deepens* cells already inside the pocket
+    (``d = max(d, depth)``, same floor semantics as the runner and the
+    well) — the silhouette is untouched, so it can never disconnect or
+    extend the cavity. Physically it is a milled groove along the fan
+    edge: ``S ∝ h³`` makes the rim a low-resistance raceway that carries
+    the melt to the far corners of the fan before the interior fills.
+
+    ``t_range`` limits the band's extent along the wall (``None`` = the
+    wall's full extent). ``side`` selects the wall in a sub-gate fan
+    (``"outer"`` / ``"inner"``); the single-pocket form has only an outer
+    wall, so there ``side`` must stay ``"outer"``.
+    """
+
+    width: float
+    depth: float
+    t_range: tuple[float, float] | None = None
+    side: str = "outer"
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +282,42 @@ def _section(d: dict, key: str, *, required: bool) -> dict | None:
             f"gate profile JSON: '{key}' must be an object, got {type(val).__name__} ({val!r})"
         )
     return val
+
+
+def _edge_channel_dict(ec: EdgeChannelSpec) -> dict:
+    ec_d: dict[str, Any] = {"width": ec.width, "depth": ec.depth, "side": ec.side}
+    if ec.t_range is not None:
+        ec_d["t_range"] = list(ec.t_range)
+    return ec_d
+
+
+def _edge_channels(d: dict, path: str) -> tuple[EdgeChannelSpec, ...]:
+    """Parse an optional ``edge_channels`` list under ``path``."""
+    val = d.get("edge_channels")
+    if val is None:
+        return ()
+    label = f"{path}edge_channels"
+    if isinstance(val, (str, bytes, dict)) or not isinstance(val, (list, tuple)):
+        raise ValueError(f"gate profile JSON: '{label}' must be a list of objects, got {val!r}")
+    channels = []
+    for i, ec_d in enumerate(val):
+        p = f"{label}[{i}]"
+        if not isinstance(ec_d, dict):
+            raise ValueError(
+                f"gate profile JSON: '{p}' must be an object, got {type(ec_d).__name__}"
+            )
+        _check_unknown(ec_d, {"width", "depth", "t_range", "side"}, p)
+        channels.append(
+            EdgeChannelSpec(
+                width=_num(ec_d, "width", f"{p}."),
+                depth=_num(ec_d, "depth", f"{p}."),
+                t_range=(
+                    _pair(ec_d, "t_range", f"{p}.") if ec_d.get("t_range") is not None else None
+                ),
+                side=str(ec_d.get("side", "outer")),
+            )
+        )
+    return tuple(channels)
 
 
 def _check_unknown(d: dict, known: set[str], path: str) -> None:
@@ -314,6 +385,9 @@ class GateProfileSpec:
     well: WellSpec | None = None
     sub_gates: tuple[SubGateSpec, ...] = ()
     runner: RunnerSpec | None = None
+    # Single-pocket form only: bands along the outer wall. Fans carry their
+    # own ``SubGateSpec.edge_channels``.
+    edge_channels: tuple[EdgeChannelSpec, ...] = ()
 
     # ---- JSON I/O ----
 
@@ -336,6 +410,7 @@ class GateProfileSpec:
                 "valve",
                 "sub_gates",
                 "runner",
+                "edge_channels",
             },
             "",
         )
@@ -398,7 +473,11 @@ class GateProfileSpec:
                     raise ValueError(
                         f"gate profile JSON: '{p}' must be an object, got {type(sg_d).__name__}"
                     )
-                _check_unknown(sg_d, {"inner_wall_line", "outer_wall_line", "tip_t", "island"}, p)
+                _check_unknown(
+                    sg_d,
+                    {"inner_wall_line", "outer_wall_line", "tip_t", "island", "edge_channels"},
+                    p,
+                )
                 sub_island: SubIslandSpec | None = None
                 si_d = _section(sg_d, "island", required=False)
                 if si_d is not None:
@@ -417,6 +496,7 @@ class GateProfileSpec:
                         outer_wall_line=_line(sg_d, "outer_wall_line", f"{p}."),
                         tip_t=_num(sg_d, "tip_t", f"{p}."),
                         island=sub_island,
+                        edge_channels=_edge_channels(sg_d, f"{p}."),
                     )
                 )
 
@@ -483,6 +563,7 @@ class GateProfileSpec:
             well=well,
             sub_gates=tuple(sub_gates),
             runner=runner,
+            edge_channels=_edge_channels(d, ""),
         )
         spec.validate()
         return spec
@@ -529,6 +610,8 @@ class GateProfileSpec:
                         "outer_line": [list(p) for p in sg.island.outer_line],
                         "end_dist": sg.island.end_dist,
                     }
+                if sg.edge_channels:
+                    sg_d["edge_channels"] = [_edge_channel_dict(ec) for ec in sg.edge_channels]
                 d["sub_gates"].append(sg_d)
         if self.runner is not None:
             d["runner"] = {
@@ -536,6 +619,8 @@ class GateProfileSpec:
                 "depth": self.runner.depth,
                 "path": [list(p) for p in self.runner.path],
             }
+        if self.edge_channels:
+            d["edge_channels"] = [_edge_channel_dict(ec) for ec in self.edge_channels]
         if self.island is not None:
             d["island"] = {
                 "angle_deg": self.island.angle_deg,
@@ -686,6 +771,18 @@ class GateProfileSpec:
                 "a top-level island needs the single-pocket form; with sub_gates each fan "
                 "carries its own island"
             )
+        if self.edge_channels and self.outer_wall_line is None:
+            raise ValueError(
+                "top-level edge_channels need the single-pocket form (outer_wall_line); "
+                "with sub_gates each fan carries its own edge_channels"
+            )
+        _validate_edge_channels(
+            self.edge_channels,
+            "edge_channels",
+            allowed_sides=("outer",),
+            t_end=self.t_max(),
+            t_end_label="t_max()",
+        )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"
             if sg.tip_t <= self.land.length + _EPS:
@@ -746,6 +843,13 @@ class GateProfileSpec:
                             f"{p}.island: outer_line must stay outside inner_line over "
                             f"[land.length, end_dist]; they cross by t = {t_chk}"
                         )
+            _validate_edge_channels(
+                sg.edge_channels,
+                f"{p}.edge_channels",
+                allowed_sides=("outer", "inner"),
+                t_end=sg.tip_t,
+                t_end_label="tip_t",
+            )
 
         if self.runner is not None:
             rn = self.runner
@@ -905,6 +1009,40 @@ class ProfilePlateConfig:
 # ---------------------------------------------------------------------------
 
 
+def _validate_edge_channels(
+    channels: tuple[EdgeChannelSpec, ...],
+    path: str,
+    *,
+    allowed_sides: tuple[str, ...],
+    t_end: float,
+    t_end_label: str,
+) -> None:
+    """Shared checks for a list of edge channels (single pocket or one fan)."""
+    for i, ec in enumerate(channels):
+        p = f"{path}[{i}]"
+        if ec.side not in allowed_sides:
+            raise ValueError(
+                f"{p}.side must be one of {list(allowed_sides)}, got {ec.side!r}"
+                + (
+                    " (the single-pocket form has no inner wall)"
+                    if "inner" not in allowed_sides
+                    else ""
+                )
+            )
+        if ec.width <= 0 or ec.depth <= 0:
+            raise ValueError(
+                f"{p}.width and {p}.depth must be positive, got {ec.width}, {ec.depth}"
+            )
+        if ec.t_range is not None:
+            lo, hi = ec.t_range
+            if hi <= lo + _EPS:
+                raise ValueError(f"{p}.t_range must be increasing, got {ec.t_range}")
+            if lo < -_EPS or hi > t_end + _EPS:
+                raise ValueError(
+                    f"{p}.t_range ({ec.t_range}) must lie within [0, {t_end_label} ({t_end:g})]"
+                )
+
+
 def _line_w(line: Line, t: float) -> float:
     """Scalar evaluation of a (t, w) line at ``t`` (extrapolated, no clamp)."""
     (t1, w1), (t2, w2) = line
@@ -943,6 +1081,74 @@ def _fan_breakpoints(sg: SubGateSpec) -> list[float]:
     """Where the fan's width can turn: both clamp points, plus the ends."""
     pts = {0.0, float(sg.tip_t), sg.inner_wall_line[0][0], sg.outer_wall_line[0][0]}
     return sorted(p for p in pts if -_EPS <= p <= sg.tip_t + _EPS)
+
+
+def _edge_wall_polyline(
+    line: Line, t_lo: float, t_hi: float, before_value: float
+) -> tuple[tuple[float, float], ...]:
+    """The effective wall over ``t ∈ [t_lo, t_hi]`` as a (t, w) polyline.
+
+    Mirrors ``_line_eval``: constant ``before_value`` before the line's
+    first point, linear (extrapolated) after. When ``before_value`` differs
+    from the line's first w the clamp is a step — both corner points are
+    kept so the polyline carries the vertical jump the raster sees.
+    Consecutive duplicates (the common ``before_value == w1`` case) are
+    dropped.
+    """
+    (t1, w1), _ = line
+
+    def w_at(tv: float) -> float:
+        return before_value if tv < t1 else _line_w(line, tv)
+
+    pts = [(t_lo, w_at(t_lo))]
+    if t_lo < t1 < t_hi:
+        pts.append((t1, before_value))
+        pts.append((t1, w1))
+    pts.append((t_hi, w_at(t_hi)))
+    out = [pts[0]]
+    for p in pts[1:]:
+        if math.hypot(p[0] - out[-1][0], p[1] - out[-1][1]) > _EPS:
+            out.append(p)
+    return tuple(out)
+
+
+def _apply_edge_channels(
+    channels: tuple[EdgeChannelSpec, ...],
+    *,
+    walls: dict[str, tuple[Line, float]],  # side -> (line, before_value)
+    t_end: float,
+    in_pocket: np.ndarray,
+    d: np.ndarray,
+    t: np.ndarray,
+    wa: np.ndarray,
+    cell_size: float,
+    label: str,
+) -> np.ndarray:
+    """Deepen ``d`` along the requested walls; returns the new depth field.
+
+    The band is the set of pocket cells within ``width`` (perpendicular
+    distance) of the effective wall polyline, clipped to ``t_range``. It is
+    a floor (``d = max(d, depth)``) restricted to ``in_pocket``, so the
+    silhouette never changes. A band that selects zero cells is rejected:
+    the spec would be recorded as asked while the built geometry silently
+    lacks the feature (same false-green class as the runner thinner than
+    the mesh).
+    """
+    for i, ec in enumerate(channels):
+        line, before_value = walls[ec.side]
+        t_lo, t_hi = ec.t_range if ec.t_range is not None else (0.0, t_end)
+        t_hi = min(t_hi, t_end)
+        poly = _edge_wall_polyline(line, t_lo, t_hi, before_value)
+        band = in_pocket & (_polyline_distance(poly, t, wa) <= ec.width + 1e-9)
+        if not band.any():
+            raise ValueError(
+                f"{label}[{i}] (width {ec.width} mm, t_range [{t_lo:g}, {t_hi:g}]) "
+                f"rasterises to zero cells at cell_size_mm={cell_size}: the band misses "
+                "every pocket cell centre. Widen the band, extend t_range, or refine "
+                "the mesh."
+            )
+        d = np.where(band, np.maximum(d, ec.depth), d)
+    return d
 
 
 def _polyline_distance(
@@ -1089,12 +1295,23 @@ def build_profile_gate_geometry(
         # cells the well still reaches stay cavity via ``in_well`` below.
         if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
             in_gate_base &= ~in_weld
+        d_base = _apply_edge_channels(
+            spec.edge_channels,
+            walls={"outer": (spec.outer_wall_line, full_half_width)},
+            t_end=T,
+            in_pocket=in_gate_base,
+            d=d_base,
+            t=t,
+            wa=wa,
+            cell_size=dx,
+            label="edge_channels",
+        )
     else:
         # Sub-gate fans: outside every fan is steel at the PL. Each fan
         # carries the land + main ramp, overridden by its own island band.
         in_gate_base = np.zeros(t.shape, dtype=bool)
         d_fans = np.zeros_like(d_base)
-        for sg in spec.sub_gates:
+        for sg_i, sg in enumerate(spec.sub_gates):
             w_in = _line_eval(sg.inner_wall_line, t, before_value=sg.inner_wall_line[0][1])
             w_out = _line_eval(sg.outer_wall_line, t, before_value=sg.outer_wall_line[0][1])
             in_fan = (t >= 0) & (t <= sg.tip_t) & (wa >= w_in) & (wa <= w_out)
@@ -1112,6 +1329,20 @@ def build_profile_gate_geometry(
                     & (wa <= w_si_out)
                 )
                 d_fan = np.where(in_si, land_depth + tan_si * (t - land_len), d_base)
+            d_fan = _apply_edge_channels(
+                sg.edge_channels,
+                walls={
+                    "outer": (sg.outer_wall_line, sg.outer_wall_line[0][1]),
+                    "inner": (sg.inner_wall_line, sg.inner_wall_line[0][1]),
+                },
+                t_end=sg.tip_t,
+                in_pocket=in_fan,
+                d=d_fan,
+                t=t,
+                wa=wa,
+                cell_size=dx,
+                label=f"sub_gates[{sg_i}].edge_channels",
+            )
             # Overlapping fans: the deeper (more open) one wins, as a machined
             # union would.
             d_fans = np.where(in_fan, np.maximum(d_fans, d_fan), d_fans)

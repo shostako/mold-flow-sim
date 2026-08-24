@@ -45,6 +45,7 @@ from core import (
 )
 from core.geometry import Geometry
 from core.profile_gate import (
+    EdgeChannelSpec,
     IslandSpec,
     LandSpec,
     MainRampSpec,
@@ -584,6 +585,94 @@ def _well_from_inputs(v: dict) -> WellSpec | None:
     )
 
 
+def _edge_channel_inputs(
+    tag: str,
+    v: dict,
+    *,
+    sided: bool,
+    t_max_mm: float,
+    t_default: tuple[float, float],
+    ramp_cap: float,
+) -> None:
+    """The 縁部深彫り block shared by every Film gate (fills ``v`` in place).
+
+    Sets ``v["ec_on"]`` and, when on, ``ec_width / ec_depth / ec_t_range``
+    (+ ``ec_side`` when ``sided``). The t-range is a two-handle slider so
+    its bounds can never collide (min 0 < max = the wall's t-extent); a
+    range collapsed to zero width is rejected by ``validate()`` like any
+    other inconsistency.
+    """
+    slider, _ = _tagged_widgets(tag)
+    st.markdown("**縁部深彫り（エッジチャネル）**")
+    v["ec_on"] = st.checkbox(
+        "縁部深彫りを有効化",
+        value=False,
+        key=f"{tag}_ec_on",
+        help=(
+            "壁沿いに一定幅・一定深さの帯を彫り、縁を低抵抗の先行流路にする（S ∝ h³）。"
+            "帯はポケット内側のセルを深くするだけで、外形（シルエット）は変えない。"
+        ),
+    )
+    if not v["ec_on"]:
+        return
+    if sided:
+        v["ec_side"] = st.radio(
+            "対象の辺",
+            ["外側", "内側", "両側"],
+            horizontal=True,
+            key=f"{tag}_ec_side",
+            help="扇の外壁沿い／内壁沿い／その両方。",
+        )
+    # Same session-state trick as the runner width: the mesh slider is drawn
+    # after this block, so read its current value and fall back to the
+    # default on the first run. A band narrower than a cell can miss every
+    # cell centre and the builder rejects it (zero-cell false green).
+    dx_now = float(st.session_state.get(f"{tag}_メッシュ粗さ [mm/cell]", 1.0))
+    w_min = max(0.5, math.ceil(dx_now * 2.0) / 2.0)
+    v["ec_width"] = slider(
+        "帯幅 [mm]（壁からの垂直距離）",
+        float(w_min),
+        20.0,
+        float(min(max(3.0, w_min), 20.0)),
+        step=0.5,
+        help="下限はメッシュで解像できる幅（おおよそ1セル）。",
+    )
+    v["ec_depth"] = slider(
+        "帯深さ [mm]（絶対深さ＝流路肉厚）",
+        0.1,
+        15.0,
+        float(min(max(ramp_cap + 1.0, 0.1), 15.0)),
+        step=0.1,
+        help="帯の中は d = max(既存深さ, この値)。既存より浅い指定はその場所では効かない。",
+    )
+    lo, hi = t_default
+    v["ec_t_range"] = slider(
+        "範囲 t [mm]（壁に沿った区間）",
+        0.0,
+        float(t_max_mm),
+        (float(max(0.0, min(lo, t_max_mm))), float(min(hi, t_max_mm))),
+        step=0.1,
+    )
+
+
+def _edge_channels_from_inputs(v: dict, sides: tuple[str, ...]) -> tuple[EdgeChannelSpec, ...]:
+    if not v.get("ec_on"):
+        return ()
+    lo, hi = v["ec_t_range"]
+    return tuple(
+        EdgeChannelSpec(
+            width=float(v["ec_width"]),
+            depth=float(v["ec_depth"]),
+            t_range=(float(lo), float(hi)),
+            side=side,
+        )
+        for side in sides
+    )
+
+
+_EC_SIDES = {"外側": ("outer",), "内側": ("inner",), "両側": ("outer", "inner")}
+
+
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
@@ -724,6 +813,15 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         )
         v["wall_w1"] = float(w_full)
 
+        _edge_channel_inputs(
+            tag,
+            v,
+            sided=False,
+            t_max_mm=float(v["wall_t2"]),
+            t_default=(float(v["wall_t1"]), float(v["wall_t2"])),
+            ramp_cap=float(v["ramp_cap"]),
+        )
+
         _well_inputs(tag, v, symmetric=symmetric, wall_angle_deg=d.well_wall_angle_deg)
         if v["well_on"]:
             well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"])
@@ -797,6 +895,7 @@ def _profile_gate_from_inputs(
         valve=ValveSpec(t=float(v["valve_t"]), w=0.0, orifice_diameter=float(v["valve_d"])),
         island=island,
         well=well,
+        edge_channels=_edge_channels_from_inputs(v, ("outer",)),
     )
     return spec, _plate_from_inputs(v), float(v["cell_size"])
 
@@ -961,6 +1060,15 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
                 step=0.1,
             )
 
+        _edge_channel_inputs(
+            tag,
+            v,
+            sided=True,
+            t_max_mm=float(v["tip_t"]),
+            t_default=(t_land, float(v["tip_t"])),
+            ramp_cap=float(v["ramp_cap"]),
+        )
+
         st.markdown("**ランナー（井戸 → 扇先端）**")
         if d.runner_style == "L":
             st.caption(
@@ -1075,6 +1183,7 @@ def _twin_fan_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfileP
         outer_wall_line=((t_land, w_full), (tip_t, axis + half_tip)),
         tip_t=tip_t,
         island=island,
+        edge_channels=_edge_channels_from_inputs(v, _EC_SIDES[v.get("ec_side", "外側")]),
     )
     spec = GateProfileSpec(
         name=name,

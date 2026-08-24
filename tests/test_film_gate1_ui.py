@@ -233,3 +233,28 @@ def test_a_valve_centre_outside_the_pocket_is_rejected_not_snapped(monkeypatch):
     errors = "\n".join(str(e.value) for e in at.error)
     assert "バルブ位置" in errors and "ポケットの外" in errors
     assert "mfs_geom" not in at.session_state
+
+
+def test_edge_channel_sliders_feed_the_spec():
+    """縁部深彫り ON: the checkbox reveals the sliders and the assembled spec
+    carries exactly one outer-wall channel with the slider values."""
+    at = _film_gate1_app()
+    at.checkbox(key="f1_ec_on").set_value(True).run()
+    _slider(at, "帯幅").set_value(4.0)
+    _slider(at, "帯深さ").set_value(3.0)
+    _slider(at, "範囲 t").set_value((5.0, 20.0)).run()
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    got = GateProfileSpec.from_dict({**rec, "name": "x"})
+    assert len(got.edge_channels) == 1
+    ec = got.edge_channels[0]
+    assert (ec.width, ec.depth, ec.t_range, ec.side) == (4.0, 3.0, (5.0, 20.0), "outer")
+
+
+def test_edge_channel_defaults_off():
+    at = _film_gate1_app()
+    at.button[0].click().run()
+    assert not at.exception
+    got = GateProfileSpec.from_dict({**_recorded_spec(at), "name": "x"})
+    assert got.edge_channels == ()

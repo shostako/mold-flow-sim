@@ -86,10 +86,20 @@ class Geometry:
             raise ValueError(f"gate ({iy},{ix}) is outside the cavity mask")
         self.gates.append((iy, ix))
 
-    def gate_origin_mm(self) -> tuple[float, float]:
-        """Return ``(x0, y0)`` in mm — the gate centroid used as the display
-        origin in the preview and every result-time map. Falls back to the
-        grid center / bottom (0, 0) corner when the geometry has no gates.
+    def display_origin_mm(self) -> tuple[float, float]:
+        """Return ``(x0, y0)`` in mm — the display origin shared by the
+        preview and every result-time map.
+
+        ``x0`` is the gate centroid (the valve axis, i.e. the product
+        center for every parametric build). ``y0`` is the **bottom edge of
+        the product zone** (the ``compression_mask`` cells, which every
+        builder sets to the product plate body), so the product's gate-side
+        edge reads ``y = 0``: a film gate's gate block / runner sits at
+        ``y < 0`` and a direct gate's gate lands inside the product at
+        ``y > 0`` — one product-referenced convention for both. Falls back
+        to the gate centroid ``y`` when there is no product marker (legacy
+        demo geometry), and to the grid center / bottom (0, 0) corner when
+        the geometry has no gates.
         """
         if not self.gates:
             return float(self.nx * self.cell_size_mm) / 2.0, 0.0
@@ -97,6 +107,9 @@ class Geometry:
         gate_ixs = np.fromiter((gx for _, gx in self.gates), dtype=float)
         x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
         y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
+        product = None if self.compression_mask is None else (self.mask & self.compression_mask)
+        if product is not None and product.any():
+            y0 = float(np.where(product)[0].min()) * self.cell_size_mm
         return x0, y0
 
 

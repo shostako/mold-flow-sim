@@ -35,25 +35,26 @@ _Z_GATE = 4
 
 
 def _base_extent(result: FlowResult) -> list[float]:
-    """Image extent in mm with the gate centroid placed at the origin.
+    """Image extent in mm in the product-referenced frame.
 
     All result-time maps (fill animation, pressure map, weld lines, skin /
-    core layers, frame snapshots) share this extent so axis ticks of "0"
-    line up with the valve gate. The bottom and left spines remain at the
-    plot edges, so a half-circle in the y < 0 region does not run into
-    the axis frame.
+    core layers, frame snapshots) share this extent so the "0" axis ticks
+    line up with the valve axis (x) and the product's gate-side bottom
+    edge (y) — see ``Geometry.display_origin_mm``. The bottom and left
+    spines remain at the plot edges, so a gate block in the y < 0 region
+    does not run into the axis frame.
     """
     g = result.geometry
     w_mm = g.nx * g.cell_size_mm
     h_mm = g.ny * g.cell_size_mm
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     return [-x0, w_mm - x0, -y0, h_mm - y0]
 
 
 def _gate_xy_mm(result: FlowResult, iy: int, ix: int) -> tuple[float, float]:
-    """Cell (iy, ix) center in mm, expressed in the gate-centered frame."""
+    """Cell (iy, ix) center in mm, in the product-referenced display frame."""
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     return (
         (ix + 0.5) * g.cell_size_mm - x0,
         (iy + 0.5) * g.cell_size_mm - y0,
@@ -181,7 +182,7 @@ def _nearest_extend(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
 def _cell_centers_mm(result: FlowResult) -> tuple[np.ndarray, np.ndarray]:
     """Cell-center coordinates [mm] on the same origin as ``_base_extent``."""
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     ny, nx = g.mask.shape
     xs = (np.arange(nx) + 0.5) * g.cell_size_mm - x0
     ys = (np.arange(ny) + 0.5) * g.cell_size_mm - y0
@@ -467,7 +468,7 @@ def render_pressure_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -551,7 +552,7 @@ def render_weldlines(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -662,7 +663,7 @@ def render_skin_layer_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
 
     s_field = np.where(g.mask, result.skin_thickness_mm, np.nan)
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
@@ -717,7 +718,7 @@ def render_core_layer_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
 
     h_core = np.where(g.mask, result.core_thickness_mm, np.nan)
     h_open = np.where(g.mask, g.thickness_mm, np.nan)
@@ -859,7 +860,7 @@ def render_layer_map(
         norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     extent = _base_extent(result)
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
     im = ax.imshow(
@@ -1003,7 +1004,7 @@ def render_short_shot_map(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     g = result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     extent = _base_extent(result)
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)

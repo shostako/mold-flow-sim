@@ -369,3 +369,20 @@ def test_compression_shortens_fill_time() -> None:
     expected_ratio = 0.7 / 1.8 + 0.3
     actual_ratio = res_on.total_fill_time_s / res_off.total_fill_time_s
     assert abs(actual_ratio - expected_ratio) < 0.05
+
+
+# -------------------------- display origin --------------------------
+
+
+def test_display_origin_puts_the_gate_inside_the_product_at_positive_y() -> None:
+    """Direct gate: y = 0 is the product's gate-side edge, so the gate disk
+    (inside the product) reads y ≈ +gate_offset — the same product-referenced
+    frame as the film gates."""
+    cfg = _default_cfg()
+    g = build_direct_gate_geometry(cfg)
+    _x0, y0 = g.display_origin_mm()
+    product = g.mask & g.compression_mask
+    assert y0 == pytest.approx(float(np.where(product)[0].min()) * g.cell_size_mm)
+    gate_ys = [(iy + 0.5) * g.cell_size_mm - y0 for iy, _ix in g.gates]
+    assert np.mean(gate_ys) == pytest.approx(cfg.gate_offset_mm, abs=g.cell_size_mm)
+    assert min(gate_ys) > 0.0

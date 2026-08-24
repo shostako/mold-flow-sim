@@ -1808,12 +1808,12 @@ with col_left:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(5, 4), dpi=110)
-    # Recenter on the gate (≒ product center). Tick "0" lines up with the
-    # gate centroid; the half-circle on the gate-near side stays at y < 0
-    # without the bottom spine running through it, since the spine keeps
-    # its default position at the plot edge. Same convention is shared by
-    # every result-time map in core/visualizer.py.
-    x0_mm, y0_mm = geom.gate_origin_mm()
+    # Product-referenced frame: x = 0 on the valve axis (≒ product center),
+    # y = 0 on the product's gate-side bottom edge. A film gate's gate
+    # block / runner reads y < 0, a direct gate's gate lands at y > 0
+    # inside the product. Same convention is shared by every result-time
+    # map in core/visualizer.py and the 3D views.
+    x0_mm, y0_mm = geom.display_origin_mm()
     extent = [
         -x0_mm,
         geom.nx * geom.cell_size_mm - x0_mm,
@@ -1839,7 +1839,9 @@ with col_left:
     plt.close(fig)
     st.image(fig_buf.getvalue())
     st.caption(
-        "原点 (x, y) = (0, 0) はバルブゲート位置（赤丸）。ゲートブロック／ランナーは y < 0 側。"
+        "y = 0 は製品下端ライン、x = 0 はバルブゲート軸（赤丸＝ゲート）。"
+        "フィルムゲートのゲートブロック／ランナーは y < 0 側、"
+        "ダイレクトゲートのゲートは製品内（y > 0）。"
     )
 
 

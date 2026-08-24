@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from core import FilmGateConfig, HeleShawSolver, MaterialDB, build_film_gate_geometry
+from core import (
+    FilmGateConfig,
+    HeleShawSolver,
+    MaterialDB,
+    build_demo_geometry,
+    build_film_gate_geometry,
+)
 
 
 def _default_cfg(**overrides) -> FilmGateConfig:
@@ -773,3 +779,32 @@ def test_compression_inflates_only_plate_body() -> None:
     # Runner / half-circle / gate cells should be unchanged
     other = g.mask & ~cm
     np.testing.assert_allclose(h_on[other], h_off[other], rtol=1e-9)
+
+
+# -------------------------- display origin --------------------------
+
+
+def test_display_origin_y_is_the_product_bottom_edge() -> None:
+    """y = 0 must read as the product's gate-side bottom edge, not the gate
+    centroid: the whole gate block (runner / half-circle / valve) then sits
+    at y < 0, matching the preview caption."""
+    g = build_film_gate_geometry(_default_cfg())
+    x0, y0 = g.display_origin_mm()
+    product = g.mask & g.compression_mask
+    assert y0 == pytest.approx(float(np.where(product)[0].min()) * g.cell_size_mm)
+    # every gate cell (valve, below the plate) is strictly at y < 0
+    for iy, _ix in g.gates:
+        assert (iy + 0.5) * g.cell_size_mm - y0 < 0.0
+    # x stays on the valve axis (gate centroid)
+    gate_ixs = [ix for _iy, ix in g.gates]
+    assert x0 == pytest.approx((float(np.mean(gate_ixs)) + 0.5) * g.cell_size_mm)
+
+
+def test_display_origin_falls_back_to_the_gate_centroid_without_a_product_marker() -> None:
+    """Legacy demo geometry has no compression_mask; the origin stays on the
+    gate centroid as before."""
+    g = build_demo_geometry()
+    assert g.compression_mask is None
+    x0, y0 = g.display_origin_mm()
+    gate_iys = [iy for iy, _ix in g.gates]
+    assert y0 == pytest.approx((float(np.mean(gate_iys)) + 0.5) * g.cell_size_mm)

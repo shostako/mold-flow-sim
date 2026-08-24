@@ -19,6 +19,7 @@ from .geometry import (
 from .materials import MaterialDB, cross_wlf_viscosity
 from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
 from .profile_gate import (
+    EdgeChannelSpec,
     GateProfileSpec,
     IslandSpec,
     LandSpec,
@@ -71,6 +72,7 @@ __all__ = [
     "SubGateSpec",
     "SubIslandSpec",
     "RunnerSpec",
+    "EdgeChannelSpec",
     "build_profile_gate_geometry",
     "HeleShawSolver",
     "MultilayerHeleShawSolver",

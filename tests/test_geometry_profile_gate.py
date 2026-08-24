@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from core import (
+    EdgeChannelSpec,
     GateProfileSpec,
     HeleShawSolver,
     LandSpec,
@@ -924,6 +925,8 @@ def test_edge_channel_json_roundtrip_and_default_omitted() -> None:
     spec = _minimal_spec(edge_channels=[_ec_dict(), _ec_dict(t_range=None, width=1.5)])
     again = GateProfileSpec.from_json(spec.to_json())
     assert again == spec
+    # the package facade re-exports the spec type like its siblings (Codex P2)
+    assert again.edge_channels[0] == EdgeChannelSpec(width=3.0, depth=4.0, t_range=(17.0, 21.0))
     assert again.edge_channels[0].side == "outer"  # side omitted → default
     assert again.edge_channels[1].t_range is None
     # absent in the JSON → empty tuple, and to_dict leaves the key out

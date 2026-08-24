@@ -51,15 +51,40 @@ approximated by a Stefan/Neumann form
 where ``alpha`` is the material's thermal diffusivity and ``c_skin``
 is a non-dimensional growth constant. The flow conducts only through
 the live core ``h_core = max(h - 2 * s, h_min)`` and the conductance
-becomes ``S = h_core^3 / (12 * eta)``. Because ``s`` depends on the
-arrival time and the arrival time depends on ``S``, the fields are
-solved by fixed-point iteration. When the skin layers from opposite
-walls meet (``h - 2 * s <= h_min``) the cell is flagged as a
-short-shot candidate and the absolute fill time ``T_fill`` is scaled
-up by the relative growth of ``tau_max`` (constant-pressure proxy:
-the inflated runtime mirrors the resistance increase). Bulk-melt
-cooling and dynamic viscosity coupling remain disabled — the model
-captures the wall-side freezing front in isolation.
+becomes ``S = h_core^3 / (12 * eta)``.
+
+The clock is the *exposure* clock (Issue #61). A cell's wall starts
+ageing when the front passes it at ``t_arr`` and keeps ageing while
+melt flows through it, so at time ``t`` its skin is ``s(t - t_arr)``
+-- thickest at the gate, zero at the front. Two quantities follow:
+
+- the skins meet at the age ``t_c = ((h - h_min) / (2 c_skin))^2 / alpha``;
+  a cell whose service ``T_fill - t_arr`` reaches ``t_c`` *seals* at
+  ``t_close = t_arr + t_c`` (it filled, then closed: ``short_shot_mask``);
+- the single conductance a one-shot elliptic solve can carry is the
+  time-mean skin over the cell's service ``[t_arr, min(T_fill, t_close)]``,
+  which for the square-root law is ``(2/3) s(a)`` with ``a`` the service
+  duration. That mean never exceeds ``(2/3)(h - h_min)/2``, so
+  ``h_core >= h/3`` and a sealing cell raises resistance by at most 27x
+  instead of collapsing to the numerical floor.
+
+A cell that the front reaches only after every path to a gate has
+sealed does not fill (``unfillable_mask``, NaN fill time). When the
+cavity-wide solve cuts cells off, the part that fills is found as the
+largest prefix of the fill order that does not cut itself off, by
+bisection on filled volume with every candidate solved on its own
+(``_largest_consistent_prefix``): a solve that carries the dead region
+runs on a clock inflated by material that never fills, and a solve of
+only what it left runs on one with too little resistance to have sealed
+anything -- neither is the part's.
+
+Because ``s`` depends on the arrival time and the arrival time depends
+on ``S``, the fields are solved by fixed-point iteration, and the
+absolute fill time ``T_fill`` is scaled up by the relative growth of the
+volume-weighted mean tau (constant-pressure proxy: the inflated runtime
+mirrors the resistance increase). Bulk-melt cooling and dynamic
+viscosity coupling remain disabled — the model captures the wall-side
+freezing front in isolation.
 """
 
 from __future__ import annotations
@@ -118,18 +143,31 @@ def weld_score_from_angle(
 #: Fill time assumed when no injection rate is given, for the cavity as drawn.
 DEFAULT_FILL_TIME_S = 1.5
 
-#: How many times the cavity may be re-solved after shedding cells that never
-#: fill. The domain only ever shrinks, so this is a safety stop, not the
-#: convergence criterion -- in practice one extra pass settles it.
-# Safety valve for the domain loop in ``HeleShawSolver.solve``. The domain
-# strictly loses at least one cell per pass, so the loop terminates on its
-# own; this cap only guards against a pathological one-cell-per-pass trickle
-# turning into thousands of full skin fixed points. When it trips, the
-# leftover frozen cells are marked dead without another re-solve and
-# ``metadata["domain_converged"]`` is False (Codex P2 on PR #60: exiting with
-# them still live handed finite fill times to cells that do not fill, and let
-# ``short_shot_cells`` exceed ``unfillable_cells``).
+#: How many candidate cavities the bisection in
+#: ``HeleShawSolver._largest_consistent_prefix`` may solve when the
+#: cavity-wide solve cuts cells off. The interval halves per pass, so
+#: ``log2(DOMAIN_VOLUME_RESOLUTION)`` passes settle it -- more only while no
+#: consistent candidate has been found yet (a gate ringed by thin cells fills
+#: a sliver far below the resolution), down to one thin cell. When the cap
+#: trips, the best consistent candidate so far stands and
+#: ``metadata["domain_converged"]`` is False; with no candidate at all the
+#: cavity-wide solution stands with its cut applied (Codex P2 on PR #60:
+#: exiting with cut cells still live handed finite fill times to cells that
+#: do not fill).
 MAX_DOMAIN_PASSES = 64
+
+#: Resolution of that bisection as a fraction of the cavity volume: the
+#: reported live region is within ``V_cavity / DOMAIN_VOLUME_RESOLUTION`` of
+#: the largest consistent one (never finer than one thin cell). 256 is eight
+#: candidate solves, each a full skin fixed point on a cavity no larger than
+#: the whole.
+DOMAIN_VOLUME_RESOLUTION = 256.0
+
+#: Time-mean of the square-root growth law over a cell's service: for
+#: ``s(t) = c sqrt(alpha t)`` the mean over ``[0, a]`` is ``(2/3) s(a)``. The
+#: elliptic solve carries one conductance per cell, so the skin it sees is the
+#: average over the time the cell conducts, not a snapshot (Issue #61).
+SKIN_SERVICE_MEAN_FACTOR = 2.0 / 3.0
 
 
 @dataclass
@@ -137,10 +175,10 @@ class _DomainSolution:
     """The skin fixed point solved on one candidate cavity.
 
     A short shot has two cavities: the one that was drawn and the part of it
-    the melt can reach. Which cells belong to the second depends on where the
-    skins close, and where they close depends on the arrival times -- which
-    are solved on a cavity. The two define each other, so each candidate gets
-    its own complete solution and ``solve`` iterates on the domain itself.
+    the melt can reach. Which cells belong to the second depends on when the
+    cores seal, and when they seal depends on the arrival times -- which are
+    solved on a cavity. The two define each other, so each candidate gets its
+    own complete solution and ``solve`` iterates on the domain itself.
     """
 
     tau: np.ndarray
@@ -156,7 +194,13 @@ class _DomainSolution:
     tau_rep_baseline: float | None
     skin_thk_mm: np.ndarray | None
     h_core_mm: np.ndarray | None
+    # Cells whose skins meet before the fill ends. They filled (the front
+    # passed them first) and then closed at ``t_close``.
     frozen_mask: np.ndarray | None
+    # Arrival time [s] of every cell in this cavity (NaN outside) and the time
+    # its core seals (inf where it never does). Both None with the skin off.
+    t_arr: np.ndarray | None
+    t_close: np.ndarray | None
     iterations: int
     converged: bool
 
@@ -325,50 +369,67 @@ class HeleShawSolver:
     def _build_linear_system(self, S: np.ndarray, dirichlet: np.ndarray):
         """Assemble Au = b for the Pseudo Conduction equation on the masked grid.
         dirichlet[i,j] = True means tau = 0 enforced at that cell.
+
+        Vectorised over faces: every pair of masked 4-neighbours contributes
+        one harmonic-mean face conductance to both rows. A Dirichlet row is
+        the identity; the rows next to it keep their -coeff in its column
+        (see the module docstring on why ``A`` is not symmetric).
         """
         ny, nx = self.geometry.shape
+        mask = self.geometry.mask
         dx = self.geometry.cell_size_mm * 1e-3  # cell size in meters
         # index map: only masked cells participate
         idx = -np.ones((ny, nx), dtype=np.int64)
-        flat_indices = np.where(self.geometry.mask.ravel())[0]
-        for k, fi in enumerate(flat_indices):
-            iy, ix = divmod(fi, nx)
-            idx[iy, ix] = k
-        N = len(flat_indices)
+        flat_indices = np.flatnonzero(mask.ravel())
+        idx.ravel()[flat_indices] = np.arange(flat_indices.size)
+        N = flat_indices.size
 
-        # use lil for build
-        A = sp.lil_matrix((N, N), dtype=np.float64)
-        b = np.zeros(N, dtype=np.float64)
-
-        for k, fi in enumerate(flat_indices):
-            iy, ix = divmod(fi, nx)
-            if dirichlet[iy, ix]:
-                A[k, k] = 1.0
-                b[k] = 0.0
+        diag = np.zeros(N, dtype=np.float64)
+        rows: list[np.ndarray] = []
+        cols: list[np.ndarray] = []
+        vals: list[np.ndarray] = []
+        for dy, dx_ in ((1, 0), (0, 1)):
+            a_mask = mask[: ny - dy, : nx - dx_]
+            b_mask = mask[dy:, dx_:]
+            both = a_mask & b_mask
+            if not both.any():
                 continue
+            S_a = S[: ny - dy, : nx - dx_][both]
+            S_b = S[dy:, dx_:][both]
+            total = S_a + S_b
+            # harmonic mean for face conductance; a closed face conducts nothing
+            face = np.where(total > 0, 2.0 * S_a * S_b / np.where(total > 0, total, 1.0), 0.0)
+            coeff = face / (dx * dx)
+            ia = idx[: ny - dy, : nx - dx_][both]
+            ib = idx[dy:, dx_:][both]
+            np.add.at(diag, ia, coeff)
+            np.add.at(diag, ib, coeff)
+            rows += [ia, ib]
+            cols += [ib, ia]
+            vals += [-coeff, -coeff]
 
-            S_c = S[iy, ix]
-            diag = 0.0
-            # neighbors: (di, dj)
-            for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                ny_, nx_ = iy + di, ix + dj
-                if 0 <= ny_ < ny and 0 <= nx_ < nx and self.geometry.mask[ny_, nx_]:
-                    S_n = S[ny_, nx_]
-                    # harmonic mean for face conductance
-                    if S_c + S_n > 0:
-                        S_face = 2.0 * S_c * S_n / (S_c + S_n)
-                    else:
-                        S_face = 0.0
-                    coeff = S_face / (dx * dx)
-                    diag += coeff
-                    A[k, idx[ny_, nx_]] -= coeff
-                # else: no-flux wall; do nothing
-            A[k, k] = diag if diag > 0 else 1.0  # isolated cell guard
-            # RHS: source = 1 (unit forcing).
-            # For absolute time-scaling we use V/Q later, so absolute units of A,b cancel.
-            b[k] = 1.0
-
-        return A.tocsr(), b, idx
+        is_dirichlet = np.zeros(N, dtype=bool)
+        is_dirichlet[idx[dirichlet & mask]] = True
+        if rows:
+            r = np.concatenate(rows)
+            c = np.concatenate(cols)
+            v = np.concatenate(vals)
+            keep = ~is_dirichlet[r]  # Dirichlet rows carry no off-diagonals
+            r, c, v = r[keep], c[keep], v[keep]
+        else:
+            r = c = np.zeros(0, dtype=np.int64)
+            v = np.zeros(0, dtype=np.float64)
+        # isolated cell guard: a row with no faces gets a unit diagonal
+        diag = np.where(is_dirichlet, 1.0, np.where(diag > 0, diag, 1.0))
+        own = np.arange(N)
+        A = sp.coo_matrix(
+            (np.concatenate([v, diag]), (np.concatenate([r, own]), np.concatenate([c, own]))),
+            shape=(N, N),
+        ).tocsr()
+        # RHS: unit source everywhere but the gates (absolute units cancel
+        # against V/Q later).
+        b = np.where(is_dirichlet, 0.0, 1.0)
+        return A, b, idx
 
     def _solve_tau_field(self, S: np.ndarray, dirichlet: np.ndarray) -> tuple[np.ndarray, float]:
         """Solve the elliptic system for a given conductance field S.
@@ -465,23 +526,90 @@ class HeleShawSolver:
             injection_volume_flow_cm3s=self._effective_flow_rate_cm3s(),
         )
 
-    def _unfillable_cells(self, frozen: np.ndarray) -> np.ndarray:
-        """Cells the melt cannot fill: the frozen ones and everything they seal off.
+    def _unfillable_cells(
+        self, frozen: np.ndarray, t_arr: np.ndarray, t_close: np.ndarray
+    ) -> np.ndarray:
+        """Cells the front cannot reach before every path to a gate has sealed.
 
-        A cell whose core has closed is a wall, not a slow path. Anything left
-        behind that wall never sees melt either, even though its own core is
-        still open -- so connectivity to a gate, not local thickness, decides.
+        A cell is reached at ``t_arr`` if, at that instant, a 4-connected path
+        of open cells joins it to a gate. A cell that never seals is open for
+        the whole fill; a sealing cell is open until its ``t_close``. So a
+        choke that closes at ``t_close`` cuts off exactly the cells behind it
+        that arrive later -- the ones that arrived earlier filled through it.
+
+        Evaluated as a sweep from the last arrival backwards: the set of open
+        cells only grows as the time threshold drops, so a union-find over the
+        never-sealing components plus the sealing cells answers every arrival
+        with insertions only. Reachability is 4-neighbour, like the stencil.
         """
         cavity = self.geometry.mask
-        live = cavity & ~frozen
-        labels, _ = ndi.label(live)
-        gate_labels = {int(labels[iy, ix]) for iy, ix in self.geometry.gates if live[iy, ix]}
-        if not gate_labels:
-            # Every gate froze. Nothing fills; report that rather than dividing
-            # by a tau_max taken over an empty set.
-            return cavity.copy()
-        reachable = np.isin(labels, sorted(gate_labels)) & live
-        return cavity & ~reachable
+        ny, nx = cavity.shape
+        sealing = cavity & frozen
+        static = cavity & ~sealing
+        labels, n_comp = ndi.label(static)
+
+        # nodes: one per never-sealing component, then one per sealing cell
+        seal_flat = np.flatnonzero(sealing.ravel())
+        n_seal = seal_flat.size
+        node = np.full(cavity.shape, -1, dtype=int)
+        node[static] = labels[static] - 1
+        node_flat = node.ravel()
+        node_flat[seal_flat] = n_comp + np.arange(n_seal)
+        n_nodes = n_comp + n_seal
+        parent = np.arange(n_nodes)
+        present = np.zeros(n_nodes, dtype=bool)
+        present[:n_comp] = True
+
+        def find(a: int) -> int:
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def insert(flat_index: int) -> None:
+            me = node_flat[flat_index]
+            present[me] = True
+            iy, ix = divmod(int(flat_index), nx)
+            for dy, dx_ in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                jy, jx = iy + dy, ix + dx_
+                if 0 <= jy < ny and 0 <= jx < nx:
+                    other = node[jy, jx]
+                    if other >= 0 and present[other]:
+                        ra, rb = find(me), find(other)
+                        if ra != rb:
+                            parent[ra] = rb
+
+        gate_nodes = [int(node[iy, ix]) for iy, ix in self.geometry.gates if cavity[iy, ix]]
+
+        # arrivals from last to first; sealing cells enter as the threshold
+        # drops below their closing time (open iff t_close > t_arr)
+        cell_flat = np.flatnonzero(cavity.ravel())
+        t_cells = t_arr.ravel()[cell_flat]
+        t_cells = np.where(np.isnan(t_cells), np.inf, t_cells)
+        cell_order = cell_flat[np.argsort(-t_cells, kind="stable")]
+        t_sorted = np.sort(t_cells)[::-1]
+        seal_close = t_close.ravel()[seal_flat]
+        seal_order = np.argsort(-seal_close, kind="stable")
+
+        reach = np.zeros(cavity.shape, dtype=bool)
+        reach_flat = reach.ravel()
+        p = 0
+        for k in range(n_seal + 1):
+            threshold = seal_close[seal_order[k]] if k < n_seal else -np.inf
+            # every cell arriving at or after the next closing time sees the
+            # sealing cells inserted so far
+            q = p
+            while q < cell_order.size and t_sorted[q] >= threshold:
+                q += 1
+            if q > p:
+                gate_roots = {find(g) for g in gate_nodes if present[g]}
+                for i in cell_order[p:q]:
+                    nd = node_flat[i]
+                    reach_flat[i] = bool(present[nd]) and find(nd) in gate_roots
+                p = q
+            if k < n_seal:
+                insert(int(seal_flat[seal_order[k]]))
+        return cavity & ~reach
 
     @staticmethod
     def _tau_reference(tau: np.ndarray, where: np.ndarray) -> float | None:
@@ -596,6 +724,8 @@ class HeleShawSolver:
         skin_thk_mm: np.ndarray | None = None
         h_core_mm: np.ndarray | None = None
         frozen_mask: np.ndarray | None = None
+        t_arr_out: np.ndarray | None = None
+        t_close_out: np.ndarray | None = None
         tau_rep_flow: float | None = None
         tau_rep_baseline: float | None = None
         skin_iters_done = 0
@@ -610,22 +740,37 @@ class HeleShawSolver:
             skin_thk_mm = np.zeros_like(h_open)
             h_core_mm = np.where(cavity_mask, h_open, 0.0)
 
+            # The skin at which the two walls meet, and the age at which the
+            # square-root law gets there: s(t_c) = s_max. Cells already at the
+            # floor have nothing to close (t_c = inf), as does a skin that
+            # never grows.
+            s_mm_max = np.maximum((h_open - min_core) / 2.0, 0.0)
+            can_seal = cavity_mask & (h_open > min_core + 1e-9)
+            t_c = np.full_like(h_open, np.inf)
+            if c_skin > 0.0 and alpha > 0.0:
+                t_c[can_seal] = (s_mm_max[can_seal] * 1.0e-3 / c_skin) ** 2 / alpha
+
+            def exposure(t_arrival: np.ndarray, T: float):
+                """Service duration, sealing set and time-mean skin at fill time T."""
+                a_end = np.maximum(T - t_arrival, 0.0)
+                sealed = cavity_mask & (a_end >= t_c)
+                a_rep = np.minimum(a_end, t_c)
+                s_mm = SKIN_SERVICE_MEAN_FACTOR * c_skin * np.sqrt(alpha * a_rep) * 1.0e3
+                s_mm = np.minimum(s_mm, s_mm_max)
+                s_mm[~cavity_mask] = 0.0
+                return sealed, s_mm
+
             for it in range(int(max(self.skin_max_iterations, 1))):
                 msk = cavity_mask & ~np.isnan(tau)
                 # arrival time per cell: volume CDF against the current best
-                # estimate of T_fill. Frozen cells ride at the top of the CDF,
-                # so their arrival saturates at T_fill instead of exporting
-                # their stand-in tau into everyone else's time scale.
+                # estimate of T_fill (Issue #52)
                 t_arr = self._arrival_time_field(tau, msk, cell_volume, T_fill)
                 t_arr = np.where(np.isnan(t_arr), 0.0, t_arr)
 
-                # skin layer thickness: s(t) = c_skin * sqrt(alpha * t) (m → mm)
-                s_m = c_skin * np.sqrt(alpha * np.maximum(t_arr, 0.0))
-                s_mm_new = (s_m * 1.0e3).astype(float)
-                # cap so that h_core can never go below min_core
-                s_mm_max = np.maximum((h_open - min_core) / 2.0, 0.0)
-                s_mm_new = np.minimum(s_mm_new, s_mm_max)
-                s_mm_new[~cavity_mask] = 0.0
+                # exposure clock (Issue #61): the wall ages from the moment
+                # the front passes until the fill ends or the core seals,
+                # and the solve sees the skin averaged over that service
+                frozen_new, s_mm_new = exposure(t_arr, T_fill)
 
                 h_core_new = h_open - 2.0 * s_mm_new
                 h_core_new = np.maximum(h_core_new, min_core)
@@ -635,28 +780,20 @@ class HeleShawSolver:
                 S_new = self._conductance_field(eta, h_core_new)
                 tau_new, tau_max_new = self._solve_tau_field(S_new, dirichlet)
 
-                # Cells whose two skins have met. Their core is pinned at the
-                # numerical floor, so their tau is a stand-in for "closed" and
-                # must not drive the time scale.
-                frozen_new = (
-                    cavity_mask
-                    & ((h_open - 2.0 * s_mm_new) <= min_core + 1e-9)
-                    & (h_open > min_core + 1e-9)
-                )
-                tau_max_flow_new = self._tau_reference(tau_new, cavity_mask & ~frozen_new)
+                # Every cell of this cavity conducts -- a sealing cell served
+                # the melt before it closed, and the cells it cuts off are
+                # removed from the cavity by ``solve``, not floored here.
+                tau_max_flow_new = self._tau_reference(tau_new, cavity_mask)
 
                 # constant-pressure proxy: T_fill grows with the resistance.
                 # Both the numerator and the denominator are volume-weighted
-                # means over the same still-flowing set: when a cell freezes it
-                # leaves both sides at once, instead of dropping out of one and
-                # avalanching the ratio (Issue #52 -- the old form divided a
+                # means over the same set (Issue #52 -- the old form divided a
                 # frozen-free max by an everything max, so one pathological
                 # cell freezing moved the reported time by tens of percent).
                 # With nothing flowing there is no resistance to speak of, so
                 # the baseline stands rather than an inflation off a dead cell.
-                flow_new = cavity_mask & ~frozen_new
-                tau_rep_new = self._tau_volume_mean(tau_new, flow_new, cell_volume)
-                tau_rep_base = self._tau_volume_mean(tau_baseline, flow_new, cell_volume)
+                tau_rep_new = self._tau_volume_mean(tau_new, cavity_mask, cell_volume)
+                tau_rep_base = self._tau_volume_mean(tau_baseline, cavity_mask, cell_volume)
                 if tau_rep_new is None or tau_rep_base is None:
                     T_fill_new = T_fill_baseline
                 else:
@@ -691,6 +828,14 @@ class HeleShawSolver:
                     skin_converged = True
                     break
 
+            # Read the clock off the converged fields once more, so the sealing
+            # set and the closing times reported for this cavity are those of
+            # the tau and T_fill it returns (the loop's were one step behind).
+            msk = cavity_mask & ~np.isnan(tau)
+            t_arr_out = self._arrival_time_field(tau, msk, cell_volume, T_fill)
+            frozen_mask, _ = exposure(np.where(np.isnan(t_arr_out), 0.0, t_arr_out), T_fill)
+            t_close_out = np.where(cavity_mask, np.nan_to_num(t_arr_out, nan=0.0) + t_c, np.inf)
+
         return _DomainSolution(
             tau=tau,
             tau_max=tau_max,
@@ -701,11 +846,124 @@ class HeleShawSolver:
             skin_thk_mm=skin_thk_mm,
             h_core_mm=h_core_mm,
             frozen_mask=frozen_mask,
+            t_arr=t_arr_out,
+            t_close=t_close_out,
             tau_rep_flow=tau_rep_flow,
             tau_rep_baseline=tau_rep_baseline,
             iterations=skin_iters_done,
             converged=skin_converged,
         )
+
+    def _largest_consistent_prefix(
+        self, eta: float, sol_full: _DomainSolution, dead_full: np.ndarray
+    ) -> tuple[HeleShawSolver, _DomainSolution, np.ndarray, int, bool]:
+        """The largest leading part of the fill that does not cut itself off.
+
+        A short shot is a fixed point in two directions at once. Solving the
+        whole cavity runs on a clock inflated by material that never fills,
+        which seals chokes early and cuts too much; solving only what that
+        pass left runs on a clock with too little resistance, under which
+        nothing would have sealed -- and reports a fill that is inconsistent
+        with the cut it inherited. Neither pass is the part's.
+
+        The consistent answer is a prefix of the fill order: the cells filled
+        before the front stalled. Filling more of it raises the fill time
+        (more volume, more resistance) while the chokes' closing times barely
+        move, so whether a prefix cuts itself off is monotone in its volume
+        and bisection finds the largest one that does not. Every candidate is
+        solved on its own, so the answer carries no dead load. The order is
+        the cavity-wide solve's tau; each candidate is pruned to the cells
+        that can still reach a gate (a partial tie group can strand one).
+
+        Returns ``(solver, solution, live_mask, frozen_hi, passes, converged)``.
+        ``frozen_hi`` is the sealing set of the smallest candidate that still
+        cut itself off. The largest consistent candidate may end just before
+        its own seal closes on its own clock -- the fixed point folds when a
+        cell's worth of volume tips the constant-pressure feedback -- so the
+        seal that cut the rest off is read off the candidate that saw it
+        close. When no candidate could be tried (``MAX_DOMAIN_PASSES`` = 0)
+        the cavity-wide solution stands with its cut applied and
+        ``converged`` is False; its dead cells then still sit in the reported
+        time scale (Codex P2 on PR #60), the price of the valve.
+        """
+        cavity = self.geometry.mask
+        h_open = self._open_thickness_field()
+        vol = (float(self.geometry.cell_size_mm) ** 2) * h_open
+        tau0 = np.where(cavity & ~np.isnan(sol_full.tau), sol_full.tau, np.inf)
+        flat = np.flatnonzero(cavity.ravel())
+        order = flat[np.argsort(tau0.ravel()[flat], kind="stable")]
+        cum = np.cumsum(vol.ravel()[order])
+        V_total = float(cum[-1])
+        gate_cells = np.zeros_like(cavity)
+        for iy, ix in self.geometry.gates:
+            gate_cells[iy, ix] = cavity[iy, ix]
+        V_gate = float(np.sum(vol[gate_cells]))
+        # resolution: a small fraction of the cavity, but never finer than a
+        # cell of the thinnest kind (the boundary lands on a cell anyway)
+        tol_cell = max(float(np.min(vol[cavity])), 1e-12)
+        tol = max(tol_cell, V_total / DOMAIN_VOLUME_RESOLUTION)
+
+        def prefix(volume: float) -> np.ndarray:
+            live = np.zeros_like(cavity)
+            live.ravel()[order[: int(np.searchsorted(cum, volume, side="right"))]] = True
+            live |= gate_cells
+            labels, _ = ndi.label(live)
+            gate_labels = {int(labels[iy, ix]) for iy, ix in self.geometry.gates if live[iy, ix]}
+            return live & np.isin(labels, sorted(gate_labels))
+
+        lo, hi = V_gate, V_total
+        live_lo = prefix(lo)
+        best: tuple[HeleShawSolver, _DomainSolution, np.ndarray] | None = None
+        # the smallest candidate that still cut itself off
+        live_hi, frozen_hi, cut_hi = cavity, sol_full.frozen_mask, dead_full
+        passes = 0
+        while hi - lo > tol and passes < MAX_DOMAIN_PASSES:
+            mid = 0.5 * (lo + hi)
+            live = prefix(mid)
+            sub = self._restricted_to(live)
+            # Every candidate starts skin-free, as the process does. The
+            # constant-pressure feedback can hold two fixed points on one
+            # cavity (open and slow-and-sealing); starting from a neighbour's
+            # inflated clock would pick the sealing one even where the fill,
+            # run from the start, completes before anything closes.
+            sol = sub._solve_domain(eta)
+            passes += 1
+            cut = None
+            if sol.frozen_mask is not None and sol.frozen_mask.any():
+                cut = sub._unfillable_cells(sol.frozen_mask, sol.t_arr, sol.t_close)
+            if cut is not None and cut.any():
+                hi = mid
+                live_hi, frozen_hi, cut_hi = live, sol.frozen_mask, cut
+            else:
+                lo = mid
+                live_lo = live
+                best = (sub, sol, live)
+        converged = hi - lo <= tol
+
+        # The boundary lies in the band between the two candidates, which
+        # the bisection resolves to a volume, not to a cell -- a thick cell
+        # straddling it is dropped whole. If the over-large candidate's cut
+        # lies inside that band, it has located the boundary on a clock that
+        # carried at most a band's worth of dead load: take that candidate
+        # minus its cut, solved on its own. A cut reaching below the band is
+        # the feedback folding over (a sliver more tips the whole fill into
+        # sealing); there the largest candidate that fills is the answer.
+        band = live_hi & ~live_lo
+        refine = cut_hi is not None and cut_hi.any() and not (cut_hi & ~band).any()
+        if refine and passes < MAX_DOMAIN_PASSES:
+            live = live_hi & ~cut_hi
+            sub = self._restricted_to(live)
+            sol = sub._solve_domain(eta)
+            passes += 1
+            cut = None
+            if sol.frozen_mask is not None and sol.frozen_mask.any():
+                cut = sub._unfillable_cells(sol.frozen_mask, sol.t_arr, sol.t_close)
+            if cut is None or not cut.any():
+                best = (sub, sol, live)
+        if best is None:
+            return self, sol_full, cavity & ~dead_full, frozen_hi, passes, False
+        sub, sol, live = best
+        return sub, sol, live, frozen_hi, passes, converged
 
     def solve(self, num_frames: int = 24) -> FlowResult:
         if not self.geometry.gates:
@@ -722,71 +980,48 @@ class HeleShawSolver:
         # reported time if the dead cells were left in.
         tau_max_cavity = sol.tau_max
 
-        # Shed the cells that never fill and solve again on what is left.
-        # Removing them changes the arrival times of the cells that remain,
-        # which changes where the skins close -- so the domain and the skin
-        # field have to be settled together, not once each. The domain only
-        # ever loses cells, so this terminates; ``MAX_DOMAIN_PASSES`` is a stop
-        # for pathological cases, not the convergence test.
+        # If the cavity-wide solve cuts cells off, the part that fills is the
+        # largest prefix of the fill order that does not cut itself -- found by
+        # bisection on filled volume, each candidate solved on its own.
         domain_solver = self
+        live_mask = cavity_mask.copy()
+        frozen_hi: np.ndarray | None = None
+        domain_passes = 0
+        domain_converged = True
+        if sol.frozen_mask is not None and sol.frozen_mask.any():
+            dead0 = self._unfillable_cells(sol.frozen_mask, sol.t_arr, sol.t_close)
+            if dead0.any():
+                domain_solver, sol, live_mask, frozen_hi, domain_passes, domain_converged = (
+                    self._largest_consistent_prefix(eta, sol, dead0)
+                )
         skin_thk_mm = sol.skin_thk_mm
         h_core_mm = sol.h_core_mm
-        short_shot_mask = None if sol.frozen_mask is None else sol.frozen_mask.copy()
-        no_flow_forced = False
-        domain_passes = 0
-
-        for _ in range(MAX_DOMAIN_PASSES):
-            frozen = sol.frozen_mask
-            if frozen is None or not frozen.any():
-                break
-            dead = domain_solver._unfillable_cells(frozen)
-            live = domain_solver.geometry.mask & ~dead
-            sub = domain_solver._restricted_to(live) if live.any() else None
-            if sub is None or not sub.geometry.gates:
-                # Every gate is behind a closed core. There is no live cavity
-                # to solve, so the last solution stands with its time pinned to
-                # the geometric baseline rather than inflated off dead cells.
-                no_flow_forced = True
-                break
-            domain_solver = sub
-            sol = sub._solve_domain(eta)
-            domain_passes += 1
-            # The sub-solution only writes the cells it owns; the rest keep the
-            # values from the pass that last had them live.
-            if sol.skin_thk_mm is not None and skin_thk_mm is not None:
-                skin_thk_mm = np.where(live, sol.skin_thk_mm, skin_thk_mm)
-            if sol.h_core_mm is not None and h_core_mm is not None:
-                h_core_mm = np.where(live, sol.h_core_mm, h_core_mm)
-            if sol.frozen_mask is not None and short_shot_mask is not None:
-                short_shot_mask = short_shot_mask | sol.frozen_mask
-
-        # Every gate closed: nothing at all fills, so the live cavity is empty
-        # rather than "whatever the last pass was still solving".
-        live_mask = np.zeros_like(cavity_mask) if no_flow_forced else domain_solver.geometry.mask
-        # Safety valve tripped: the final pass froze cells the loop never got
-        # to process. They do not fill, so they must not stay live -- mark
-        # them (and whatever they seal off) dead without another re-solve.
-        # The final solution already excluded them from its own time scale
-        # (``tau_max_flow`` and the inflation set both drop frozen cells), so
-        # the reported T_fill stands; only the cell bookkeeping needed fixing.
-        domain_converged = True
-        leftover = sol.frozen_mask
-        if not no_flow_forced and leftover is not None and leftover.any():
-            domain_converged = False
-            live_mask = live_mask & ~domain_solver._unfillable_cells(leftover)
         dead_cells = cavity_mask & ~live_mask
         unfillable_mask = dead_cells if dead_cells.any() else None
 
         tau = sol.tau
         tau_max = sol.tau_max
-        tau_max_flow = None if no_flow_forced else sol.tau_max_flow
+        tau_max_flow = sol.tau_max_flow
         T_fill_baseline = sol.T_fill_baseline
         tau_max_baseline = sol.tau_max_baseline
         # The domain solution already carries its own constant-pressure
         # inflation (volume-weighted, over its own live set). Recomputing it
         # here from single-cell maxima would reintroduce the one-cell
         # normalization this branch exists to remove.
-        T_fill = T_fill_baseline if no_flow_forced else sol.T_fill
+        T_fill = sol.T_fill
+
+        # Where freeze-off happened: the live cells whose core closed during
+        # the fill of what fills, plus the ones the smallest over-large
+        # candidate saw close -- the seal that ends the shot closes on the
+        # clock of a fill one sliver larger than the one that completes. A
+        # sealing cell filled before it closed; missing melt is
+        # ``unfillable_mask``, and a sealing cell that was itself cut off is
+        # dead, not sealed.
+        short_shot_mask: np.ndarray | None = None
+        if sol.frozen_mask is not None:
+            short_shot_mask = sol.frozen_mask & live_mask
+            if frozen_hi is not None and dead_cells.any():
+                short_shot_mask |= frozen_hi & live_mask
 
         # Nothing beyond the gates flows. Every time here is zero, so the
         # divisor only has to be positive -- what matters is that the reported
@@ -857,16 +1092,21 @@ class HeleShawSolver:
                     # both over the same final still-flowing set (Issue #52)
                     "tau_rep_flow": sol.tau_rep_flow,
                     "tau_rep_baseline": sol.tau_rep_baseline,
+                    # cells whose core sealed during the fill (they filled first)
                     "short_shot_cells": short_count,
                     "short_shot_fraction": short_count / cells_total,
+                    # cells the front never reached: cut off behind a seal
                     "unfillable_cells": (
                         int(unfillable_mask.sum()) if unfillable_mask is not None else 0
                     ),
                     "sealed_off_cells": (
-                        int(unfillable_mask.sum()) - short_count
-                        if unfillable_mask is not None
-                        else 0
+                        int(unfillable_mask.sum()) if unfillable_mask is not None else 0
                     ),
+                    "filled_volume_fraction": (
+                        float(np.sum(cell_volume_final[live_mask]))
+                        / max(float(np.sum(cell_volume_final[cavity_mask])), 1e-30)
+                    ),
+                    "skin_clock": "exposure",
                     "tau_max_flow": tau_max_flow,
                     # tau of the slowest cell in the cavity-wide solve, frozen
                     # cells included. Kept because the gap between this and

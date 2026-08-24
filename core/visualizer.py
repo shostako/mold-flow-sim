@@ -754,7 +754,7 @@ def render_core_layer_map(
             color="#e74c3c",
             s=4,
             linewidths=0,
-            label="short shot",
+            label="sealed (skins met)",
         )
         ax.legend(loc="upper right", fontsize=8)
     ax.set_xlim(extent[0], extent[1])
@@ -763,7 +763,7 @@ def render_core_layer_map(
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     short_count = int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
-    ax.set_title(f"Core thickness h_core = h - 2s [mm]  (short shot cells: {short_count})")
+    ax.set_title(f"Core thickness h_core = h - 2s [mm]  (sealed cells: {short_count})")
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("h_core [mm]")
     fig.tight_layout()

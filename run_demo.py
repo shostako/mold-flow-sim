@@ -132,7 +132,11 @@ def _solve_and_export(
     if skin_layer:
         short = int(result.short_shot_mask.sum()) if result.short_shot_mask is not None else 0
         inflation = result.metadata.get("T_fill_inflation", 1.0)
-        extra = f"  skin: x{inflation:.2f} T_fill, short_shot {short}/{int(geom.mask.sum())}"
+        dead = int(result.unfillable_mask.sum()) if result.unfillable_mask is not None else 0
+        extra = (
+            f"  skin: x{inflation:.2f} T_fill, sealed {short}, "
+            f"unfilled {dead}/{int(geom.mask.sum())}"
+        )
     elif multilayer:
         short_frac = result.metadata.get("short_shot_fraction", 0.0)
         iters = result.metadata.get("multilayer_iterations", 0)

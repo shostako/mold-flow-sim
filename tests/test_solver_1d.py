@@ -387,3 +387,57 @@ def test_a_diagonal_touch_does_not_count_as_reachable() -> None:
     )
     with pytest.raises(ValueError, match="cannot be .*reached from any gate"):
         solver.solve(num_frames=2)
+
+
+def test_vectorised_assembly_matches_a_cell_by_cell_reference():
+    """The face-vectorised assembly (v0.33.0) builds the same matrix as the loop it replaced.
+
+    A masked 2D grid with a hole, an isolated cell, two gates and a varying
+    conductance exercises every branch: harmonic-mean faces, no-flux walls
+    at the mask edge, the Dirichlet identity row with its neighbours keeping
+    the gate column, and the unit-diagonal guard on a cell with no faces.
+    """
+    rng = np.random.default_rng(7)
+    ny, nx = 6, 7
+    mask = np.ones((ny, nx), dtype=bool)
+    mask[2:4, 3] = False  # a hole
+    mask[0, 6] = True
+    mask[0, 5] = False
+    mask[1, 6] = False  # (0, 6) has no masked neighbour: isolated
+    thickness = np.ones((ny, nx))
+    geom = Geometry(mask=mask, thickness_mm=thickness, cell_size_mm=0.5)
+    geom.gates = [(0, 0), (5, 6)]
+    solver = HeleShawSolver(geom, MaterialDB()["PP"])
+    S = rng.uniform(0.5, 2.0, size=(ny, nx))
+    S[4, 1] = 0.0  # a closed cell: its faces conduct nothing
+    dirichlet = np.zeros((ny, nx), dtype=bool)
+    for iy, ix in geom.gates:
+        dirichlet[iy, ix] = True
+
+    A, b, idx = solver._build_linear_system(S, dirichlet)
+
+    # cell-by-cell reference, written the way the original loop was
+    dx = geom.cell_size_mm * 1e-3
+    cells = [(iy, ix) for iy in range(ny) for ix in range(nx) if mask[iy, ix]]
+    ref = np.zeros((len(cells), len(cells)))
+    ref_b = np.zeros(len(cells))
+    for k, (iy, ix) in enumerate(cells):
+        assert idx[iy, ix] == k
+        if dirichlet[iy, ix]:
+            ref[k, k] = 1.0
+            continue
+        diag = 0.0
+        for dy, dx_ in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            jy, jx = iy + dy, ix + dx_
+            if 0 <= jy < ny and 0 <= jx < nx and mask[jy, jx]:
+                total = S[iy, ix] + S[jy, jx]
+                face = 2.0 * S[iy, ix] * S[jy, jx] / total if total > 0 else 0.0
+                coeff = face / (dx * dx)
+                diag += coeff
+                ref[k, idx[jy, jx]] -= coeff
+        ref[k, k] = diag if diag > 0 else 1.0
+        ref_b[k] = 1.0
+
+    np.testing.assert_allclose(A.toarray(), ref, rtol=1e-12, atol=0.0)
+    np.testing.assert_array_equal(b, ref_b)
+    assert idx[~mask].max() == -1

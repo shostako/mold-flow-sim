@@ -1,13 +1,16 @@
-"""Tests for what a frozen cell is allowed to do to the timeline.
+"""Tests for what a sealing cell is allowed to do to the timeline.
 
-The skin-layer model floors ``h_core`` at ``min_core_thickness_mm`` for
-numerical stability, so a cell whose two skins have met still solves -- with a
-tau orders of magnitude above everything else. Letting that tau set the
-absolute time scale turned a short shot into "it just takes longer": the
-reported total fill time was several times the real one, the color bar spent
-most of its range on cells that do not exist, and most animation frames showed
+The skin-layer model runs on the exposure clock (Issue #61): a cell's wall ages
+from the moment the front passes it, its core seals at ``t_close = t_arr + t_c``,
+and a cell the front reaches only after every path to a gate has sealed does
+not fill. Two sets come out of that and must stay apart: ``short_shot_mask``
+(cells that sealed -- they filled first, then closed) and ``unfillable_mask``
+(cells the melt never reached). Letting a dead cell's tau set the absolute
+time scale used to turn a short shot into "it just takes longer": the reported
+total fill time was several times the real one, the color bar spent most of
+its range on cells that do not exist, and most animation frames showed
 nothing happening. These tests pin the rule that a cell which does not fill
-does not get a fill time.
+does not get a fill time -- and that a cell which sealed does.
 """
 
 from __future__ import annotations
@@ -17,6 +20,12 @@ import pytest
 
 from core import HeleShawSolver, MaterialDB
 from core.geometry import Geometry
+
+#: Slow enough that the skins of a 0.04-0.05 mm band reach each other while
+#: the strip is still filling (t_c ~ 1-2 ms at c_skin = 1.5, against fills of
+#: 0.1 s and up). At the 50 cm3/s of the old fixtures the whole strip filled
+#: in a millisecond and nothing could seal.
+Q_CM3S = 0.5
 
 
 def _strip(thickness_mm: np.ndarray, cell_mm: float = 1.0) -> Geometry:
@@ -36,7 +45,7 @@ def _solve(geom: Geometry, **kw):
         melt_temperature_K=523.15,
         mold_temperature_K=323.15,
         injection_velocity_mms=200.0,
-        injection_volume_flow_cm3s=50.0,
+        injection_volume_flow_cm3s=Q_CM3S,
         skin_layer_enabled=True,
         skin_growth_constant=1.5,
     )
@@ -46,7 +55,11 @@ def _solve(geom: Geometry, **kw):
 
 @pytest.fixture(scope="module")
 def frozen_run():
-    """A strip whose far half is thin enough for the skins to meet."""
+    """A strip whose far half is thin enough for the skins to meet mid-fill.
+
+    The first thin cells seal a couple of milliseconds after the front passes
+    them; the thin cells beyond arrive later than that and never fill.
+    """
     thk = np.concatenate([np.full(30, 2.0), np.full(30, 0.05)])
     return _solve(_strip(thk))
 
@@ -87,10 +100,11 @@ def test_the_time_scale_comes_from_the_flowing_tau_not_the_frozen_one(frozen_run
 
 
 def test_cells_sealed_off_by_frozen_ones_are_unfillable_too():
-    """A frozen cell is a wall. What is behind it never sees melt either.
+    """A sealed cell is a wall from ``t_close`` on. What arrives later never fills.
 
-    The thin band here freezes solid across the strip, so the thick zone past
-    it is cut off from the gate even though its own core stays wide open.
+    The thin band here seals across the strip a millisecond after the front
+    enters it, so the thick zone past it -- whose first cell alone takes four
+    milliseconds to fill -- is cut off even though its own core stays open.
     """
     thk = np.concatenate([np.full(20, 2.0), np.full(6, 0.04), np.full(20, 2.0)])
     r = _solve(_strip(thk))
@@ -117,18 +131,51 @@ def test_skin_off_leaves_no_unfillable_mask():
     assert r.metadata.get("unfillable_cells") is None
 
 
-def test_a_frozen_gate_makes_the_whole_cavity_unfillable():
-    """If the gate itself freezes there is nothing to be reachable from.
+def test_reachability_is_read_at_each_cells_own_arrival():
+    """Unit contract of ``_unfillable_cells``: a seal cuts off what arrives after it closes.
 
-    Driven directly rather than through a solve, because the interesting part
-    is the degenerate branch, and coaxing the physics into freezing exactly the
-    gate cell would pin the test to whatever the growth law happens to do.
+    Driven directly rather than through a solve, because the contract is about
+    clocks, and coaxing the physics into sealing exactly one cell would pin the
+    test to whatever the growth law happens to do. Cell ``k`` arrives at ``k``
+    seconds; cell 3 seals at 5.5 s. Cells 0-5 arrive while it is still open
+    (cell 3 itself included -- it filled, then closed), cells 6-9 do not.
     """
     geom = _strip(np.full(10, 1.0))
     solver = HeleShawSolver(geom, MaterialDB()["PP"])
+    t_arr = np.arange(10, dtype=float).reshape(1, -1)
     frozen = np.zeros_like(geom.mask)
-    frozen[0, 0] = True  # the gate
-    assert solver._unfillable_cells(frozen)[geom.mask].all()
+    frozen[0, 3] = True
+    t_close = np.full_like(t_arr, np.inf)
+    t_close[0, 3] = 5.5
+    dead = solver._unfillable_cells(frozen, t_arr, t_close)
+    assert not dead[0, :6].any()
+    assert dead[0, 6:].all()
+
+    # a sealing gate: everything that arrives after it closes is cut off, the
+    # gate itself still fills (it is open at its own arrival)
+    frozen = np.zeros_like(geom.mask)
+    frozen[0, 0] = True
+    t_close = np.full_like(t_arr, np.inf)
+    t_close[0, 0] = 0.5
+    dead = solver._unfillable_cells(frozen, t_arr, t_close)
+    assert not dead[0, 0]
+    assert dead[0, 1:].all()
+
+    # two seals: the later one only matters for cells behind both
+    frozen = np.zeros_like(geom.mask)
+    frozen[0, [2, 6]] = True
+    t_close = np.full_like(t_arr, np.inf)
+    t_close[0, 2] = 7.5
+    t_close[0, 6] = 8.5
+    dead = solver._unfillable_cells(frozen, t_arr, t_close)
+    assert not dead[0, :8].any()
+    assert dead[0, 8:].all()
+
+    # arriving exactly at the closing time is too late
+    t_close[0, 2] = 4.0
+    dead = solver._unfillable_cells(frozen, t_arr, t_close)
+    assert not dead[0, :4].any()
+    assert dead[0, 4:].all()
 
 
 def test_the_tau_reference_reports_when_nothing_flows():
@@ -153,7 +200,7 @@ def test_a_part_where_only_the_gate_fills_reports_the_baseline_time():
     the animation independently fell back to a flat 1 s. Two contradictory
     timelines for a part that does not fill at all.
     """
-    r = _solve(_sealed_plate())
+    r = _solve_sealed_plate()
     md = r.metadata
     assert md["no_flow"] is True
     assert r.total_fill_time_s == pytest.approx(md["T_fill_baseline_s"], rel=1e-9)
@@ -168,16 +215,27 @@ def test_the_color_axis_agrees_with_the_reported_time_when_nothing_flows():
     """One run, one timeline."""
     from core.visualizer import fill_time_max
 
-    r = _solve(_sealed_plate())
+    r = _solve_sealed_plate()
     assert fill_time_max(r) == pytest.approx(r.total_fill_time_s, rel=1e-9)
 
 
-def test_metadata_separates_frozen_cells_from_the_ones_they_sealed_off():
-    """Two different failures: a thin wall, and a region stranded behind it."""
+def test_metadata_separates_the_seal_from_what_it_cut_off():
+    """Two different facts: a wall that closed, and a region stranded behind it.
+
+    The seal filled before it closed, so it is not part of the missing melt --
+    the two counts must not overlap, and everything unfillable is sealed off.
+    """
     thk = np.concatenate([np.full(20, 2.0), np.full(6, 0.04), np.full(20, 2.0)])
-    md = _solve(_strip(thk)).metadata
-    assert md["unfillable_cells"] == md["short_shot_cells"] + md["sealed_off_cells"]
+    r = _solve(_strip(thk))
+    md = r.metadata
+    assert md["short_shot_cells"] > 0
     assert md["sealed_off_cells"] > 0
+    assert md["sealed_off_cells"] == md["unfillable_cells"]
+    assert not (r.short_shot_mask & r.unfillable_mask).any()
+    assert md["short_shot_cells"] == int(r.short_shot_mask.sum())
+    assert md["filled_volume_fraction"] == pytest.approx(
+        float(thk[~r.unfillable_mask[0]].sum()) / float(thk.sum()), rel=1e-9
+    )
 
 
 # --- rendering ---------------------------------------------------------------
@@ -265,32 +323,33 @@ def test_no_short_shot_leaves_the_title_alone():
 
 
 def _sealed_plate(n: int = 24):
-    """Plate whose gate is ringed by cells thin enough to freeze shut.
+    """Thin plate whose gate seals before its first neighbour arrives.
 
-    0.02 mm, not 0.04: under the volume-CDF map the ring's arrival time is its
-    own tiny volume over Q -- almost zero -- so the skins get almost no time
-    to grow before the conductance snapshot is taken. The ring has to be thin
-    enough to close on that short clock for the sealed-gate branch to exist.
-    (0.04 sat right at the boundary; 0.03 already seals, 0.02 adds margin.)
+    Uniformly 0.02 mm: the gate's own skins meet 0.12 ms after it fills, and
+    at the slow rate ``_solve_sealed_plate`` uses the next cell takes 0.4 ms.
+    So nothing but the gate cell ever fills -- the degenerate branch where the
+    tau reference vanishes.
     """
-    thk = np.full((n, n), 2.0)
-    thk[2:5, 2:5] = 0.02
-    thk[3, 3] = 2.0
+    thk = np.full((n, n), 0.02)
     geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
     geom.gates = [(3, 3)]
     return geom
 
 
+def _solve_sealed_plate():
+    return _solve(_sealed_plate(), injection_volume_flow_cm3s=0.05)
+
+
 def test_the_weld_plot_survives_a_part_that_barely_fills(tmp_path):
     """One distinct fill time left is still an analysis, not an error.
 
-    A ring of frozen cells around the gate leaves the gate as the only cell
-    with a time. ``contour`` rejects a flat level list, so the renderer used to
-    raise and take a completed run down with it.
+    A gate that seals before its neighbours arrive leaves the gate as the only
+    cell with a time. ``contour`` rejects a flat level list, so the renderer
+    used to raise and take a completed run down with it.
     """
     from core.visualizer import render_weldlines
 
-    r = _solve(_sealed_plate())
+    r = _solve_sealed_plate()
     finite = r.fill_time_s[np.isfinite(r.fill_time_s)]
     assert np.unique(finite).size < 2, "geometry no longer reproduces the degenerate case"
     out = render_weldlines(r, tmp_path / "weld.png")
@@ -327,7 +386,7 @@ def test_defect_diagnostics_ignore_material_that_never_fills():
         melt_temperature_K=523.15,
         mold_temperature_K=323.15,
         injection_velocity_mms=200.0,
-        injection_volume_flow_cm3s=50.0,
+        injection_volume_flow_cm3s=Q_CM3S,
         skin_layer_enabled=True,
         skin_growth_constant=1.5,
     )
@@ -371,7 +430,7 @@ def test_the_pressure_map_colors_dead_cells_instead_of_leaving_them_black(tmp_pa
 
     from core.visualizer import SHORT_SHOT_RGB, render_pressure_map
 
-    r = _solve(_sealed_plate())
+    r = _solve_sealed_plate()
     path = render_pressure_map(r, tmp_path / "pressure.png")
     px = np.asarray(Image.open(path).convert("RGB")).astype(float)
     short_shot = np.array(SHORT_SHOT_RGB) * 255.0
@@ -392,7 +451,7 @@ def test_every_renderer_reads_the_same_time_axis():
     """
     from core.visualizer import fill_frame_times, fill_time_max
 
-    r = _solve(_sealed_plate())
+    r = _solve_sealed_plate()
     assert fill_time_max(r) == pytest.approx(r.total_fill_time_s, rel=1e-9)
     assert fill_frame_times(r, 60)[-1] == pytest.approx(r.total_fill_time_s, rel=1e-9)
     assert fill_frame_times(r, 1)[-1] == pytest.approx(r.total_fill_time_s, rel=1e-9)
@@ -402,18 +461,23 @@ def test_every_renderer_reads_the_same_time_axis():
 def test_freezing_everything_mid_iteration_does_not_crash(max_iterations):
     """The fixed-point loop must survive losing its tau reference.
 
-    Once every cell outside the gate has frozen there is no reference left,
-    and the next pass divided by it -- ``TypeError: unsupported operand
+    Once every cell outside the gate has been cut off there is no reference
+    left, and the next pass divided by it -- ``TypeError: unsupported operand
     type(s) for /: 'float' and 'NoneType'``, on a run that had already
     produced its answer. Parametrized over the iteration cap because whether
-    the loop took another pass depended on it.
+    the loop took another pass depended on it. The gate here seals before its
+    first neighbour arrives, so the gate is all that fills.
     """
     n = 12
     thk = np.full((n, n), 0.03)
-    thk[3, 3] = 2.0  # the gate stays open, everything else closes
     geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
     geom.gates = [(3, 3)]
-    r = _solve(geom, skin_growth_constant=3.0, skin_max_iterations=max_iterations)
+    r = _solve(
+        geom,
+        skin_growth_constant=3.0,
+        skin_max_iterations=max_iterations,
+        injection_volume_flow_cm3s=0.05,
+    )
     assert r.metadata["no_flow"] is True
     assert r.total_fill_time_s == pytest.approx(r.metadata["T_fill_baseline_s"], rel=1e-9)
     assert r.metadata["skin_iterations"] <= max_iterations
@@ -454,7 +518,7 @@ def test_the_baseline_time_counts_only_the_volume_that_fills():
     r = _solve(_sealed_strip())
     live = r.geometry.mask & ~r.unfillable_mask
     thickness = r.geometry.thickness_mm
-    q_cm3s = 50.0
+    q_cm3s = Q_CM3S
     live_cm3 = float(thickness[live].sum()) * r.geometry.cell_size_mm**2 / 1000.0
     whole_cm3 = r.geometry.volume_cm3()
     assert live_cm3 < whole_cm3 * 0.9  # the case is worth testing
@@ -548,24 +612,30 @@ def test_the_live_region_does_not_care_how_much_is_sealed_off_behind_it():
     re-solving tau on the live part removes the dead cells from the final
     equation but keeps the core they carved: the same live geometry behind a
     small dead tail and a large one reported fill times 3.9x apart.
+
+    The bisection resolves the boundary to a fraction of the cavity volume,
+    so the two runs may disagree by a band cell or two -- within the larger
+    cavity's resolution, and never inside the thick run before the band.
+    Exactness on the cavity that is reported is the next test's job.
     """
+    from core.solver import DOMAIN_VOLUME_RESOLUTION
+
     small = _solve(_band_sealed(20))
     large = _solve(_band_sealed(100))
     assert small.unfillable_mask is not None and small.unfillable_mask.any()
     assert large.unfillable_mask is not None and large.unfillable_mask.any()
 
-    shared = 26  # the live run plus the band; past it the two cavities differ
-    live_s = ~small.unfillable_mask[0, :shared]
-    live_l = ~large.unfillable_mask[0, :shared]
-    assert live_s.any()
-    assert np.array_equal(live_s, live_l), "the live cavity itself depends on dead material"
+    live_s = ~small.unfillable_mask[0]
+    live_l = ~large.unfillable_mask[0]
+    assert live_s[:20].all() and live_l[:20].all(), "the thick run before the band was cut"
+    assert not live_s[26:].any() and not live_l[26:].any(), "material behind the band filled"
 
-    assert small.total_fill_time_s == pytest.approx(large.total_fill_time_s, rel=1e-9)
-    assert small.core_thickness_mm[0, :shared][live_s] == pytest.approx(
-        large.core_thickness_mm[0, :shared][live_l], rel=1e-9
-    )
-    assert small.fill_time_s[0, :shared][live_s] == pytest.approx(
-        large.fill_time_s[0, :shared][live_l], rel=1e-9
+    thk_l = large.geometry.thickness_mm[0]
+    tolerance = float(thk_l.sum()) / DOMAIN_VOLUME_RESOLUTION
+    v_s = float(small.geometry.thickness_mm[0][live_s].sum())
+    v_l = float(thk_l[live_l].sum())
+    assert abs(v_s - v_l) <= tolerance, (
+        "the live cavity depends on dead material beyond the resolution"
     )
 
 
@@ -694,36 +764,45 @@ def test_the_volume_mean_helper_weights_by_volume():
     assert solver._tau_volume_mean(np.zeros_like(tau), where, vol) is None
 
 
-def test_a_gate_side_choke_gets_almost_no_skin_before_the_front_passes():
-    """The skin clock is the *arrival* clock, pinned with its known tradeoff.
+def test_a_gate_side_choke_seals_and_cuts_the_plate_off():
+    """The skin clock is the *exposure* clock (Issue #61).
 
-    A 0.04 mm ring next to the gate arrives when its own tiny volume has been
-    injected -- near t = 0 -- so the conductance snapshot sees almost no skin
-    and the ring stays open. Under the old resistance-shaped map the same ring
-    inherited ~half the total fill time and sealed. Neither clock is the whole
-    truth: a gate-side choke keeps ageing for the entire fill AFTER the front
-    passes it, which an arrival snapshot cannot see. If gate-proximal
-    freeze-off is ever modelled properly (exposure clock, s(T_fill - t_arr)),
-    this test is the one that documents the change.
+    A 0.04 mm ring next to the gate is passed by the front almost at t = 0 --
+    and then keeps conducting, and ageing, for the rest of the fill. Under the
+    arrival clock the conductance snapshot saw almost no skin and the ring
+    stayed open (that clock was pinned here until v0.33.0, with its tradeoff
+    spelled out). On the exposure clock the ring seals a millisecond after the
+    front passes it, long before the 2 mm plate cells behind it -- four
+    milliseconds each -- can arrive, so the plate is cut off while the gate
+    and the ring itself fill.
     """
     n = 24
     thk = np.full((n, n), 2.0)
-    thk[2:5, 2:5] = 0.04  # openable on the arrival clock; 0.02 would seal
+    thk[2:5, 2:5] = 0.04
     thk[3, 3] = 2.0
     geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
     geom.gates = [(3, 3)]
     r = _solve(geom)
-    assert r.metadata["no_flow"] is False
-    assert r.metadata["short_shot_cells"] == 0
+    md = r.metadata
+    plate = thk == 2.0
+    plate[3, 3] = False
+    assert md["no_flow"] is False
+    assert r.unfillable_mask[plate].all(), "the plate behind the ring still fills"
+    assert not r.unfillable_mask[3, 3]
+    assert np.isfinite(r.fill_time_s[3, 3])
+    assert r.short_shot_mask.any()
+    assert (r.short_shot_mask & (thk == 0.04)).any(), "the seal is not the ring"
+    assert not (r.short_shot_mask & r.unfillable_mask).any()
+    assert md["filled_volume_fraction"] < 0.01
 
 
-def test_the_domain_pass_valve_still_buries_its_frozen_cells(monkeypatch):
-    """Codex P2 on PR #60: tripping the pass cap must not leave frozen cells live.
+def test_the_domain_pass_valve_still_buries_its_dead_cells(monkeypatch):
+    """Codex P2 on PR #60: tripping the pass cap must not leave dead cells live.
 
-    With the cap forced to zero the loop never processes the first solution's
-    frozen cells. They still must end up in ``unfillable_mask`` (with whatever
-    they seal off), keep NaN fill times, stay a subset of the unfillable set,
-    and the run must say the domain did not converge.
+    With the cap forced to zero the loop never re-solves without the cells
+    the first solution cut off. They still must end up in ``unfillable_mask``,
+    keep NaN fill times, stay apart from the seal that cut them off, and the
+    run must say the domain did not converge.
     """
     import core.solver as solver_mod
 
@@ -734,10 +813,11 @@ def test_the_domain_pass_valve_still_buries_its_frozen_cells(monkeypatch):
     assert md["domain_passes"] == 0
     assert r.short_shot_mask.any()
     assert r.unfillable_mask is not None
-    # frozen plus sealed-off, exactly like the converged path
-    assert (r.short_shot_mask & ~r.unfillable_mask).sum() == 0
-    assert md["short_shot_cells"] <= md["unfillable_cells"]
+    # the seal and what it cut off, exactly like the converged path
+    assert not (r.short_shot_mask & r.unfillable_mask).any()
+    assert md["short_shot_cells"] + md["unfillable_cells"] <= int(r.geometry.mask.sum())
     assert np.all(np.isnan(r.fill_time_s[r.unfillable_mask]))
+    assert np.all(np.isfinite(r.fill_time_s[r.short_shot_mask]))
 
 
 def test_the_domain_loop_converges_and_says_so():
@@ -745,3 +825,115 @@ def test_the_domain_loop_converges_and_says_so():
     r = _solve(_sealed_strip())
     assert r.metadata["domain_converged"] is True
     assert r.metadata["domain_passes"] >= 1
+
+
+# --- the exposure clock (Issue #61) --------------------------------------------
+
+
+def test_the_skin_is_thickest_at_the_gate_and_thinnest_at_the_front():
+    """The wall ages from the moment the front passes it, so the gate ages longest.
+
+    This is the direction the arrival clock had backwards: it evaluated the
+    gate-side cells at their (almost zero) arrival time and the last cell at
+    the full fill time. On a uniform strip that fills without sealing the
+    exposure clock gives a skin that decreases monotonically along the flow
+    and vanishes at the last cell.
+    """
+    r = _solve(_strip(np.full(40, 1.0)), skin_growth_constant=0.5)
+    assert r.unfillable_mask is None
+    s = r.skin_thickness_mm[0]
+    assert np.all(np.diff(s) <= 1e-12)
+    assert s[0] > 10 * max(s[-1], 1e-12)
+    assert s[-1] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_conductance_carries_the_service_mean_of_the_root_law():
+    """One elliptic solve, one conductance per cell: the skin averaged over its service.
+
+    For ``s(t) = c sqrt(alpha t)`` the mean over ``[0, a]`` is ``(2/3) s(a)``
+    with ``a = T_fill - t_arr`` the time the cell conducts. Checked against the
+    reported fill times so the test reads the same clock the solver did.
+    """
+    from core.solver import SKIN_SERVICE_MEAN_FACTOR
+
+    c_skin = 0.5
+    # The reported skin is the one the last solve conducted through, computed
+    # from the clock one iteration back; driving the fixed point to machine
+    # precision makes that clock and the reported one the same.
+    r = _solve(
+        _strip(np.full(40, 1.0)),
+        skin_growth_constant=c_skin,
+        skin_convergence_tol=1e-12,
+        skin_max_iterations=60,
+    )
+    assert r.metadata["skin_converged"]
+    alpha = MaterialDB()["PP"].thermal_diffusivity_m2_s
+    service = r.total_fill_time_s - r.fill_time_s[0]
+    expected = SKIN_SERVICE_MEAN_FACTOR * c_skin * np.sqrt(alpha * service) * 1e3
+    assert SKIN_SERVICE_MEAN_FACTOR == pytest.approx(2.0 / 3.0)
+    np.testing.assert_allclose(r.skin_thickness_mm[0], expected, rtol=1e-7, atol=1e-12)
+
+
+def test_the_core_never_drops_below_a_third_of_the_wall(frozen_run):
+    """A sealing cell raises resistance by at most 27x; it never hits the floor.
+
+    The mean skin over a service that ends at ``t_close`` is ``(2/3)`` of the
+    half-thickness, so ``h_core >= h/3``. That bound is what keeps the
+    inflation finite where the arrival clock used to run away by orders of
+    magnitude on a floored cell.
+    """
+    r = frozen_run
+    live = r.geometry.mask & ~r.unfillable_mask
+    h = r.geometry.thickness_mm
+    assert r.short_shot_mask.any()
+    assert np.all(r.core_thickness_mm[live] >= h[live] / 3.0 - 1e-9)
+    # and the skin never eats past the floor -- the pair stays additive
+    np.testing.assert_allclose(
+        r.core_thickness_mm[live] + 2.0 * r.skin_thickness_mm[live], h[live], rtol=1e-12
+    )
+
+
+def test_sealed_cells_filled_before_they_closed(frozen_run):
+    """The seal is where freeze-off happened, not where melt is missing."""
+    r = frozen_run
+    sealed = r.short_shot_mask
+    assert sealed.any()
+    assert np.all(np.isfinite(r.fill_time_s[sealed]))
+    assert np.all(np.isfinite(r.pressure_norm[sealed]))
+    assert not (sealed & r.unfillable_mask).any()
+    # the seal sits right at the edge of what fills
+    from scipy import ndimage as ndi
+
+    assert (ndi.binary_dilation(r.unfillable_mask) & sealed).any()
+
+
+def test_a_slower_fill_seals_more():
+    """Exposure grows with the time the melt spends passing a cell.
+
+    Same strip, ten times the rate: the thin band is swept in a fraction of
+    its sealing age and nothing is cut off. At the slow rate the far half is.
+    """
+    thk = np.concatenate([np.full(30, 2.0), np.full(30, 0.05)])
+    fast = _solve(_strip(thk), injection_volume_flow_cm3s=10 * Q_CM3S)
+    slow = _solve(_strip(thk), injection_volume_flow_cm3s=Q_CM3S)
+    assert fast.unfillable_mask is None
+    assert fast.metadata["short_shot_cells"] == 0
+    assert slow.unfillable_mask is not None and slow.unfillable_mask.any()
+    assert slow.metadata["filled_volume_fraction"] < 1.0
+
+
+def test_the_first_pass_sealing_set_does_not_leak_into_the_report():
+    """Only the seal that cut the dead region off is reported from a pass that carried it.
+
+    A pass that still holds a dead region runs on a clock inflated by that
+    region's resistance, and on that clock cells far from the seal can look
+    closed too. Those decisions are not the part's: the re-solve without the
+    dead load makes them again. So the thick live run must not be reported as
+    sealed, whatever sits behind the band.
+    """
+    r = _solve(_band_sealed(100))
+    live_run = np.zeros_like(r.geometry.mask)
+    live_run[0, :20] = True
+    assert r.short_shot_mask.any()
+    assert not (r.short_shot_mask & live_run).any()
+    assert r.short_shot_mask[0, 20:26].any()

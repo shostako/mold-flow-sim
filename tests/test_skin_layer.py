@@ -82,8 +82,9 @@ def test_skin_zero_constant_recovers_baseline(pp) -> None:
 
 
 def test_skin_short_shot_detected_on_thin_plate(pp) -> None:
-    """A 0.4 mm plate with a strong c_skin and slow flow forces the two skin
-    fronts to meet across most cells, populating the short-shot mask."""
+    """A 0.4 mm plate with a strong c_skin and slow flow seals near the gate
+    while the front is still far away, cutting most of the plate off: the
+    seal lands in ``short_shot_mask``, the missing melt in ``unfillable_mask``."""
     geom = build_demo_geometry(plate_thk_mm=0.4, cell_size_mm=1.5)
     res = _solve(
         geom,
@@ -92,11 +93,13 @@ def test_skin_short_shot_detected_on_thin_plate(pp) -> None:
         skin_growth_constant=1.5,
         skin_max_iterations=3,
     )
-    assert res.short_shot_mask is not None
-    short_count = int(res.short_shot_mask.sum())
+    assert res.short_shot_mask is not None and res.short_shot_mask.any()
+    assert res.unfillable_mask is not None
     cavity_cells = int(geom.mask.sum())
     # Most of the plate should fail to fill in this regime.
-    assert short_count / max(cavity_cells, 1) > 0.3
+    assert int(res.unfillable_mask.sum()) / max(cavity_cells, 1) > 0.3
+    assert res.metadata["filled_volume_fraction"] < 0.7
+    assert not (res.short_shot_mask & res.unfillable_mask).any()
 
 
 def test_skin_metadata_contains_iteration_info(pp) -> None:

@@ -35,6 +35,11 @@ class Geometry:
     # (only the product body is True). Cells outside ``mask`` are ignored
     # regardless of the value here.
     compression_mask: np.ndarray | None = None
+    # Nominal valve-axis x [mm, grid frame] for the display origin. Set by
+    # the parametric builders from the configured valve position; when None
+    # the display falls back to the rasterized gate-cell centroid (which an
+    # orifice clipped by a one-sided pocket shifts mesh-dependently).
+    valve_axis_x_mm: float | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -90,8 +95,8 @@ class Geometry:
         """Return ``(x0, y0)`` in mm — the display origin shared by the
         preview and every result-time map.
 
-        ``x0`` is the gate centroid (the valve axis, i.e. the product
-        center for every parametric build). ``y0`` is the **bottom edge of
+        ``x0`` is the nominal valve axis when the builder recorded it
+        (``valve_axis_x_mm``), else the gate-cell centroid. ``y0`` is the **bottom edge of
         the product zone** (the ``compression_mask`` cells, which every
         builder sets to the product plate body), so the product's gate-side
         edge reads ``y = 0``: a film gate's gate block / runner sits at
@@ -105,7 +110,14 @@ class Geometry:
             return float(self.nx * self.cell_size_mm) / 2.0, 0.0
         gate_iys = np.fromiter((gy for gy, _ in self.gates), dtype=float)
         gate_ixs = np.fromiter((gx for _, gx in self.gates), dtype=float)
-        x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
+        if self.valve_axis_x_mm is not None:
+            # The nominal axis, not the gate-cell centroid: an orifice
+            # clipped by a one-sided pocket (asymmetric profile gate) only
+            # keeps cells on one side, and the centroid then drifts off the
+            # valve axis by a mesh-dependent amount (Codex P2, PR #76).
+            x0 = float(self.valve_axis_x_mm)
+        else:
+            x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
         y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
         product = None if self.compression_mask is None else (self.mask & self.compression_mask)
         if product is not None and product.any():
@@ -648,6 +660,7 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
         cell_size_mm=dx,
         label="film_gate",
         compression_mask=compression_mask,
+        valve_axis_x_mm=cx,
     )
     if valve_iys.size == 0:
         # Defensive: if d_valve is too small to cover any cell, snap to the
@@ -882,6 +895,7 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
         cell_size_mm=dx,
         label="direct_gate",
         compression_mask=compression_mask,
+        valve_axis_x_mm=cx,
     )
 
     # --- Dirichlet τ=0 cells: the gate disk inside the plate ---
@@ -1300,6 +1314,7 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
         cell_size_mm=dx,
         label="film_gate2",
         compression_mask=compression_mask,
+        valve_axis_x_mm=x_g,
     )
     if valve_iys.size == 0:
         # Defensive: snap to the single cell nearest the valve point.

@@ -792,3 +792,31 @@ def test_exit_width_wider_than_the_mesh_still_builds_connected() -> None:
     g = build_profile_gate_geometry(_demo_spec(), _plate(), cell_size_mm=1.0)
     _labels, n = ndi.label(g.mask)
     assert n == 1
+
+
+# -------------------------- display origin --------------------------
+
+
+def test_display_origin_x_is_the_nominal_valve_axis_not_the_cell_centroid() -> None:
+    """An asymmetric pocket clips the orifice at its w = 0 edge, so the
+    surviving gate cells all sit on one side and their centroid drifts off
+    the valve axis by a mesh-dependent amount. x = 0 must stay on the
+    nominal axis (Codex P2, PR #76)."""
+    spec = _minimal_spec(symmetric=False, gate_exit_width=100.0)
+    g = build_profile_gate_geometry(spec, _plate())
+    x_edge = 5.0 + 150.0 - spec.gate_exit_width / 2.0  # valve axis (w = 0)
+    x0, _y0 = g.display_origin_mm()
+    assert x0 == pytest.approx(x_edge)
+    centroid = float(np.mean([(ix + 0.5) * g.cell_size_mm for _iy, ix in g.gates]))
+    assert centroid > x_edge + 0.25 * g.cell_size_mm  # the clipped centroid drifts
+
+
+def test_display_origin_x_follows_a_symmetric_valve_offset() -> None:
+    """symmetric spec with valve.w != 0: x = 0 on the offset valve axis."""
+    spec = _minimal_spec()
+    d = spec.to_dict()
+    d["valve"]["w"] = 10.0
+    spec = GateProfileSpec.from_dict(d)
+    g = build_profile_gate_geometry(spec, _plate())
+    x0, _y0 = g.display_origin_mm()
+    assert x0 == pytest.approx(5.0 + 150.0 + 10.0)

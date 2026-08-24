@@ -531,85 +531,60 @@ class HeleShawSolver:
     ) -> np.ndarray:
         """Cells the front cannot reach before every path to a gate has sealed.
 
-        A cell is reached at ``t_arr`` if, at that instant, a 4-connected path
-        of open cells joins it to a gate. A cell that never seals is open for
-        the whole fill; a sealing cell is open until its ``t_close``. So a
-        choke that closes at ``t_close`` cuts off exactly the cells behind it
-        that arrive later -- the ones that arrived earlier filled through it.
+        A cell is reached at ``t_arr`` if a 4-connected path of cells joins it
+        to a gate along which the melt arrived no later than it did and no
+        core has closed by then. A cell that never seals is open from its
+        arrival on; a sealing cell is open from its arrival until ``t_close``.
+        So a choke that closes at ``t_close`` cuts off exactly the cells
+        behind it that arrive later -- the ones that arrived earlier filled
+        through it.
 
-        Evaluated as a sweep from the last arrival backwards: the set of open
-        cells only grows as the time threshold drops, so a union-find over the
-        never-sealing components plus the sealing cells answers every arrival
-        with insertions only. Reachability is 4-neighbour, like the stencil.
+        Paths run along the arrival order (the volume map is monotone in tau,
+        and tau has no interior minimum), so a cell's fate follows from its
+        earlier neighbours: carry along the best path the earliest closing
+        time on it -- the last instant the cell still has an open route --
+        and the cell fills if that instant is after its own arrival. Cells the
+        melt has not reached by then are not part of any route (Codex P1 on
+        PR #73: a sweep that kept every never-sealing cell present from the
+        start connected a target behind a closed choke to the gate through
+        cells that fill later, and kept it fillable).
         """
         cavity = self.geometry.mask
         ny, nx = cavity.shape
-        sealing = cavity & frozen
-        static = cavity & ~sealing
-        labels, n_comp = ndi.label(static)
+        n = ny * nx
+        t_flat = np.where(cavity, t_arr, np.nan).ravel()
+        usable = np.isfinite(t_flat)
+        order = np.flatnonzero(usable)
+        order = order[np.argsort(t_flat[order], kind="stable")]
+        rank = np.full(n, -1, dtype=np.int64)
+        rank[order] = np.arange(order.size)
+        closes = np.where(cavity & frozen, t_close, np.inf).ravel()
+        is_gate = np.zeros(n, dtype=bool)
+        for iy, ix in self.geometry.gates:
+            if cavity[iy, ix]:
+                is_gate[iy * nx + ix] = True
 
-        # nodes: one per never-sealing component, then one per sealing cell
-        seal_flat = np.flatnonzero(sealing.ravel())
-        n_seal = seal_flat.size
-        node = np.full(cavity.shape, -1, dtype=int)
-        node[static] = labels[static] - 1
-        node_flat = node.ravel()
-        node_flat[seal_flat] = n_comp + np.arange(n_seal)
-        n_nodes = n_comp + n_seal
-        parent = np.arange(n_nodes)
-        present = np.zeros(n_nodes, dtype=bool)
-        present[:n_comp] = True
-
-        def find(a: int) -> int:
-            while parent[a] != a:
-                parent[a] = parent[parent[a]]
-                a = parent[a]
-            return a
-
-        def insert(flat_index: int) -> None:
-            me = node_flat[flat_index]
-            present[me] = True
-            iy, ix = divmod(int(flat_index), nx)
-            for dy, dx_ in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                jy, jx = iy + dy, ix + dx_
-                if 0 <= jy < ny and 0 <= jx < nx:
-                    other = node[jy, jx]
-                    if other >= 0 and present[other]:
-                        ra, rb = find(me), find(other)
-                        if ra != rb:
-                            parent[ra] = rb
-
-        gate_nodes = [int(node[iy, ix]) for iy, ix in self.geometry.gates if cavity[iy, ix]]
-
-        # arrivals from last to first; sealing cells enter as the threshold
-        # drops below their closing time (open iff t_close > t_arr)
-        cell_flat = np.flatnonzero(cavity.ravel())
-        t_cells = t_arr.ravel()[cell_flat]
-        t_cells = np.where(np.isnan(t_cells), np.inf, t_cells)
-        cell_order = cell_flat[np.argsort(-t_cells, kind="stable")]
-        t_sorted = np.sort(t_cells)[::-1]
-        seal_close = t_close.ravel()[seal_flat]
-        seal_order = np.argsort(-seal_close, kind="stable")
-
-        reach = np.zeros(cavity.shape, dtype=bool)
-        reach_flat = reach.ravel()
-        p = 0
-        for k in range(n_seal + 1):
-            threshold = seal_close[seal_order[k]] if k < n_seal else -np.inf
-            # every cell arriving at or after the next closing time sees the
-            # sealing cells inserted so far
-            q = p
-            while q < cell_order.size and t_sorted[q] >= threshold:
-                q += 1
-            if q > p:
-                gate_roots = {find(g) for g in gate_nodes if present[g]}
-                for i in cell_order[p:q]:
-                    nd = node_flat[i]
-                    reach_flat[i] = bool(present[nd]) and find(nd) in gate_roots
-                p = q
-            if k < n_seal:
-                insert(int(seal_flat[seal_order[k]]))
-        return cavity & ~reach
+        # latest instant at which the cell still has an open route to a gate
+        # *through its own core*; -inf while it has none
+        open_until = np.full(n, -np.inf)
+        reach = np.zeros(n, dtype=bool)
+        for i in order:
+            if is_gate[i]:
+                best = np.inf
+            else:
+                best = -np.inf
+                iy, ix = divmod(int(i), nx)
+                r_i = rank[i]
+                for dy, dx_ in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    jy, jx = iy + dy, ix + dx_
+                    if 0 <= jy < ny and 0 <= jx < nx:
+                        j = jy * nx + jx
+                        if 0 <= rank[j] < r_i and open_until[j] > best:
+                            best = open_until[j]
+            if best > t_flat[i]:
+                reach[i] = True
+                open_until[i] = min(best, closes[i])
+        return cavity & ~reach.reshape(ny, nx)
 
     @staticmethod
     def _tau_reference(tau: np.ndarray, where: np.ndarray) -> float | None:
@@ -950,9 +925,22 @@ class HeleShawSolver:
         # sealing); there the largest candidate that fills is the answer.
         band = live_hi & ~live_lo
         refine = cut_hi is not None and cut_hi.any() and not (cut_hi & ~band).any()
-        if refine and passes < MAX_DOMAIN_PASSES:
-            live = live_hi & ~cut_hi
+        live = live_hi
+        cut = cut_hi
+        # Shed the cut and solve again, a few times if the cleaner clock cuts
+        # once more (it can: the candidate carried up to a band of dead
+        # load). Each round loses at least a cell, so this settles; it is
+        # also what finds the fillable sliver when every bisection candidate
+        # was too large (Codex P1 on PR #73: with nothing consistent solved,
+        # the cavity-wide solution stood with the dead region's resistance
+        # still in its clock).
+        while refine and cut is not None and cut.any() and passes < MAX_DOMAIN_PASSES:
+            live = live & ~cut
+            if not live.any():
+                break
             sub = self._restricted_to(live)
+            if not sub.geometry.gates:
+                break
             sol = sub._solve_domain(eta)
             passes += 1
             cut = None
@@ -994,10 +982,18 @@ class HeleShawSolver:
                 domain_solver, sol, live_mask, frozen_hi, domain_passes, domain_converged = (
                     self._largest_consistent_prefix(eta, sol, dead0)
                 )
-        skin_thk_mm = sol.skin_thk_mm
-        h_core_mm = sol.h_core_mm
         dead_cells = cavity_mask & ~live_mask
         unfillable_mask = dead_cells if dead_cells.any() else None
+        # The solution of the part that fills says nothing about the cells it
+        # does not contain: no skin grew there and no core was carved, but
+        # zero would draw them as closed (Codex P2 on PR #73). NaN, like
+        # their fill time.
+        skin_thk_mm = sol.skin_thk_mm
+        h_core_mm = sol.h_core_mm
+        if skin_thk_mm is not None and dead_cells.any():
+            skin_thk_mm = np.where(dead_cells, np.nan, skin_thk_mm)
+        if h_core_mm is not None and dead_cells.any():
+            h_core_mm = np.where(dead_cells, np.nan, h_core_mm)
 
         tau = sol.tau
         tau_max = sol.tau_max

@@ -937,3 +937,71 @@ def test_the_first_pass_sealing_set_does_not_leak_into_the_report():
     assert r.short_shot_mask.any()
     assert not (r.short_shot_mask & live_run).any()
     assert r.short_shot_mask[0, 20:26].any()
+
+
+def test_a_route_through_cells_that_fill_later_does_not_count():
+    """Codex P1 on PR #73: reachability follows the arrival order.
+
+    Two rows joined at both ends. The target on the top row sits behind a
+    choke that closes before it arrives; the bottom row loops around to it,
+    but the cells of that loop arrive *after* the target does. At the target's
+    arrival the loop holds no melt, so the target is cut off -- a sweep that
+    kept every never-sealing cell present from the start connected it
+    through the loop and kept it fillable.
+    """
+    mask = np.ones((2, 5), dtype=bool)
+    geom = Geometry(mask=mask, thickness_mm=np.ones((2, 5)), cell_size_mm=1.0)
+    geom.gates = [(0, 0)]
+    solver = HeleShawSolver(geom, MaterialDB()["PP"])
+    #        gate  choke  target
+    t_arr = np.array([[0.0, 1.0, 2.0, 3.0, 4.0], [0.5, 6.0, 7.0, 8.0, 9.0]])
+    frozen = np.zeros_like(mask)
+    frozen[0, 1] = True
+    t_close = np.full_like(t_arr, np.inf)
+    t_close[0, 1] = 1.5  # closes before the target (0, 2) arrives at 2.0
+    dead = solver._unfillable_cells(frozen, t_arr, t_close)
+    assert dead[0, 2], "the target reached the gate through cells that fill later"
+    assert dead[0, 3:].all()
+    # the bottom row itself is fed from the gate and never sealed
+    assert not dead[1].any()
+    assert not dead[0, :2].any()
+
+
+def test_dead_cells_carry_no_skin_and_no_core(frozen_run):
+    """Codex P2 on PR #73: the solution of the part that fills says nothing about the rest.
+
+    The restricted solve holds zeros outside its cavity, and copied straight
+    into the result those zeros drew the unfillable region as a closed core.
+    """
+    r = frozen_run
+    dead = r.unfillable_mask
+    assert dead.any()
+    assert np.all(np.isnan(r.skin_thickness_mm[dead]))
+    assert np.all(np.isnan(r.core_thickness_mm[dead]))
+    live = r.geometry.mask & ~dead
+    assert np.all(np.isfinite(r.skin_thickness_mm[live]))
+    assert np.all(np.isfinite(r.core_thickness_mm[live]))
+
+
+def test_a_sliver_below_the_resolution_still_gets_its_own_solve():
+    """Codex P1 on PR #73: every bisection candidate can be too large.
+
+    A gate ringed by thin cells fills the gate and the ring -- a few hundredths
+    of the resolution. The answer must still be solved on that sliver, not
+    fall back to the cavity-wide solution with the plate's resistance in its
+    clock: the baseline time is the sliver's volume over Q, and the gate's
+    time is finite.
+    """
+    n = 24
+    thk = np.full((n, n), 2.0)
+    thk[2:5, 2:5] = 0.04
+    thk[3, 3] = 2.0
+    geom = Geometry(mask=np.ones((n, n), dtype=bool), thickness_mm=thk, cell_size_mm=1.0)
+    geom.gates = [(3, 3)]
+    r = _solve(geom)
+    live = r.geometry.mask & ~r.unfillable_mask
+    live_cm3 = float(thk[live].sum()) / 1000.0
+    assert live_cm3 < 0.01 * geom.volume_cm3()
+    assert r.metadata["T_fill_baseline_s"] == pytest.approx(live_cm3 / Q_CM3S, rel=1e-9)
+    assert r.metadata["domain_converged"] is True
+    assert np.isfinite(r.fill_time_s[3, 3])

@@ -1221,6 +1221,7 @@ def build_profile_gate_geometry(
         cell_size_mm=dx,
         label="profile_gate",
         compression_mask=compression_mask,
+        valve_axis_x_mm=x_valve,
     )
     if valve_iys.size == 0:
         # Defensive: snap to the in-mask cell nearest to the valve center

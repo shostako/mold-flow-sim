@@ -25,6 +25,7 @@ from core import (
     ProfilePlateConfig,
     build_profile_gate_geometry,
 )
+from core.profile_gate import SubGateSpec, _edge_w, _fan_breakpoints
 
 DEMO_JSON = Path(__file__).parent.parent / "data" / "gate_profiles" / "demo_twin_fan_gate.json"
 
@@ -404,3 +405,140 @@ def test_single_pocket_specs_are_untouched_by_the_extension() -> None:
     again = build_profile_gate_geometry(copy.deepcopy(legacy), _plate(), cell_size_mm=1.0)
     assert np.array_equal(g.mask, again.mask)
     assert np.array_equal(g.thickness_mm, again.thickness_mm)
+
+
+# ----------------------- extrapolated reach and signed width (Codex P1/P2) ---
+
+
+def test_w_max_follows_a_wall_extrapolated_past_its_last_point() -> None:
+    """Codex P1: ``_line_eval`` extrapolates a wall beyond its second point,
+    so a fan whose outer wall ends before ``tip_t`` and slopes outward keeps
+    widening. Reading the stored endpoints under-reports that reach, the
+    grid-fit check passes, and the raster truncates the fan at the array
+    edge -- wrong area and conductance with no diagnostic."""
+    spec = _twin(
+        sub_gates=[
+            {
+                "inner_wall_line": [[2.0, 0.0], [12.0, 45.0]],
+                # ends at t = 6 but the fan runs to 12: 100 + (30/4)·10 = 175
+                "outer_wall_line": [[2.0, 100.0], [6.0, 130.0]],
+                "tip_t": 12.0,
+            }
+        ]
+    )
+    assert spec.w_max() == pytest.approx(175.0)  # not the stored 130
+    with pytest.raises(ValueError, match="overhangs"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    # the same wall inside a plate wide enough for 175 builds, and the fan
+    # really does reach there (so the bound describes cells, not paranoia)
+    plate = _plate(plate_w_mm=380.0)
+    g = build_profile_gate_geometry(spec, plate, cell_size_mm=1.0)
+    t, wa = _tw(g, spec, plate)
+    assert g.mask[(t > 11.4) & (t < 11.6) & (wa > 165.0) & (wa < 174.0)].all()
+
+
+def test_w_max_follows_the_single_pocket_wall_too() -> None:
+    """The same extrapolation applies to ``outer_wall_line``; the defect is a
+    property of how walls are evaluated, not of sub-gates."""
+    spec = GateProfileSpec.from_dict(
+        {
+            **_twin_dict(),
+            "sub_gates": None,
+            # widens with t, and t_max (valve 18 + 1.5) runs past its end
+            "outer_wall_line": [[2.0, 100.0], [6.0, 130.0]],
+        }
+    )
+    assert spec.t_max() == pytest.approx(19.5)
+    assert spec.w_max() == pytest.approx(100.0 + 7.5 * (19.5 - 2.0))
+
+
+def test_one_sided_runner_overhanging_the_valve_side_edge_is_rejected() -> None:
+    """Codex P1: with ``symmetric=False`` w is a signed offset from the
+    valve-side edge, so a runner near w = 0 sticks out to
+    ``min(path.w) − width/2`` on the far side. The grid check only looked at
+    the positive edge, so the runner was clipped at the array boundary and
+    the solve used a narrower channel than the spec asks for."""
+    d = _twin_dict(
+        symmetric=False,
+        gate_exit_width=290.0,
+        sub_gates=[
+            {
+                "inner_wall_line": [[2.0, 0.0], [12.0, 45.0]],
+                "outer_wall_line": [[2.0, 290.0], [12.0, 55.0]],
+                "tip_t": 12.0,
+            }
+        ],
+        runner={"width": 30.0, "depth": 2.0, "path": [[18.0, 0.0], [12.0, 50.0]]},
+    )
+    spec = GateProfileSpec.from_dict(d)
+    assert spec.w_min() == pytest.approx(-15.0)
+    # x_edge = 5 + 150 − 145 = 10 mm, so the runner reaches x = −5
+    with pytest.raises(ValueError, match="overhangs"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+
+
+def test_one_sided_runner_below_the_edge_is_real_cavity_when_it_fits() -> None:
+    """The negative-w half of the band is pocket, not a bookkeeping artefact:
+    with room for it the builder keeps those cells."""
+    d = _twin_dict(
+        symmetric=False,
+        gate_exit_width=200.0,
+        sub_gates=[
+            {
+                "inner_wall_line": [[2.0, 0.0], [12.0, 45.0]],
+                "outer_wall_line": [[2.0, 200.0], [12.0, 55.0]],
+                "tip_t": 12.0,
+            }
+        ],
+        runner={"width": 30.0, "depth": 2.0, "path": [[18.0, 0.0], [12.0, 50.0]]},
+    )
+    spec = GateProfileSpec.from_dict(d)
+    plate = _plate()
+    g = build_profile_gate_geometry(spec, plate, cell_size_mm=0.5)
+    iy, ix = np.indices(g.mask.shape)
+    xx = (ix + 0.5) * g.cell_size_mm
+    yy = (iy + 0.5) * g.cell_size_mm
+    t = plate.pad_mm + spec.t_max() - yy
+    w = xx - (plate.pad_mm + plate.plate_w_mm / 2.0 - spec.gate_exit_width / 2.0)  # signed
+    below = (w < -2.0) & (w > -13.0) & (t > 16.0) & (t < 18.0)
+    assert g.mask[below].all()
+    assert np.allclose(g.thickness_mm[below], 2.0)
+
+
+def test_fan_walls_crossed_near_the_land_are_rejected() -> None:
+    """Codex P2: a tip-only ordering check accepts lines that cross near the
+    land and separate by the tip; the raster then drops the crossed part of
+    the fan and the solve reports that unintended geometry."""
+    crossed = {
+        "inner_wall_line": [[2.0, 60.0], [12.0, 45.0]],
+        "outer_wall_line": [[2.0, 50.0], [12.0, 55.0]],
+        "tip_t": 12.0,
+    }
+    # the tip alone is healthy -- that is what made this slip through
+    assert _edge_w(crossed["outer_wall_line"], 12.0) > _edge_w(crossed["inner_wall_line"], 12.0)
+    with pytest.raises(ValueError, match="wider"):
+        GateProfileSpec.from_dict(_twin_dict(sub_gates=[crossed]))
+
+
+def test_fan_width_is_checked_at_the_clamp_breakpoints() -> None:
+    """The gap is piecewise linear with a breakpoint where each line's clamp
+    ends, so its minimum sits at a breakpoint or an end. A fan that is fine
+    at both ends but pinched at a clamp point must still be rejected."""
+    sg = {
+        # inner clamps to 40 until t = 8, then drops away
+        "inner_wall_line": [[8.0, 40.0], [12.0, 10.0]],
+        # outer clamps to 50 until t = 2, then dips to 35 at 8 before widening
+        "outer_wall_line": [[2.0, 50.0], [8.0, 35.0]],
+        "tip_t": 12.0,
+    }
+    assert _fan_breakpoints(
+        SubGateSpec(
+            **{
+                **sg,
+                "inner_wall_line": tuple(tuple(p) for p in sg["inner_wall_line"]),
+                "outer_wall_line": tuple(tuple(p) for p in sg["outer_wall_line"]),
+            }
+        )
+    ) == [0.0, 2.0, 8.0, 12.0]
+    with pytest.raises(ValueError, match=r"at t = 8"):
+        GateProfileSpec.from_dict(_twin_dict(sub_gates=[sg]))

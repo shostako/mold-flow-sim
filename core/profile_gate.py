@@ -592,15 +592,38 @@ class GateProfileSpec:
         return max(candidates)
 
     def w_max(self) -> float:
-        """Largest width coordinate any pocket feature reaches (grid-fit bound)."""
+        """Largest width coordinate any pocket feature reaches (grid-fit bound).
+
+        Boundary lines are **evaluated the way the builder evaluates them**
+        (``_line_eval``: clamped to the first point's w before it, linearly
+        extrapolated after the second), not read off their two stored
+        endpoints. A wall whose line ends before the feature does and slopes
+        outward keeps widening past its last point; taking the endpoint would
+        under-report the reach, the grid-fit check would pass, and the
+        rasterized pocket would be silently truncated at the array edge --
+        wrong area, volume and conductance with no diagnostic (Codex P1).
+        """
         candidates = [0.0]
         if self.outer_wall_line is not None:
-            candidates += [self.outer_wall_line[0][1], self.outer_wall_line[1][1]]
+            candidates.append(_line_reach(self.outer_wall_line, self.t_max()))
         for sg in self.sub_gates:
-            candidates += [sg.outer_wall_line[0][1], sg.outer_wall_line[1][1]]
+            candidates.append(_line_reach(sg.outer_wall_line, sg.tip_t))
         if self.runner is not None:
             candidates.append(max(w for _t, w in self.runner.path) + self.runner.width / 2.0)
         return max(candidates)
+
+    def w_min(self) -> float:
+        """Most negative width coordinate any pocket feature reaches (≤ 0).
+
+        Only meaningful for ``symmetric=False``, where ``w`` is a signed
+        offset from the valve-side edge rather than ``|x − x_valve|``: a
+        runner passing near ``w = 0`` sticks out to ``min(path.w) − width/2``
+        on the far side of that edge. Walls are validated ``w ≥ 0``, so the
+        runner is the only feature that can go negative (Codex P1).
+        """
+        if self.runner is None:
+            return 0.0
+        return min(0.0, min(w for _t, w in self.runner.path) - self.runner.width / 2.0)
 
     # ---- validation ----
 
@@ -671,15 +694,23 @@ class GateProfileSpec:
                     raise ValueError(f"{p}.{label} t must be ≥ 0, got {t1}")
                 if w1 < 0 or w2 < 0:
                     raise ValueError(f"{p}.{label} w must be ≥ 0, got {w1}, {w2}")
-            # the fan must have positive width at its tip, or it is a slit that
-            # the raster may drop entirely
-            w_in_tip = _line_w(sg.inner_wall_line, sg.tip_t)
-            w_out_tip = _line_w(sg.outer_wall_line, sg.tip_t)
-            if w_out_tip <= w_in_tip + _EPS:
-                raise ValueError(
-                    f"{p}: outer wall ({w_out_tip:.3f}) must be wider than the inner wall "
-                    f"({w_in_tip:.3f}) at tip_t = {sg.tip_t}"
-                )
+            # The fan must have positive width over its whole t-extent, not
+            # just at the tip: lines crossed near the land that separate by
+            # the tip pass a tip-only check, and the raster then silently
+            # drops the crossed part of the fan (with another fan or a runner
+            # feeding it, the solve completes and reports that unintended
+            # geometry). Both edges are piecewise linear in t with a
+            # breakpoint where each line's clamp ends, so the gap's minimum
+            # over [0, tip_t] is attained at a breakpoint or an endpoint --
+            # checking those is exact, not a sample (Codex P2).
+            for t_chk in _fan_breakpoints(sg):
+                w_in = _edge_w(sg.inner_wall_line, t_chk)
+                w_out = _edge_w(sg.outer_wall_line, t_chk)
+                if w_out <= w_in + _EPS:
+                    raise ValueError(
+                        f"{p}: outer wall ({w_out:.3f}) must be wider than the inner wall "
+                        f"({w_in:.3f}) at t = {t_chk:g} (checked over [0, tip_t])"
+                    )
             if sg.island is not None:
                 si = sg.island
                 if si.angle_deg < 0:
@@ -871,6 +902,27 @@ def _line_w(line: Line, t: float) -> float:
     return w1 + (w2 - w1) / max(t2 - t1, 1e-12) * (t - t1)
 
 
+def _edge_w(line: Line, t: float) -> float:
+    """Scalar twin of :func:`_line_eval`: clamped before the first point."""
+    (t1, w1), _ = line
+    return w1 if t < t1 else _line_w(line, t)
+
+
+def _line_reach(line: Line, t_end: float) -> float:
+    """Widest w a boundary line reaches over ``t ∈ [0, t_end]``.
+
+    ``_edge_w`` is constant then linear, so its maximum over the interval
+    sits at one of the two ends.
+    """
+    return max(_edge_w(line, 0.0), _edge_w(line, t_end))
+
+
+def _fan_breakpoints(sg: SubGateSpec) -> list[float]:
+    """Where the fan's width can turn: both clamp points, plus the ends."""
+    pts = {0.0, float(sg.tip_t), sg.inner_wall_line[0][0], sg.outer_wall_line[0][0]}
+    return sorted(p for p in pts if -_EPS <= p <= sg.tip_t + _EPS)
+
+
 def _polyline_distance(
     path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
 ) -> np.ndarray:
@@ -965,10 +1017,16 @@ def build_profile_gate_geometry(
     w_wall_max = max(full_half_width, spec.w_max())
     well_hw = spec.well.half_width if spec.well is not None else 0.0
     if spec.symmetric:
+        # w = |x − x_valve|, so the pocket is mirrored and the reach is the
+        # same on both sides.
         x_lo = x_valve - max(w_wall_max, well_hw)
         x_hi = x_valve + max(w_wall_max, well_hw)
     else:
-        x_lo = x_edge - well_hw  # the well may overhang past the w=0 edge
+        # w is a signed offset from the valve-side edge: the well straddles
+        # it, and a runner near w = 0 sticks out on the far side too
+        # (``w_min``). Missing that lets the builder clip the runner at the
+        # array boundary and solve a narrower channel than the spec asks for.
+        x_lo = x_edge - max(well_hw, -spec.w_min())
         x_hi = x_edge + max(w_wall_max, well_hw)
     if x_lo < -_EPS or x_hi > total_w + _EPS:
         raise ValueError(

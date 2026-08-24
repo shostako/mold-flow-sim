@@ -89,7 +89,7 @@ def _cavity_corner_mesh(
     mask = g.mask
     ny, nx = mask.shape
     cs = g.cell_size_mm
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
 
     iy_c, ix_c = np.where(mask)
     n = iy_c.size
@@ -199,7 +199,7 @@ def _build_side_walls(
     g = result.geometry
     nx, ny = g.nx, g.ny
     cs = g.cell_size_mm
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     mask = g.mask
     thk = g.thickness_mm
 

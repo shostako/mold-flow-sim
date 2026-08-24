@@ -109,20 +109,21 @@ def test_flat_top_caps_diagonal_boundary():
         ],
         dtype=bool,
     )
-    geom = SimpleNamespace(mask=mask, cell_size_mm=1.0, gate_origin_mm=lambda: (0.0, 0.0))
+    geom = SimpleNamespace(mask=mask, cell_size_mm=1.0, display_origin_mm=lambda: (0.0, 0.0))
     result = SimpleNamespace(geometry=geom)
     z = np.ones_like(mask, dtype=float)
     _xs, _ys, _zs, (ti, _tj, _tk), _fiy, _fix, _viy, _vix = _cavity_corner_mesh(result, z)
     assert len(ti) == 2 * int(mask.sum())
 
 
-def test_vertices_are_gate_centered(small_result):
+def test_vertices_use_the_display_origin(small_result):
     """The ceiling vertices are cell corners; the gate cell's corner sits at
-    its gate-centered coordinate (the frame is centered on the gate)."""
+    its coordinate in the product-referenced display frame (x on the valve
+    axis, y from the product's bottom edge)."""
     fig = render_3d_thickness_map(small_result)
     _floor, ceiling, _walls = _split_traces(fig)
     g = small_result.geometry
-    x0, y0 = g.gate_origin_mm()
+    x0, y0 = g.display_origin_mm()
     iy, ix = g.gates[0]
     # the gate cell's top-left corner (cell edge, not center)
     exp_x = ix * g.cell_size_mm - x0

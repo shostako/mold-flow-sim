@@ -195,3 +195,50 @@ def test_film_gate_4_sliders_do_not_leak_into_film_gate_1():
     at.radio(key="geom_source").set_value("Film gate 1 (扇状/肉盗み1)").run()
     assert _slider(at, "製品幅").value == 300.0
     assert _slider(at, "ランド深さ").value == 0.35
+
+
+def test_runner_width_is_bounded_by_the_room_past_the_fan_tip():
+    """Every Film gate keeps its sliders inside what the builder accepts. The
+    runner band reaches ``中心半幅 + 幅/2``; at the far end of the tip-axis
+    slider an unbounded width pushes the pocket past the raster and the build
+    dies with パラメータ不整合 instead of the slider preventing it."""
+    at = _film_gate4_app()
+    axis = _slider(at, "扇先端の中心半幅")
+    axis.set_value(axis.max).run()  # 149 − 1.0 = 148.0
+    rw = _slider(at, "ランナー幅")
+    # room = pad(5) + Wp/2(150) − axis(148) = 7 mm each side → width ≤ 14
+    assert rw.max == pytest.approx(14.0)
+    assert rw.value <= rw.max
+    rw.set_value(rw.max).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert not [str(e.value) for e in at.error]
+    assert "mfs_geom" in at.session_state
+
+
+def test_runner_width_is_unconstrained_when_the_tip_leaves_room():
+    at = _film_gate4_app()
+    rw = _slider(at, "ランナー幅")  # default axis 74.5 → room 80.5, cap stays 30
+    assert rw.max == pytest.approx(30.0)
+    assert rw.value == pytest.approx(8.0)
+
+
+def test_the_tip_axis_slider_never_collapses_the_tip_width_slider():
+    """A slider whose min equals its max raises a StreamlitAPIException that
+    kills the rest of the sidebar -- the widgets after it are simply not
+    drawn. The tip width's room is 2·min(axis, 出口半幅 − axis), so the axis
+    slider must stop short of both ends."""
+    at = _film_gate4_app()
+    axis = _slider(at, "扇先端の中心半幅")
+    for value in (axis.min, axis.max):
+        axis.set_value(value).run()
+        assert not at.exception, f"axis={value}: {at.exception}"
+        tip_w = _slider(at, "扇先端幅")
+        assert tip_w.min < tip_w.max
+        # the sliders after it are still there (the sidebar was not truncated)
+        assert _slider(at, "ランナー幅") is not None
+        assert _slider(at, "バルブ位置") is not None
+        axis = _slider(at, "扇先端の中心半幅")
+    at.button[0].click().run()
+    assert not at.exception
+    assert not [str(e.value) for e in at.error]

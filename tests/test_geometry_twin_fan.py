@@ -542,3 +542,50 @@ def test_fan_width_is_checked_at_the_clamp_breakpoints() -> None:
     ) == [0.0, 2.0, 8.0, 12.0]
     with pytest.raises(ValueError, match=r"at t = 8"):
         GateProfileSpec.from_dict(_twin_dict(sub_gates=[sg]))
+
+
+def test_runner_thinner_than_the_mesh_is_rejected_not_dotted() -> None:
+    """A band thinner than the mesh passes between cell centres and rasterises
+    into a dotted line of islands: the fans it feeds are cut off from the
+    valve. Same class as an exit width below the mesh spacing (Issue #58), so
+    it is rejected at build time with the knobs named, rather than left for
+    the solver's reachability check to report as a disconnected cavity."""
+    spec = _demo()  # runner width 6.0
+    plate = _plate()
+    thin = GateProfileSpec.from_dict(
+        {
+            **spec.to_dict(),
+            "runner": {"width": 1.0, "depth": 2.4, "path": [[18.0, 0.0], [12.0, 50.0]]},
+        }
+    )
+    with pytest.raises(ValueError, match="runner.width"):
+        build_profile_gate_geometry(thin, plate, cell_size_mm=1.0)
+    # the same runner on a mesh fine enough to resolve it builds and connects
+    g = build_profile_gate_geometry(thin, plate, cell_size_mm=0.25)
+    import scipy.ndimage as ndi
+
+    _labels, n = ndi.label(g.mask)
+    assert n == 1
+
+
+def test_the_raster_guard_does_not_count_the_mirror_halves_as_breakage() -> None:
+    """The symmetric depth field is built in (t, |w|): a runner that never
+    reaches the valve axis is legitimately two mirror images in x. Counting
+    components on the mirrored grid would reject that healthy shape, so the
+    guard counts on one half. Both a band that crosses the axis (the demo
+    runner, path from w = 0) and one that stays away from it must build."""
+    plate = _plate()
+    assert build_profile_gate_geometry(_demo(), plate, cell_size_mm=1.0).mask.any()
+    away = _twin(runner={"width": 4.0, "depth": 1.5, "path": [[20.0, 10.0], [20.0, 40.0]]})
+    g = build_profile_gate_geometry(away, plate, cell_size_mm=0.2)
+    iy, ix = np.indices(g.mask.shape)
+    xx = (ix + 0.5) * g.cell_size_mm
+    x_valve = plate.pad_mm + plate.plate_w_mm / 2.0
+    # it really is two separated strips on the full grid -- the shape the
+    # half-plane count exists to accept
+    import scipy.ndimage as ndi
+
+    t, wa = _tw(g, away, plate)
+    band = (np.abs(t - 20.0) < 2.0) & (wa > 8.0) & (wa < 42.0) & g.mask
+    assert ndi.label(band)[1] == 2
+    assert band[xx < x_valve].any() and band[xx > x_valve].any()

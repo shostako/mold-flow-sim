@@ -602,6 +602,15 @@ class GateProfileSpec:
         under-report the reach, the grid-fit check would pass, and the
         rasterized pocket would be silently truncated at the array edge --
         wrong area, volume and conductance with no diagnostic (Codex P1).
+
+        One deliberate inexactness: for the single-pocket ``outer_wall_line``
+        the builder clamps the ``t < t1`` stretch to ``full_half_width`` (the
+        gate exit), not to the line's own first w, so a line starting
+        *narrower* than the exit makes this under-report that stretch. The
+        caller keeps ``full_half_width`` as a separate term
+        (``max(full_half_width, w_max())``), so the reach is still covered and
+        the error can only go the safe way. Reproducing the exit-width clamp
+        here would need the plate's width convention and buy nothing.
         """
         candidates = [0.0]
         if self.outer_wall_line is not None:
@@ -917,6 +926,19 @@ def _line_reach(line: Line, t_end: float) -> float:
     return max(_edge_w(line, 0.0), _edge_w(line, t_end))
 
 
+def _count_components(mask: np.ndarray) -> int:
+    """Number of 4-connected components in a boolean mask.
+
+    4-connectivity, not 8: it is the connectivity the 5-point solver stencil
+    uses, so a band that only touches itself at the corners is two channels
+    as far as the flow is concerned (see ``tests/test_solver_1d.py`` on the
+    same distinction for gate reachability).
+    """
+    from scipy import ndimage as ndi
+
+    return int(ndi.label(mask)[1])
+
+
 def _fan_breakpoints(sg: SubGateSpec) -> list[float]:
     """Where the fan's width can turn: both clamp points, plus the ends."""
     pts = {0.0, float(sg.tip_t), sg.inner_wall_line[0][0], sg.outer_wall_line[0][0]}
@@ -1102,6 +1124,28 @@ def build_profile_gate_geometry(
         in_runner = (
             (t >= 0) & (t <= T) & (_polyline_distance(rn.path, t, wa) <= rn.width / 2.0 + 1e-9)
         )
+        # A band thinner than the mesh can pass between cell centres and
+        # rasterise into a dotted line of islands instead of a channel. The
+        # continuous spec is fine, so nothing downstream looks wrong -- but
+        # the fans it feeds are cut off from the valve and the solver reports
+        # a disconnected cavity (or, with a coarser look, plausible garbage).
+        # Same failure class as an exit width below the mesh spacing, so it
+        # gets the same treatment: reject at build time, naming both knobs.
+        # The raster is measured, not predicted from a width/spacing rule:
+        # how thin is too thin depends on the path's angle to the grid.
+        # Count on one half of a symmetric field: it is built in (t, |w|), so
+        # a band that never reaches the axis is legitimately two mirror images
+        # in x. Folding is not the breakage this guard is looking for, and the
+        # half-plane holds each wa exactly once. (``path`` is validated w ≥ 0,
+        # so the band is connected in that half whenever it rasterises.)
+        band_half = in_runner[:, xx[0, :] >= x_valve] if spec.symmetric else in_runner
+        n_band = _count_components(band_half)
+        if n_band != 1:
+            raise ValueError(
+                f"runner.width ({rn.width} mm) rasterises into {n_band} disconnected piece(s) "
+                f"at cell_size_mm={dx}: the band passes between cell centres instead of "
+                "forming a channel. Widen the runner or refine the mesh."
+            )
         d_base = np.where(
             in_runner, np.maximum(np.where(in_gate_base, d_base, 0.0), rn.depth), d_base
         )

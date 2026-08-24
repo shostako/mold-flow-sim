@@ -1019,8 +1019,15 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
         st.markdown("**バルブゲート**")
         v["valve_d"] = slider("バルブゲート径 [mm]", 1.0, 10.0, 3.0, step=0.5)
         # The runner starts at the valve, so the orifice always sits in the
-        # pocket; only the block extent bounds the position.
+        # pocket; only the block extent bounds the position. For the L route
+        # the valve must not sit closer to the product than the fan tip: below
+        # it the sideways trunk would cut a deep stripe across the fan
+        # interiors and feed them mid-fan -- a materially different experiment
+        # from the advertised design (Codex P2). Equality stays allowed; the
+        # L's corner then collapses onto its end.
         t_min = float(v["valve_d"] / 2.0)
+        if d.runner_style == "L":
+            t_min = max(t_min, float(v["tip_t"]))
         t_max = float(max(t_min + 0.1, 60.0 - v["valve_d"] / 2.0))
         v["valve_t"] = slider(
             "バルブ位置 t [mm]",
@@ -1028,7 +1035,10 @@ def _twin_fan_sidebar(tag: str, d: _TwinFanDefaults) -> dict:
             t_max,
             float(min(max(round(well_t_mid, 1), t_min), t_max)),
             step=0.1,
-            help="既定は井戸の中央。ランナーはここから各扇先端へ走る。",
+            help=(
+                "既定は井戸の中央。ランナーはここから各扇先端へ走る。"
+                + ("下限は扇先端 t（トランクは扇より奥を通る）。" if d.runner_style == "L" else "")
+            ),
         )
 
         v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, 1.0, step=0.1)

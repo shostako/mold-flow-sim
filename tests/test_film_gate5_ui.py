@@ -140,11 +140,17 @@ def test_default_geometry_matches_the_twin_mini_l_spec_built_directly(film_gate5
 def test_l_runner_path_follows_the_valve_and_the_fan_tip():
     """The L path is derived: its corner sits at (valve t, tip axis), so
     moving the valve moves the sideways trunk and moving the tip moves the
-    vertical stub."""
+    vertical stub.
+
+    The valve is set last: its slider floor follows the tip (Codex P2), and
+    a widget whose bounds change is re-created by Streamlit with its default
+    value -- setting the valve before the tip would silently discard it (the
+    same trap CLAUDE.md records for dynamic labels, generalised to bounds).
+    """
     at = _film_gate5_app()
-    _slider(at, "バルブ位置").set_value(24.0).run()
     _slider(at, "扇先端 t").set_value(16.0).run()
     _slider(at, "扇先端の中心半幅").set_value(60.0).run()
+    _slider(at, "バルブ位置").set_value(24.0).run()
     at.button[0].click().run()
     assert not at.exception
     rec = _recorded_spec(at)
@@ -190,3 +196,27 @@ def test_film_gate_5_sliders_do_not_leak_into_film_gate_4():
     at.radio(key="geom_source").set_value("Film gate 4 (振り分け/ミニ扇×2)").run()
     assert _slider(at, "製品幅").value == 300.0
     assert _slider(at, "バルブ位置").value == 21.5
+
+
+def test_valve_position_cannot_go_below_the_fan_tip():
+    """Codex P2: with the valve closer to the product than the fan tip, the
+    sideways trunk would cut a deep stripe across the fan interiors and feed
+    them mid-fan -- a materially different experiment from the advertised
+    L-runner. The slider floor follows the tip; equality stays allowed (the
+    corner collapses, covered above)."""
+    at = _film_gate5_app()
+    valve = _slider(at, "バルブ位置")
+    assert valve.min == pytest.approx(14.0)  # == default 扇先端 t
+    _slider(at, "扇先端 t").set_value(16.0).run()
+    valve = _slider(at, "バルブ位置")
+    assert valve.min == pytest.approx(16.0)
+    # raising the tip past the current valve value must not crash the sidebar
+    _slider(at, "扇先端 t").set_value(30.0).run()
+    assert not at.exception
+    valve = _slider(at, "バルブ位置")
+    assert valve.min == pytest.approx(30.0)
+    at.button[0].click().run()
+    assert not at.exception
+    assert not [str(e.value) for e in at.error]
+    rec = _recorded_spec(at)
+    assert rec["valve"]["t"] >= 30.0

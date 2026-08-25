@@ -169,6 +169,9 @@ DOMAIN_VOLUME_RESOLUTION = 256.0
 #: average over the time the cell conducts, not a snapshot (Issue #61).
 SKIN_SERVICE_MEAN_FACTOR = 2.0 / 3.0
 
+# Fill-clock responses to skin resistance, see ``HeleShawSolver.skin_clock_mode``.
+SKIN_CLOCK_MODES = ("constant_pressure", "constant_rate")
+
 
 @dataclass
 class _DomainSolution:
@@ -304,6 +307,15 @@ class HeleShawSolver:
     skin_max_iterations: int = 20
     skin_convergence_tol: float = 1e-3  # relative L2 change in tau between iterations
     min_core_thickness_mm: float = 0.01  # h_core floor; cells at this floor are short shots
+    # How the fill clock responds to the resistance the skin adds.
+    #
+    # ``"constant_pressure"`` (default, the historical proxy): the machine
+    # holds pressure, so the flow thins as the core narrows and T_fill
+    # inflates by the volume-weighted tau ratio. ``"constant_rate"``: the
+    # machine holds velocity, so T_fill stays the geometric V/Q and the
+    # pressure rises instead. Velocity-controlled presses are the common
+    # case; the proxy stays the default so existing results do not move.
+    skin_clock_mode: str = "constant_pressure"
 
     def _effective_viscosity(self) -> float:
         # bulk temperature ~ weighted average (melt dominates while flowing)
@@ -665,8 +677,24 @@ class HeleShawSolver:
         value = float(np.sum(tau[sel] * w)) / total
         return value if value > 0 else None
 
-    def _solve_domain(self, eta: float) -> _DomainSolution:
+    def _solve_domain(
+        self,
+        eta: float,
+        *,
+        T_fill_baseline_s: float | None = None,
+        clock_end_s: float | None = None,
+    ) -> _DomainSolution:
         """Solve tau, the skin fixed point and the fill time on *this* cavity.
+
+        ``T_fill_baseline_s`` overrides the skin-free clock (the time to
+        sweep this cavity; default ``_baseline_fill_time``, which carries the
+        ICM equivalent-model speed-up). ``clock_end_s`` stops the exposure
+        clock early: walls age from the front's passage until
+        ``clock_end_s`` instead of until the fill ends, and cells the front
+        reaches later carry no skin at all. The two-phase model uses it to
+        read the skin at the end of a metered injection (``T_inj = V/Q``);
+        with a clock end the fill time never inflates (a metered shot is by
+        definition rate-controlled). Both None reproduces the plain solve.
 
         Everything here reads ``self.geometry.mask`` and ``self.geometry.gates``,
         so a restricted copy solves its own cavity rather than inheriting one.
@@ -682,7 +710,20 @@ class HeleShawSolver:
 
         h_open = self._open_thickness_field()  # mm
 
-        T_fill_baseline = self._baseline_fill_time(self.geometry)
+        if self.skin_clock_mode not in SKIN_CLOCK_MODES:
+            raise ValueError(
+                f"skin_clock_mode must be one of {SKIN_CLOCK_MODES}, got {self.skin_clock_mode!r}"
+            )
+        T_fill_baseline = (
+            float(T_fill_baseline_s)
+            if T_fill_baseline_s is not None
+            else self._baseline_fill_time(self.geometry)
+        )
+        if T_fill_baseline <= 0:
+            raise ValueError(f"T_fill_baseline_s must be positive, got {T_fill_baseline}")
+        if clock_end_s is not None and clock_end_s < 0:
+            raise ValueError(f"clock_end_s must be non-negative, got {clock_end_s}")
+        inflate = self.skin_clock_mode == "constant_pressure" and clock_end_s is None
 
         # baseline solve (no skin) — also serves as the tau_max reference
         S0 = self._conductance_field(eta, h_open)
@@ -727,7 +768,8 @@ class HeleShawSolver:
 
             def exposure(t_arrival: np.ndarray, T: float):
                 """Service duration, sealing set and time-mean skin at fill time T."""
-                a_end = np.maximum(T - t_arrival, 0.0)
+                T_end = T if clock_end_s is None else min(T, float(clock_end_s))
+                a_end = np.maximum(T_end - t_arrival, 0.0)
                 sealed = cavity_mask & (a_end >= t_c)
                 a_rep = np.minimum(a_end, t_c)
                 s_mm = SKIN_SERVICE_MEAN_FACTOR * c_skin * np.sqrt(alpha * a_rep) * 1.0e3
@@ -769,7 +811,8 @@ class HeleShawSolver:
                 # the baseline stands rather than an inflation off a dead cell.
                 tau_rep_new = self._tau_volume_mean(tau_new, cavity_mask, cell_volume)
                 tau_rep_base = self._tau_volume_mean(tau_baseline, cavity_mask, cell_volume)
-                if tau_rep_new is None or tau_rep_base is None:
+                if not inflate or tau_rep_new is None or tau_rep_base is None:
+                    # rate-controlled: the clock is V/Q whatever the resistance
                     T_fill_new = T_fill_baseline
                 else:
                     T_fill_new = T_fill_baseline * (tau_rep_new / tau_rep_base)
@@ -1103,6 +1146,7 @@ class HeleShawSolver:
                         / max(float(np.sum(cell_volume_final[cavity_mask])), 1e-30)
                     ),
                     "skin_clock": "exposure",
+                    "skin_clock_mode": self.skin_clock_mode,
                     "tau_max_flow": tau_max_flow,
                     # tau of the slowest cell in the cavity-wide solve, frozen
                     # cells included. Kept because the gap between this and

@@ -13,6 +13,26 @@ Model (two linear solves, no time marching):
    open-gap volume fits inside ``V_shot`` is the melt region at the end of
    injection, ``Omega1``. At constant rate this is exact for the front
    position: the front sweeps volume linearly in time.
+
+   With the solver's skin-layer model on, ``tau1`` is the skin fixed point
+   read at the end of the metered injection: walls age from the front's
+   passage until ``T_inj = V_shot / Q`` (``HeleShawSolver._solve_domain``
+   with ``clock_end_s``), the time-mean skin narrows the core, and the
+   clock never inflates — a metered shot is rate-controlled by definition.
+   (The fixed point then carries a residual floor of order 1e-4: cells
+   straddling ``T_inj`` flip between exposed and not as ``tau`` moves, so
+   the default ``skin_convergence_tol`` of 1e-3 converges in a few passes
+   while a much tighter one only runs out the iteration cap -- the pool
+   is stable either way.) A thin plate opened by the ICM stroke loses a
+   good part of its gap to skin within a 0.1 s injection while a thick
+   gate block keeps its conductance, which is what makes the gate fill ahead of the plate on
+   the real part (the isothermal field sends the melt straight across the
+   opened plate). Cells sealed before ``T_inj`` are reported; cells that
+   sealing cut off from the gates are excluded from the shot's candidates
+   (they hold no melt) — the domain is *not* re-solved around them, unlike
+   ``HeleShawSolver.solve``: without clock inflation a dead pocket cannot
+   speed up the seal that made it, so the bisection there has no purpose
+   here.
 2. **Compression phase** — solve ``tau2`` on the *final-thickness* cavity
    with Dirichlet (``tau = 0``) on **all** of ``Omega1`` (the melt pool acts
    as an equipotential source while the mold closes), then advance cells in
@@ -23,9 +43,11 @@ Model (two linear solves, no time marching):
 
 Deliberate limitations (documented, not bugs):
 
-- **No freezing during compression.** The skin-layer model is rejected at
-  the entry; a staged (metering-limited) short stops on volume, not on
-  freeze-off, which is exactly the case this model is for.
+- **No freezing during compression.** The skin grown during injection is
+  carried into the pool, but phase 2 is isothermal: the pool is an
+  equipotential source, so its internal conductance never enters the
+  advance, and the cells the squeeze reaches are fresh. The model has no
+  compression timescale to age them on.
 - **No injection/compression overlap.** The phases are strictly
   sequential; machines that start closing while still injecting are outside
   the model.
@@ -91,6 +113,12 @@ class TwoPhaseShortShotResult:
     injection_time_s: float  # V_shot / Q
     viscosity_Pa_s: float
     metadata: dict
+    # Skin-layer model (solver.skin_layer_enabled) read at the end of
+    # injection: time-mean skin [mm] on ``injection_mask`` (NaN elsewhere)
+    # and the pool cells whose core sealed before ``T_inj``. Both None when
+    # the skin model is off.
+    injection_skin_thickness_mm: np.ndarray | None = None
+    injection_sealed_mask: np.ndarray | None = None
 
 
 def _prefix_by_volume(tau_vals: np.ndarray, volumes: np.ndarray, budget: float) -> np.ndarray:
@@ -138,12 +166,6 @@ def solve_two_phase_short_shot(
     """
     if shot_volume_cm3 <= 0:
         raise ValueError("shot_volume_cm3 must be positive")
-    if solver.skin_layer_enabled:
-        raise ValueError(
-            "two-phase short-shot model does not support the skin-layer model: "
-            "a metering-limited short stops on volume, not on freeze-off "
-            "(freezing during compression is deliberately out of scope)"
-        )
     geom = solver.geometry
     if not geom.gates:
         raise ValueError("Geometry has no gates")
@@ -174,13 +196,40 @@ def solve_two_phase_short_shot(
             "two-phase model requires h_open >= h_final on every cavity cell"
         )
     vol_open = dx * dx * h_open  # mm^3 per cell when swept at the open gap
-    S1 = solver._conductance_field(eta, h_open)
-    tau1, _ = solver._solve_tau_field(S1, gate_dirichlet)
-
     V_open_total = float(vol_open[mask].sum())
     T_open_total = V_open_total / 1000.0 / Q_cm3s  # s to fill the whole open cavity
-    t_arr1 = solver._arrival_time_field(tau1, mask, vol_open, T_open_total)
     T_inj = V_shot_mm3 / 1000.0 / Q_cm3s
+
+    skin_on = bool(solver.skin_layer_enabled)
+    skin_thk: np.ndarray | None = None
+    sealed1: np.ndarray | None = None
+    dead1 = np.zeros(geom.shape, dtype=bool)
+    skin_meta: dict = {"skin_layer_enabled": skin_on}
+    if skin_on:
+        # The skin fixed point read at the end of the metered injection.
+        # ``_solve_domain`` runs the same exposure clock as the main solve,
+        # stopped at T_inj; the clock length is the plain open-cavity sweep
+        # (the main solve's baseline carries the ICM equivalent-model
+        # speed-up, which is not this model's clock).
+        sol = solver._solve_domain(eta, T_fill_baseline_s=T_open_total, clock_end_s=T_inj)
+        tau1 = sol.tau
+        skin_thk = sol.skin_thk_mm
+        sealed1 = sol.frozen_mask if sol.frozen_mask is not None else np.zeros_like(mask)
+        if sealed1.any():
+            dead1 = solver._unfillable_cells(sealed1, sol.t_arr, sol.t_close)
+        skin_meta.update(
+            {
+                "skin_growth_constant": float(solver.skin_growth_constant),
+                "skin_clock_mode": "constant_rate",
+                "skin_iterations": sol.iterations,
+                "skin_converged": bool(sol.converged),
+                "thermal_diffusivity_m2_s": float(solver.material.thermal_diffusivity_m2_s),
+            }
+        )
+    else:
+        S1 = solver._conductance_field(eta, h_open)
+        tau1, _ = solver._solve_tau_field(S1, gate_dirichlet)
+    t_arr1 = solver._arrival_time_field(tau1, mask, vol_open, T_open_total)
 
     # The gate cells all sit at tau = 0, so they form the first tie group of
     # the volume CDF. A metered shot that cannot even cover that group has no
@@ -196,16 +245,36 @@ def solve_two_phase_short_shot(
             "the gate cells, so the model has no melt region to grow from"
         )
 
-    injection_complete = V_shot_mm3 >= V_open_total * (1.0 - _REL_EPS)
+    # Cells a seal cut off from the gates hold no melt; they neither take
+    # shot volume nor count as reachable. Everything else is a candidate.
+    reachable = mask & ~dead1
+    V_reach_total = float(vol_open[reachable].sum())
+    injection_complete = V_shot_mm3 >= V_reach_total * (1.0 - _REL_EPS)
     omega1 = np.zeros(geom.shape, dtype=bool)
     if injection_complete:
-        omega1 |= mask
+        omega1 |= reachable
     else:
-        sel = mask & ~np.isnan(tau1)
+        sel = reachable & ~np.isnan(tau1)
         take = _prefix_by_volume(tau1[sel], vol_open[sel], V_shot_mm3)
         omega1[sel] = take
 
     injection_fill_time_s = np.where(omega1, t_arr1, np.nan)
+    injection_skin_mm: np.ndarray | None = None
+    injection_sealed: np.ndarray | None = None
+    if skin_on:
+        assert skin_thk is not None and sealed1 is not None
+        injection_skin_mm = np.where(omega1, skin_thk, np.nan)
+        # a cell seals after the front passed it, so a sealed cell is in the pool
+        injection_sealed = sealed1 & omega1
+        skin_meta.update(
+            {
+                "injection_skin_max_mm": (
+                    float(np.nanmax(injection_skin_mm)) if omega1.any() else 0.0
+                ),
+                "injection_sealed_cells": int(injection_sealed.sum()),
+                "injection_unfillable_cells": int(dead1.sum()),
+            }
+        )
 
     # ---- Phase 2: compression at the final thickness ----------------------
     vol_fin = dx * dx * h_fin
@@ -265,6 +334,7 @@ def solve_two_phase_short_shot(
     n_cavity = int(mask.sum())
     metadata = {
         "model": "two_phase_short_shot",
+        **skin_meta,
         "shot_volume_cm3": float(shot_volume_cm3),
         "flow_rate_cm3s": Q_cm3s,
         "injection_time_s": T_inj,
@@ -303,6 +373,8 @@ def solve_two_phase_short_shot(
         injection_time_s=T_inj,
         viscosity_Pa_s=eta,
         metadata=metadata,
+        injection_skin_thickness_mm=injection_skin_mm,
+        injection_sealed_mask=injection_sealed,
     )
 
 

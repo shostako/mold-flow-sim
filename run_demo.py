@@ -69,6 +69,7 @@ def _solve_and_export(
     skin_growth_constant: float = 0.5,
     skin_max_iterations: int = 5,
     skin_convergence_tol: float = 1e-3,
+    skin_clock_mode: str = "constant_pressure",
     multilayer: bool = False,
     num_layers: int = 5,
     layer_distribution: str = "wall_refined",
@@ -83,10 +84,10 @@ def _solve_and_export(
         raise ValueError(
             "skin_layer and multilayer are mutually exclusive — choose one wall-cooling model"
         )
-    if two_phase_shot_volume_cm3 is not None and (skin_layer or multilayer):
+    if two_phase_shot_volume_cm3 is not None and multilayer:
         raise ValueError(
-            "two_phase_shot_volume_cm3 needs the plain isothermal solver — "
-            "a metering-limited short stops on volume, not on freeze-off"
+            "two_phase_shot_volume_cm3 needs the HeleShawSolver (isothermal or "
+            "skin-layer) — the multilayer solver has no injection-phase clock for it"
         )
     db = MaterialDB()
     if multilayer:
@@ -125,6 +126,7 @@ def _solve_and_export(
             skin_growth_constant=skin_growth_constant,
             skin_max_iterations=skin_max_iterations,
             skin_convergence_tol=skin_convergence_tol,
+            skin_clock_mode=skin_clock_mode,
         )
     print(f"[{label}] solving... cells={int(geom.mask.sum())} V={geom.volume_cm3():.2f} cm^3")
     result = solver.solve(num_frames=num_frames)
@@ -492,6 +494,27 @@ FILM_GATE_CASES: dict[str, dict] = {
         compression=True,
         compression_stroke_mm=0.70,
         compression_fraction=0.95,
+        two_phase_shot_volume_cm3=4.5,
+    ),
+    # The same staged short with the skin-layer model riding the injection
+    # phase (v0.37.0): at a realistic rate the ICM-opened thin plate loses
+    # part of its gap to skin within the injection while the thick runner
+    # keeps its conductance, so the runner fills ahead of the plate — the
+    # order seen on real parts, which the isothermal field reverses. The
+    # clock is the metered V/Q (rate-controlled) by definition.
+    "FilmGate_PP_two_phase_skin": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=100.0,
+        inj_Q_cm3s=20.0,
+        compression=True,
+        compression_stroke_mm=0.70,
+        compression_fraction=0.95,
+        skin_layer=True,
+        skin_growth_constant=0.8,
+        skin_clock_mode="constant_rate",
         two_phase_shot_volume_cm3=4.5,
     ),
     # Same stepped-plate baseline as above, but driven by the multilayer

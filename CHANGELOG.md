@@ -6,6 +6,56 @@
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 バージョン 0.1.0〜0.14.0 は**開発履歴から遡及的に付与**したもの（2026-08-07 時点で整理）。
 
+## [0.37.0] — 2026-08-25
+
+**二相ショートショットの射出相にスキン層を乗せられるようになった。スキン層の時計を
+「速度制御（射出時間固定）」に切り替えられるようになった。**
+FG1 の 95% ICM ショートショット実物（射出 0.085 s、速度制御）は「ゲート部が先に埋まり、
+製品部は低いドーム」だが、等温の解は「製品中央が上端まで走り、扇の両端が最後」だった。
+原因は解法でなく熱: 時間刻みの前線追跡（moving-boundary）に替えても等温では順番は
+変わらず、0.85 mm に開いた製品部が 0.085 s の露光で片側 0.1 mm のスキンを持つと
+`S` が 0.43 倍に落ちて厚いゲート部が相対的に安くなる。ランド 0.35 の封止年齢は
+0.24 s なので射出中は閉じない帯域。
+
+### 追加
+
+- `HeleShawSolver.skin_clock_mode`: `"constant_pressure"`（既定、従来の「圧力一定で
+  流量が細り T_fill が体積重み付き τ 比で膨らむ」近似）／ `"constant_rate"`（速度制御:
+  `T_fill = V/Q` 固定、圧力が上がる）。既定は従来なので既存結果は bit 不変。metadata
+  に `skin_clock_mode`、UI は壁面冷却『スキン層』のラジオ「スキン層の時計」。
+- `HeleShawSolver._solve_domain(eta, T_fill_baseline_s=, clock_end_s=)`: 時計の長さの
+  上書きと、露光を止める時刻。`clock_end_s` 以降に届くセルはスキンを持たず、時計は
+  膨らまない。
+- 二相ショートショット × スキン層: 射出相は `T_inj = V_shot/Q` で切った露光の不動点で
+  `tau1` を解く（計量 V/Q の定義上つねに速度制御）。`TwoPhaseShortShotResult` に
+  `injection_skin_thickness_mm`（Ω₁ 内の役務平均スキン）と `injection_sealed_mask`
+  （T_inj までに封止したプールのセル）。metadata に `skin_layer_enabled` /
+  `skin_growth_constant` / `skin_clock_mode` / `skin_iterations` / `skin_converged` /
+  `injection_skin_max_mm` / `injection_sealed_cells` / `injection_unfillable_cells`。
+- 二相マップ／アニメ: 射出中に封止したセルを濃赤で塗り、凡例に `sealed during
+  injection` を足す（封止があるときだけ）。スキン ON はタイトルに `c` と `T_inj`。
+- UI: 二相は壁面冷却『なし』または『スキン層』で実行（『層別』は従来どおりスキップ＋
+  常時警告）。結果ペインにスキン最大／封止セル数、封止があれば警告。settings.json に
+  `wall_cooling.skin_clock_mode` と `two_phase_short_shot.skin_layer`。
+- CLI: `_solve_and_export(skin_clock_mode=)`、`two_phase_shot_volume_cm3` と
+  `skin_layer=True` の併用。参照ケース `FilmGate_PP_two_phase_skin`。
+
+### 変更
+
+- `solve_two_phase_short_shot` はスキン層 ON の solver を受理する（旧: 入口で
+  `ValueError`。「計量律速は凍結を含まない」という用途定義を実物が否定した）。
+
+### 意図した限界
+
+- 圧縮相は等温のまま（プールは等圧ソースなので内部スキンは前進に効かず、圧縮の時間
+  スケールをモデルが持たない）。
+- 射出相で封止が出た場合、封止で切られたセルを候補から外すだけでドメインを解き直さない
+  （速度制御では時計が膨らまないので、`HeleShawSolver.solve` の二分探索の動機が無い）。
+- ゲート部の剪断発熱は無い。射出が封止年齢（PP_T20・ランド 0.35 で 0.24 s）より遅いと
+  ランドが封止して製品部が未到達に化ける。UI は警告する。免除／剪断発熱は次の段階。
+- `c_skin` は校正パラメータになる。実物写真 1 枚が最初の校正点（c=1.0 では射出終了で
+  扇先端まで届くので 0.6〜0.8 が候補）。
+
 ## [0.36.0] — 2026-08-25
 
 **縁部深彫り（エッジチャネル）：ポケット壁沿いに一定幅・一定深さの帯を彫れるようになった。**

@@ -119,3 +119,98 @@ def test_skin_metadata_contains_iteration_info(pp) -> None:
     assert md["T_fill_baseline_s"] > 0.0
     assert md["T_fill_inflation"] >= 1.0
     assert "short_shot_cells" in md
+
+
+# ---------------------------------------------------------------------------
+# fill clock (v0.37.0): constant-pressure proxy vs rate-controlled machine
+# ---------------------------------------------------------------------------
+
+
+def _thin_plate():
+    return build_demo_geometry(plate_thk_mm=0.5, cell_size_mm=1.5)
+
+
+def test_the_default_clock_is_the_constant_pressure_proxy(pp) -> None:
+    geom = _thin_plate()
+    default = _solve(geom, pp, skin_layer_enabled=True, skin_growth_constant=1.0)
+    explicit = _solve(
+        geom,
+        pp,
+        skin_layer_enabled=True,
+        skin_growth_constant=1.0,
+        skin_clock_mode="constant_pressure",
+    )
+    assert default.metadata["skin_clock_mode"] == "constant_pressure"
+    assert np.array_equal(default.fill_time_s, explicit.fill_time_s, equal_nan=True)
+    assert default.total_fill_time_s == explicit.total_fill_time_s
+
+
+def test_the_rate_controlled_clock_keeps_the_geometric_fill_time(pp) -> None:
+    """A velocity-controlled press fills in V/Q regardless of the skin: the
+    reported time is exactly the baseline, the inflation is 1, and the skin
+    -- grown over a shorter exposure -- is nowhere thicker than under the
+    constant-pressure proxy."""
+    geom = _thin_plate()
+    kw = dict(skin_layer_enabled=True, skin_growth_constant=1.0, injection_volume_flow_cm3s=3.0)
+    proxy = HeleShawSolver(
+        geometry=geom, material=pp, skin_clock_mode="constant_pressure", **kw
+    ).solve(num_frames=4)
+    rate = HeleShawSolver(geometry=geom, material=pp, skin_clock_mode="constant_rate", **kw).solve(
+        num_frames=4
+    )
+    assert proxy.metadata["T_fill_inflation"] > 1.05  # the proxy actually inflates here
+    assert rate.metadata["skin_clock_mode"] == "constant_rate"
+    assert rate.metadata["T_fill_inflation"] == 1.0
+    assert rate.total_fill_time_s == rate.metadata["T_fill_baseline_s"]
+    assert rate.total_fill_time_s < proxy.total_fill_time_s
+    # The gate group ages for the whole fill under either clock, so its skin
+    # reads the clock directly: shorter clock, thinner skin. (Cell by cell
+    # the two runs are not ordered -- their fill orders differ.)
+    iy, ix = geom.gates[0]
+    assert 0.0 < rate.skin_thickness_mm[iy, ix] < proxy.skin_thickness_mm[iy, ix]
+
+
+def test_an_unknown_clock_mode_is_rejected(pp) -> None:
+    geom = _thin_plate()
+    with pytest.raises(ValueError, match="skin_clock_mode"):
+        _solve(geom, pp, skin_layer_enabled=True, skin_clock_mode="constant_volume")
+
+
+def test_a_clock_end_stops_the_exposure(pp) -> None:
+    """``_solve_domain(clock_end_s=T)``: walls age until T, cells the front
+    reaches after T carry no skin, and the gate cell (arrival 0) carries
+    the service-mean skin of a T exposure."""
+    geom = _thin_plate()
+    c = 0.8
+    solver = HeleShawSolver(
+        geometry=geom,
+        material=pp,
+        injection_volume_flow_cm3s=3.0,
+        skin_layer_enabled=True,
+        skin_growth_constant=c,
+        skin_max_iterations=40,
+        skin_convergence_tol=1e-10,
+    )
+    eta = solver._effective_viscosity()
+    T_total = geom.volume_cm3() / 3.0
+    T_end = 0.4 * T_total
+    sol = solver._solve_domain(eta, T_fill_baseline_s=T_total, clock_end_s=T_end)
+    assert sol.T_fill == T_total  # a clock end never inflates
+    skin = sol.skin_thk_mm
+    t_arr = sol.t_arr
+    assert skin is not None and t_arr is not None
+    late = geom.mask & (t_arr >= T_end)
+    early = geom.mask & (t_arr < T_end)
+    assert late.any() and early.any()
+    assert np.all(skin[late] == 0.0)
+    assert np.all(skin[early] > 0.0)
+    iy, ix = geom.gates[0]
+    t_gate = t_arr[iy, ix]  # group-end arrival of the tau = 0 tie group
+    assert 0.0 <= t_gate < T_end
+    expected = (2.0 / 3.0) * c * np.sqrt(pp.thermal_diffusivity_m2_s * (T_end - t_gate)) * 1e3
+    assert skin[iy, ix] == pytest.approx(expected, rel=1e-6)
+    # same solver, no clock end: every cell the front passes before the fill
+    # ends ages (only the last tie group, arriving at T_total, does not)
+    full = solver._solve_domain(eta, T_fill_baseline_s=T_total)
+    assert np.all(full.skin_thk_mm[geom.mask & (full.t_arr < T_total)] > 0.0)
+    assert (full.skin_thk_mm[geom.mask] > 0).sum() > (skin[geom.mask] > 0).sum()

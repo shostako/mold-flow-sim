@@ -66,6 +66,7 @@ def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
     assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {
         "enabled": True,
         "shot_volume_cm3": 4.5,
+        "skin_layer": False,
     }
     with zipfile.ZipFile(io.BytesIO(at.session_state["mfs_zip_bytes"])) as zf:
         names = set(zf.namelist())
@@ -104,24 +105,56 @@ def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
     assert "二相ショートショット解析をスキップしました" in _texts(at)
 
 
-def test_a_wall_cooling_model_skips_two_phase_with_a_warning():
+def test_the_multilayer_model_skips_two_phase_with_a_warning():
     at = _app()
-    at.radio(key="wall_model").set_value("skin")
+    at.radio(key="wall_model").set_value("multilayer")
     at.checkbox(key="two_phase_on").set_value(True).run()
     # The interference must be visible in the sidebar BEFORE any run — the
     # run-time warning alone washes away on the next rerun and the toggle
     # looks like it silently does nothing (the exact complaint that
-    # motivated this: the default wall model is 層別, so out of the box the
-    # checkbox appeared dead).
-    assert "現在の設定では二相解析はスキップされる" in _texts(at)
+    # motivated this: the default wall model once was 層別, so out of the
+    # box the checkbox appeared dead).
+    assert "現在の設定（層別）では二相解析はスキップされる" in _texts(at)
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_two_phase_result"] is None
     assert at.session_state["mfs_two_phase_path"] is None
-    assert "壁面冷却モデル『なし』専用" in _texts(at)
+    assert "『なし』または『スキン層』専用" in _texts(at)
     # the skip reason survives in session_state for the results pane
     assert "併用不可" in at.session_state["mfs_two_phase_skip"]
     assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {"enabled": False}
+
+
+def test_the_skin_layer_rides_the_injection_phase():
+    """v0.37.0: the skin model no longer skips the two-phase run -- it is
+    carried into the injection phase, and the clock choice is recorded."""
+    at = _app()
+    at.radio(key="wall_model").set_value("skin")
+    at.checkbox(key="icm_on").set_value(True)
+    at.checkbox(key="two_phase_on").set_value(True).run()
+    assert "二相解析はスキップされる" not in _texts(at)
+    assert at.radio(key="skin_clock").value == "constant_pressure"
+    at.radio(key="skin_clock").set_value("constant_rate")
+    at.number_input(key="two_phase_shot_volume").set_value(4.5)
+    at.button[0].click().run()
+    assert not at.exception
+    res = at.session_state["mfs_two_phase_result"]
+    assert res is not None
+    assert res.metadata["skin_layer_enabled"] is True
+    assert res.metadata["skin_clock_mode"] == "constant_rate"
+    assert res.injection_skin_thickness_mm is not None
+    assert at.session_state["mfs_two_phase_path"] is not None
+    assert at.session_state["mfs_two_phase_skip"] is None
+    settings = at.session_state["mfs_settings"]
+    assert settings["two_phase_short_shot"] == {
+        "enabled": True,
+        "shot_volume_cm3": 4.5,
+        "skin_layer": True,
+    }
+    assert settings["wall_cooling"]["model"] == "skin"
+    assert settings["wall_cooling"]["skin_clock_mode"] == "constant_rate"
+    # the main solve honoured the same clock
+    assert at.session_state["mfs_result"].metadata["skin_clock_mode"] == "constant_rate"
 
 
 def _width(at: AppTest):

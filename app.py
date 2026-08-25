@@ -1663,6 +1663,7 @@ with st.sidebar:
         c_skin = 0.0
         skin_max_iter = 5
         skin_tol = 1e-3
+        skin_clock_mode = "constant_pressure"
         multilayer_on = wall_model == "multilayer"
         num_layers = 7
         layer_distribution = "wall_refined"
@@ -1694,6 +1695,22 @@ with st.sidebar:
                 help="τ場の相対L2変化が 10^tol を下回ったら収束。",
             )
             skin_tol = 10.0 ** float(skin_tol_log10)
+            skin_clock_mode = st.radio(
+                "スキン層の時計",
+                options=("constant_pressure", "constant_rate"),
+                index=0,
+                key="skin_clock",
+                format_func=lambda m: {
+                    "constant_pressure": "圧力一定（従来）: 抵抗増で流量が細り T_fill が伸びる",
+                    "constant_rate": "速度制御: 射出時間 V/Q 固定、圧力が上がる",
+                }[m],
+                help=(
+                    "スキンで流路が痩せたとき機械がどう応えるか。速度制御で射出する"
+                    "実機（充填時間が設定どおりに出る）なら「速度制御」。従来の圧力一定は"
+                    "T_fill を体積重み付き τ 比で膨らませる近似で、既存結果の再現用に残す。"
+                    "二相ショートショットの射出相は計量 V/Q の定義上つねに速度制御。"
+                ),
+            )
         elif wall_model == "multilayer":
             num_layers = st.slider(
                 "層数 N",
@@ -1861,16 +1878,17 @@ with st.sidebar:
                 help=(
                     "計量を意図的に絞ったショートショットの最終形状を予測する。"
                     "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
-                    "溶融プールを前進、体積保存）の二相。壁面冷却モデル『なし』専用"
-                    "（体積律速のショートショットは凍結の物理を含まない）。"
+                    "溶融プールを前進、体積保存）の二相。壁面冷却モデルは『なし』か"
+                    "『スキン層』で実行（スキン層は射出相に乗る: 開いた薄板が射出中に"
+                    "痩せてゲート部が先に埋まる順番を出す）。『層別』とは併用不可。"
                 ),
             )
-            if two_phase_on and wall_model != "none":
+            if two_phase_on and wall_model == "multilayer":
                 # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
                 # 出ない」に見える。設定と同じ場所に常時出す。
                 st.warning(
-                    "壁面冷却モデルが『なし』のときだけ実行される。"
-                    "現在の設定では二相解析はスキップされる。"
+                    "壁面冷却モデルが『なし』または『スキン層』のときだけ実行される。"
+                    "現在の設定（層別）では二相解析はスキップされる。"
                 )
             if two_phase_on:
                 # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
@@ -2018,6 +2036,7 @@ if do_run:
                 skin_growth_constant=c_skin,
                 skin_max_iterations=skin_max_iter,
                 skin_convergence_tol=skin_tol,
+                skin_clock_mode=skin_clock_mode,
             )
         try:
             result = solver.solve(num_frames=num_frames)
@@ -2030,15 +2049,15 @@ if do_run:
             st.error(f"解析できない形状: {exc}")
             st.stop()
 
-        # 二相ショートショット。プレーンな HeleShawSolver 専用 —
-        # 体積律速の短絡は凍結を含まないので、壁面冷却モデルとは組まない。
+        # 二相ショートショット。HeleShawSolver 専用（等温、またはスキン層を
+        # 射出相に乗せる）— 層別ソルバーには射出相の時計が無い。
         two_phase_result = None
         two_phase_skip_reason: str | None = None
         if two_phase_on:
-            if skin_on or multilayer_on:
-                two_phase_skip_reason = "壁面冷却モデルが『なし』以外に設定されている（併用不可）"
+            if multilayer_on:
+                two_phase_skip_reason = "壁面冷却モデルが『層別』に設定されている（併用不可）"
                 st.warning(
-                    "二相ショートショット解析は壁面冷却モデル『なし』専用です。"
+                    "二相ショートショット解析は壁面冷却モデル『なし』または『スキン層』専用です。"
                     "今回はスキップしました。"
                 )
             else:
@@ -2071,6 +2090,7 @@ if do_run:
                     "skin_growth_constant": c_skin,
                     "skin_max_iterations": skin_max_iter,
                     "skin_convergence_tol": skin_tol,
+                    "skin_clock_mode": skin_clock_mode,
                 }
                 if skin_on
                 else {
@@ -2096,7 +2116,11 @@ if do_run:
                 else {"enabled": False}
             ),
             "two_phase_short_shot": (
-                {"enabled": True, "shot_volume_cm3": shot_volume_cm3}
+                {
+                    "enabled": True,
+                    "shot_volume_cm3": shot_volume_cm3,
+                    "skin_layer": bool(skin_on),
+                }
                 if two_phase_result is not None
                 else {"enabled": False}
             ),
@@ -2390,6 +2414,20 @@ if "mfs_result" in st.session_state:
                     "灰=未充填。実機の計量値・ストロークをそのまま入れて"
                     "段階ショートショットの現物形状と比較する。"
                 )
+                if md2.get("skin_layer_enabled"):
+                    st.caption(
+                        "スキン層を射出相に乗せた結果（時計は計量 V/Q 固定）: "
+                        f"射出終了時のスキン最大 {md2.get('injection_skin_max_mm', 0.0):.3f} mm、"
+                        f"封止 {md2.get('injection_sealed_cells', 0)} セル、"
+                        f"封止で届かず {md2.get('injection_unfillable_cells', 0)} セル。"
+                        "圧縮相は等温（プールは等圧ソースなので内部のスキンは前進に効かない）。"
+                    )
+                    if md2.get("injection_sealed_cells", 0) > 0:
+                        st.warning(
+                            "射出中に封止したセルがある（濃赤）。射出時間が長すぎるか、"
+                            "モデルがゲート部の剪断発熱を持っていないためランドが早く閉じている。"
+                            "実機のランドが開いたままなら、この封止は模型の限界と読む。"
+                        )
                 tc1, tc2, tc3 = st.columns(3)
                 tc1.metric("計量体積 V_shot", f"{md2['shot_volume_cm3']:.2f} cm³")
                 tc2.metric(

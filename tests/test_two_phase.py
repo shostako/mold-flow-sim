@@ -289,17 +289,189 @@ def test_factor_mode_is_accepted():
     assert (res.final_mask.sum()) > (res.injection_mask.sum())
 
 
-def test_the_skin_layer_model_is_rejected():
-    geom = _strip(20)
-    solver = HeleShawSolver(
+# ---------------------------------------------------------------------------
+# skin layer on the injection phase (v0.37.0)
+# ---------------------------------------------------------------------------
+
+
+def _skin_solver(geom: Geometry, *, c: float, Q: float, stroke: float | None = 0.5):
+    return HeleShawSolver(
         geom,
         PP,
         melt_temperature_K=T_MELT,
         mold_temperature_K=T_MOLD,
+        injection_volume_flow_cm3s=Q,
+        compression_molding=stroke is not None,
+        compression_stroke_mm=stroke,
         skin_layer_enabled=True,
+        skin_growth_constant=c,
+        skin_max_iterations=30,
+        # The clock end leaves a residual floor of order 1e-4: cells straddling
+        # T_inj flip between exposed and not as tau moves, so a tighter tol
+        # never reports convergence (the pool itself is stable).
+        skin_convergence_tol=1e-4,
     )
-    with pytest.raises(ValueError, match="skin-layer"):
-        solve_two_phase_short_shot(solver, 0.01)
+
+
+def test_the_skin_model_at_zero_growth_is_the_isothermal_model():
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    iso = solve_two_phase_short_shot(_solver(geom), 0.5 * V_open)
+    skin = solve_two_phase_short_shot(_skin_solver(geom, c=0.0, Q=10.0), 0.5 * V_open)
+    assert np.array_equal(iso.injection_mask, skin.injection_mask)
+    assert np.array_equal(iso.final_mask, skin.final_mask)
+    np.testing.assert_allclose(skin.tau1, iso.tau1, rtol=1e-12, equal_nan=True)
+    np.testing.assert_allclose(
+        skin.injection_fill_time_s, iso.injection_fill_time_s, rtol=1e-12, equal_nan=True
+    )
+    assert skin.metadata["skin_layer_enabled"] is True
+    assert skin.metadata["injection_sealed_cells"] == 0
+    assert skin.metadata["injection_unfillable_cells"] == 0
+    assert iso.metadata["skin_layer_enabled"] is False
+    assert "skin_growth_constant" not in iso.metadata
+    assert iso.injection_skin_thickness_mm is None
+    assert iso.injection_sealed_mask is None
+
+
+def _thick_branch_thin_plate() -> Geometry:
+    """A long thick runner along row 0 and a short thin plate climbing from
+    the gate along column 0 -- the two branches touch only at the gate cell.
+
+    The plate is the ICM target (opens by the stroke); the runner is not.
+    Isothermally the opened plate is the cheaper path and its far end fills
+    ahead of the runner tip; with wall freezing during a slow-ish injection
+    the plate loses a good part of its gap and the order reverses -- the
+    mechanism behind the real part's "gate block fills first".
+    """
+    ny, nx = 13, 60
+    mask = np.zeros((ny, nx), dtype=bool)
+    thickness = np.zeros((ny, nx))
+    mask[0, :] = True
+    thickness[0, :] = 2.0
+    mask[1:, 0] = True
+    thickness[1:, 0] = 0.35
+    cm = np.zeros((ny, nx), dtype=bool)
+    cm[1:, 0] = True
+    geom = Geometry(mask=mask, thickness_mm=thickness, cell_size_mm=1.0, compression_mask=cm)
+    geom.add_gate(0, 0)
+    return geom
+
+
+def test_the_skin_puts_the_thick_runner_ahead_of_the_opened_thin_plate():
+    geom = _thick_branch_thin_plate()
+    runner_tip = (0, geom.nx - 1)
+    plate_end = (geom.ny - 1, 0)
+    V_shot = 0.125  # cm^3: less than the whole open cavity (0.130)
+    Q = V_shot / 0.6  # T_inj = 0.6 s, enough exposure for the 0.85 mm plate
+    iso = solve_two_phase_short_shot(_solver(geom, Q=Q), V_shot)
+    skin = solve_two_phase_short_shot(_skin_solver(geom, c=1.5, Q=Q), V_shot)
+    # the isothermal order: plate end before runner tip
+    assert iso.tau1[plate_end] < iso.tau1[runner_tip]
+    # the skin order: runner tip before plate end
+    assert skin.tau1[runner_tip] < skin.tau1[plate_end]
+    # and the metered shot reflects it: the tip is in the skin pool only
+    assert not iso.injection_mask[runner_tip]
+    assert skin.injection_mask[runner_tip]
+    assert skin.metadata["injection_sealed_cells"] == 0  # exposure below the plate's t_c
+
+
+def test_the_skin_is_read_at_the_end_of_the_metered_injection():
+    """Walls age until T_inj = V_shot / Q, not until the whole cavity would
+    fill: the gate cell (arrival 0) carries the service-mean skin of a
+    T_inj exposure, the cells outside the pool carry none."""
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    V_shot = 0.5 * V_open
+    Q = 10.0
+    c = 0.7
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=c, Q=Q), V_shot)
+    skin = res.injection_skin_thickness_mm
+    assert skin is not None
+    assert np.isnan(skin[~res.injection_mask]).all()
+    assert np.isfinite(skin[res.injection_mask]).all()
+    T_inj = V_shot / Q
+    assert res.injection_time_s == pytest.approx(T_inj)
+    # the gate cells form the tau = 0 tie group and share its group-end
+    # arrival (the volume of the group over Q), so the wall there ages for
+    # T_inj minus that, not for the full T_inj
+    iy, ix = geom.gates[0]
+    t_gate = res.injection_fill_time_s[iy, ix]
+    assert 0.0 <= t_gate < 0.05 * T_inj
+    expected = (2.0 / 3.0) * c * np.sqrt(PP.thermal_diffusivity_m2_s * (T_inj - t_gate)) * 1e3
+    assert skin[iy, ix] == pytest.approx(expected, rel=1e-6)
+    assert res.metadata["injection_skin_max_mm"] == pytest.approx(expected, rel=1e-6)
+    assert res.metadata["skin_clock_mode"] == "constant_rate"
+    assert res.metadata["skin_converged"] is True
+    # a shorter injection grows less skin at the same rate
+    shorter = solve_two_phase_short_shot(_skin_solver(geom, c=c, Q=Q), 0.5 * V_shot)
+    assert shorter.metadata["injection_skin_max_mm"] < res.metadata["injection_skin_max_mm"]
+
+
+def _choked_strip() -> Geometry:
+    """Thick strip with a 0.05 mm choke two cells wide: the choke seals almost
+    the moment the front passes it, cutting the cells behind it off."""
+    h = np.array([2.0] * 5 + [0.05] * 2 + [2.0] * 20)[None, :]
+    geom = Geometry(mask=np.ones_like(h, dtype=bool), thickness_mm=h, cell_size_mm=1.0)
+    geom.add_gate(0, 0)
+    return geom
+
+
+def test_cells_sealed_off_during_injection_take_no_shot_volume():
+    geom = _choked_strip()
+    V_shot = 0.03  # cm^3: more than the 10.1 mm^3 in front of the choke
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=1.0, Q=V_shot / 1.0, stroke=None), V_shot)
+    md = res.metadata
+    assert md["injection_sealed_cells"] == 2
+    assert md["injection_unfillable_cells"] == 20
+    sealed = res.injection_sealed_mask
+    assert sealed is not None
+    assert np.array_equal(np.flatnonzero(sealed[0]), [5, 6])
+    # the pool ends at the choke; the dead cells hold no melt
+    assert np.array_equal(np.flatnonzero(res.injection_mask[0]), np.arange(7))
+    assert md["injection_complete"] is True  # everything reachable is filled
+    assert (sealed <= res.injection_mask).all()
+    # without compression the final shape is the pool
+    assert np.array_equal(res.final_mask, res.injection_mask)
+
+
+def test_the_sealed_cells_are_painted_on_the_map(tmp_path):
+    from PIL import Image
+
+    from core.visualizer import TWO_PHASE_SEALED_RGB
+
+    def _sealed_pixels(res) -> int:
+        path = render_two_phase_map(res, tmp_path / f"{id(res)}.png")
+        arr = np.asarray(Image.open(path).convert("RGB")).astype(int)
+        target = np.rint(np.array(TWO_PHASE_SEALED_RGB) * 255).astype(int)
+        return int((np.abs(arr - target).max(axis=-1) <= 2).sum())
+
+    geom = _choked_strip()
+    V_shot = 0.03
+    sealed = solve_two_phase_short_shot(
+        _skin_solver(geom, c=1.0, Q=V_shot / 1.0, stroke=None), V_shot
+    )
+    iso = solve_two_phase_short_shot(_solver(geom, stroke=None, Q=V_shot), V_shot)
+    # the legend swatch alone would count too; the map must add real cells
+    assert sealed.metadata["injection_sealed_cells"] == 2
+    assert _sealed_pixels(sealed) > 0
+    assert _sealed_pixels(iso) == 0  # no swatch, no cells
+
+
+def test_the_compression_phase_keeps_its_contract_under_the_skin():
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    V_shot = 0.5 * V_open
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=1.0, Q=10.0), V_shot)
+    assert res.tau2 is not None
+    # the pool is an equipotential source whatever skin it carries
+    assert np.all(res.tau2[res.injection_mask] == 0.0)
+    assert np.all(res.tau2[res.final_mask & ~res.injection_mask] > 0.0)
+    assert (res.injection_mask <= res.final_mask).all()
+    dx = geom.cell_size_mm
+    vol_fin = dx * dx * geom.thickness_mm
+    achieved = float(vol_fin[res.final_mask].sum()) / 1000.0
+    assert achieved <= V_shot * (1 + 1e-9)
+    assert achieved >= V_shot - float(vol_fin[geom.mask].max()) / 1000.0
 
 
 def test_a_nonpositive_shot_volume_is_rejected():

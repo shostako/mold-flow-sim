@@ -1129,9 +1129,11 @@ def export_frames(
 # shot), so no interpolation, no alpha.
 TWO_PHASE_INJECTION_RGB = (0.22, 0.49, 0.72)
 TWO_PHASE_COMPRESSION_RGB = (0.95, 0.61, 0.15)
+# Pool cells whose skins met before the end of injection (skin model only).
+TWO_PHASE_SEALED_RGB = (0.55, 0.05, 0.05)
 
 
-def _two_phase_legend(fig) -> None:
+def _two_phase_legend(fig, result) -> None:
     """Legend BELOW the axes, never inside them.
 
     The plates this tool draws are wide and shallow, so any in-axes corner
@@ -1145,10 +1147,16 @@ def _two_phase_legend(fig) -> None:
         Patch(facecolor=TWO_PHASE_COMPRESSION_RGB, label="advanced by compression"),
         Patch(facecolor=_cavity_backdrop_colors()[1], label="unfilled"),
     ]
+    if _two_phase_sealed(result).any():
+        # Only when there is something to explain: an idle legend entry would
+        # suggest the model always looks for it.
+        handles.append(
+            Patch(facecolor=TWO_PHASE_SEALED_RGB, label="sealed during injection (skins met)")
+        )
     fig.legend(
         handles=handles,
         loc="lower center",
-        ncol=3,
+        ncol=len(handles),
         fontsize=8,
         frameon=False,
     )
@@ -1168,7 +1176,7 @@ def _build_two_phase_figure(result):
     ax.set_aspect("equal")
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
-    _two_phase_legend(fig)
+    _two_phase_legend(fig, result)
     return fig, ax
 
 
@@ -1180,10 +1188,24 @@ def _two_phase_finalize_layout(fig) -> None:
     fig.tight_layout(rect=(0.0, 0.07, 1.0, 1.0))
 
 
+def _two_phase_sealed(result) -> np.ndarray:
+    """Pool cells sealed during injection, or an all-False mask without the
+    skin model (``TwoPhaseShortShotResult.injection_sealed_mask``)."""
+    sealed = getattr(result, "injection_sealed_mask", None)
+    if sealed is None:
+        return np.zeros(result.geometry.shape, dtype=bool)
+    return np.asarray(sealed, dtype=bool)
+
+
 def _two_phase_rgba(result, injection_filled, compression_filled) -> np.ndarray:
     rgba = np.zeros((*result.geometry.shape, 4))
     rgba[injection_filled] = (*TWO_PHASE_INJECTION_RGB, 1.0)
     rgba[compression_filled] = (*TWO_PHASE_COMPRESSION_RGB, 1.0)
+    # A sealed cell filled (it is in the pool) and then closed; painting it
+    # plain blue would hide the one fact the skin model adds to this map.
+    # Opaque category colour like the others -- the fact has no ordering.
+    sealed = _two_phase_sealed(result) & injection_filled
+    rgba[sealed] = (*TWO_PHASE_SEALED_RGB, 1.0)
     return rgba
 
 
@@ -1234,14 +1256,16 @@ def render_two_phase_map(
     _draw_gate_markers(ax, result)
 
     md = result.metadata
-    ax.set_title(
-        "Two-phase short shot — shot {v:.1f} cm3, "
-        "injection {fi:.0%} → after compression {ff:.0%}".format(
-            v=result.shot_volume_cm3,
-            fi=md.get("injection_fill_fraction", float("nan")),
-            ff=md.get("final_fill_fraction", float("nan")),
-        )
+    title = "Two-phase short shot — shot {v:.1f} cm3, injection {fi:.0%} → after compression {ff:.0%}".format(
+        v=result.shot_volume_cm3,
+        fi=md.get("injection_fill_fraction", float("nan")),
+        ff=md.get("final_fill_fraction", float("nan")),
     )
+    if md.get("skin_layer_enabled"):
+        title += "\nskin layer c={c:.2f}, T_inj={t:.3f} s".format(
+            c=md.get("skin_growth_constant", float("nan")), t=result.injection_time_s
+        )
+    ax.set_title(title)
 
     _two_phase_finalize_layout(fig)
     fig.savefig(output_path)

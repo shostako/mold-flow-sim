@@ -690,8 +690,10 @@ class HeleShawSolver:
         sweep this cavity; default ``_baseline_fill_time``, which carries the
         ICM equivalent-model speed-up). ``clock_end_s`` stops the exposure
         clock early: walls age from the front's passage until
-        ``clock_end_s`` instead of until the fill ends, and cells the front
-        reaches later carry no skin at all. The two-phase model uses it to
+        ``clock_end_s`` instead of until the fill ends — before the fill
+        ends, cells the front reaches later carry no skin at all; past it,
+        the walls of the full cavity keep aging (the melt stands still, the
+        mold does not). The two-phase model uses it to
         read the skin at the end of a metered injection (``T_inj = V/Q``);
         with a clock end the fill time never inflates (a metered shot is by
         definition rate-controlled). Both None reproduces the plain solve.
@@ -768,7 +770,9 @@ class HeleShawSolver:
 
             def exposure(t_arrival: np.ndarray, T: float):
                 """Service duration, sealing set and time-mean skin at fill time T."""
-                T_end = T if clock_end_s is None else min(T, float(clock_end_s))
+                # A clock end past the fill keeps the walls aging after the
+                # cavity is full: the melt stands still, the mold does not.
+                T_end = T if clock_end_s is None else float(clock_end_s)
                 a_end = np.maximum(T_end - t_arrival, 0.0)
                 sealed = cavity_mask & (a_end >= t_c)
                 a_rep = np.minimum(a_end, t_c)

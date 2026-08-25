@@ -2423,10 +2423,18 @@ if "mfs_result" in st.session_state:
                         "圧縮相は等温（プールは等圧ソースなので内部のスキンは前進に効かない）。"
                     )
                     if md2.get("injection_sealed_cells", 0) > 0:
+                        _short = md2["shot_volume_cm3"] - md2["achieved_volume_final_cm3"]
                         st.warning(
                             "射出中に封止したセルがある（濃赤）。射出時間が長すぎるか、"
                             "モデルがゲート部の剪断発熱を持っていないためランドが早く閉じている。"
                             "実機のランドが開いたままなら、この封止は模型の限界と読む。"
+                            "封止は圧縮相でも閉じたまま（封止の奥へは前進しない、"
+                            f"届かないセル {md2.get('compression_unreachable_cells', 0)}）。"
+                            + (
+                                f" 計量のうち {_short:.2f} cm³ はキャビティに入らない。"
+                                if _short > 1e-9
+                                else ""
+                            )
                         )
                 tc1, tc2, tc3 = st.columns(3)
                 tc1.metric("計量体積 V_shot", f"{md2['shot_volume_cm3']:.2f} cm³")

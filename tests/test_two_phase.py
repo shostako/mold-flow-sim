@@ -432,6 +432,164 @@ def test_cells_sealed_off_during_injection_take_no_shot_volume():
     assert (sealed <= res.injection_mask).all()
     # without compression the final shape is the pool
     assert np.array_equal(res.final_mask, res.injection_mask)
+    # the cavity was solved again without the dead cells (one shed, one clean)
+    assert md["injection_domain_passes"] == 2
+    assert md["injection_clock_end_s"] == pytest.approx(1.0)
+
+
+def _forked_strip(with_reservoir: bool) -> Geometry:
+    """Gate at the corner; a thick runner along row 0 and, up column 0, two
+    thick cells, a two-cell 0.05 mm choke and (optionally) a thick reservoir
+    behind it. The choke seals as soon as the front passes, so the reservoir
+    is dead material -- the geometry without it is the oracle."""
+    ny = 15 if with_reservoir else 5
+    nx = 31
+    mask = np.zeros((ny, nx), dtype=bool)
+    h = np.zeros((ny, nx))
+    mask[0, :] = True
+    h[0, :] = 2.0
+    mask[1:5, 0] = True
+    h[1:3, 0] = 2.0
+    h[3:5, 0] = 0.05
+    if with_reservoir:
+        mask[5:, 0] = True
+        h[5:, 0] = 2.0
+    geom = Geometry(mask=mask, thickness_mm=h, cell_size_mm=1.0)
+    geom.add_gate(0, 0)
+    return geom
+
+
+def test_dead_material_is_solved_out_of_the_injection_phase():
+    """The injection phase of a cavity with a sealed-off reservoir equals,
+    cell for cell, the injection phase of the cavity drawn without it:
+    the dead volume sits in no clock, no CDF and no skin (Codex P2 on PR #78).
+    """
+    V_shot = 0.07  # cm^3: more than the 66.1 mm^3 the front can reach
+    Q = 0.05
+    full = solve_two_phase_short_shot(
+        _skin_solver(_forked_strip(True), c=1.0, Q=Q, stroke=None), V_shot
+    )
+    oracle = solve_two_phase_short_shot(
+        _skin_solver(_forked_strip(False), c=1.0, Q=Q, stroke=None), V_shot
+    )
+    assert full.metadata["injection_unfillable_cells"] == 10
+    assert oracle.metadata["injection_unfillable_cells"] == 0
+    rows = slice(0, 5)
+    assert np.array_equal(full.injection_mask[rows], oracle.injection_mask)
+    assert not full.injection_mask[5:].any()
+    np.testing.assert_allclose(
+        full.injection_fill_time_s[rows], oracle.injection_fill_time_s, rtol=1e-12, equal_nan=True
+    )
+    np.testing.assert_allclose(
+        full.injection_skin_thickness_mm[rows],
+        oracle.injection_skin_thickness_mm,
+        rtol=1e-12,
+        equal_nan=True,
+    )
+    # tau carries the representative viscosity, which the solver reads off
+    # the mean thickness of *its* cavity -- the reservoir shifts that, so
+    # the two fields agree up to that scale (the CDF is scale-free).
+    assert full.viscosity_Pa_s != oracle.viscosity_Pa_s
+    np.testing.assert_allclose(
+        full.tau1[rows] / np.nanmax(full.tau1),
+        oracle.tau1 / np.nanmax(oracle.tau1),
+        rtol=1e-9,
+        equal_nan=True,
+    )
+    assert np.isnan(full.tau1[5:]).all()
+    assert np.nanmax(full.injection_fill_time_s) <= full.injection_time_s * (1 + 1e-12)
+    assert full.metadata["injection_sealed_cells"] == oracle.metadata["injection_sealed_cells"] == 2
+    assert full.metadata["injection_clock_end_s"] == oracle.metadata["injection_clock_end_s"]
+
+
+def test_an_oversized_shot_keeps_aging_the_walls_after_the_cavity_is_full():
+    """V_shot above the open-cavity volume: the front stops when the cavity
+    is full, the walls do not -- the exposure clock runs to the reported
+    T_inj = V_shot / Q, and the metadata names that end (Codex P2 on PR #78:
+    the clock the skin is read on and the reported injection end agree)."""
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    Q = 10.0
+    c = 0.7
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=c, Q=Q), 1.5 * V_open)
+    T_inj = 1.5 * V_open / Q
+    assert res.injection_time_s == pytest.approx(T_inj)
+    assert res.metadata["injection_complete"] is True
+    assert res.metadata["injection_clock_end_s"] == pytest.approx(T_inj)
+    iy, ix = geom.gates[0]
+    t_gate = res.injection_fill_time_s[iy, ix]
+    expected = (2.0 / 3.0) * c * np.sqrt(PP.thermal_diffusivity_m2_s * (T_inj - t_gate)) * 1e3
+    assert res.injection_skin_thickness_mm[iy, ix] == pytest.approx(expected, rel=1e-6)
+    # every cell, even the last to fill, aged past its arrival
+    assert np.all(res.injection_skin_thickness_mm[res.injection_mask] > 0.0)
+    # a shot that exactly fills the open cavity ages for exactly the fill
+    exact = solve_two_phase_short_shot(_skin_solver(geom, c=c, Q=Q), V_open)
+    assert exact.metadata["injection_clock_end_s"] == pytest.approx(V_open / Q)
+    assert exact.injection_skin_thickness_mm[iy, ix] < res.injection_skin_thickness_mm[iy, ix]
+
+
+def test_a_choke_that_froze_shut_does_not_reopen_under_compression():
+    """Compression ON on a choked strip: the seal cut the reservoir off
+    during injection, and the squeeze must not push melt through it -- the
+    sealed cells are solid, so phase 2 has no path there (Claude review on
+    PR #78: phase 2 used to take its candidates from the whole cavity)."""
+    geom = _choked_strip()
+    # the thick cells open by the stroke, the choke keeps its 0.05 mm gap
+    cm = geom.thickness_mm > 0.1
+    geom = Geometry(
+        mask=geom.mask, thickness_mm=geom.thickness_mm, cell_size_mm=1.0, compression_mask=cm
+    )
+    geom.add_gate(0, 0)
+    V_shot = 0.02  # cm^3: fills the 12.6 mm^3 open front, leaves ~7.4 for the squeeze
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=1.0, Q=V_shot / 1.0, stroke=0.5), V_shot)
+    md = res.metadata
+    assert md["injection_sealed_cells"] == 2
+    assert md["injection_unfillable_cells"] == 20
+    assert np.array_equal(np.flatnonzero(res.injection_mask[0]), np.arange(7))
+    # the squeeze had budget but nowhere open to spend it
+    assert np.array_equal(res.final_mask, res.injection_mask)
+    assert not res.final_mask[0, 7:].any()
+    assert res.tau2 is None
+    assert md["compression_unreachable_cells"] == 20
+    assert md["final_complete"] is False
+    assert md["achieved_volume_final_cm3"] < V_shot
+    # and the sealed choke itself stays in the pool (it filled before it closed)
+    assert res.injection_sealed_mask[0, 5:7].all()
+    assert res.final_mask[0, 5:7].all()
+
+
+def test_the_squeeze_still_advances_around_a_seal_through_open_cells():
+    """A sealed cell only blocks; cells the pool reaches by another open route
+    are still fair game for the squeeze. Two thick rows; two cells of the
+    lower row are thinner (1.0 mm, kept out of the ICM stroke) and are the
+    only ones whose skins meet within the exposure (t_c = 2.7 s against
+    17 s for the 2.5 mm cells). The upper row keeps everything connected.
+
+    The mild 1.0 / 2.0 contrast is deliberate: pseudo-conduction charges a
+    thin cell between thick ones a large tau, and a 0.05 mm choke here would
+    simply be the last cell of the cavity and never enter the pool.
+    """
+    ny, nx = 2, 27
+    h = np.full((ny, nx), 2.0)
+    h[1, 5:7] = 1.0
+    mask = np.ones((ny, nx), dtype=bool)
+    cm = h > 1.5  # the thinner cells keep their gap
+    geom = Geometry(mask=mask, thickness_mm=h, cell_size_mm=1.0, compression_mask=cm)
+    geom.add_gate(0, 0)
+    V_open = float((h + np.where(cm, 0.5, 0.0))[mask].sum()) / 1000.0
+    V_shot = 0.6 * V_open
+    Q = V_shot / 6.0  # T_inj = 6 s
+    res = solve_two_phase_short_shot(_skin_solver(geom, c=1.0, Q=Q, stroke=0.5), V_shot)
+    md = res.metadata
+    assert md["injection_sealed_cells"] == 2
+    assert res.injection_sealed_mask[1, 5:7].all()
+    assert md["injection_unfillable_cells"] == 0  # row 0 keeps everything reachable
+    assert md["compression_unreachable_cells"] == 0
+    assert res.final_mask.sum() > res.injection_mask.sum()
+    assert res.tau2 is not None
+    # the sealed cells are not part of the phase-2 cavity, their neighbours are
+    assert np.isnan(res.tau2[1, 5:7]).all()
+    assert np.isfinite(res.tau2[0, 5:7]).all()
 
 
 def test_the_sealed_cells_are_painted_on_the_map(tmp_path):

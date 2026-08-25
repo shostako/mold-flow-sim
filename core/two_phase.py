@@ -19,6 +19,10 @@ Model (two linear solves, no time marching):
    passage until ``T_inj = V_shot / Q`` (``HeleShawSolver._solve_domain``
    with ``clock_end_s``), the time-mean skin narrows the core, and the
    clock never inflates — a metered shot is rate-controlled by definition.
+   The exposure runs to ``T_inj`` even when the reachable cavity fills
+   earlier (an oversized or exactly-full shot): the front stops, the walls
+   do not, and the machine is still in its injection stage
+   (``injection_clock_end_s``).
    (The fixed point then carries a residual floor of order 1e-4: cells
    straddling ``T_inj`` flip between exposed and not as ``tau`` moves, so
    the default ``skin_convergence_tol`` of 1e-3 converges in a few passes
@@ -29,10 +33,15 @@ Model (two linear solves, no time marching):
    the real part (the isothermal field sends the melt straight across the
    opened plate). Cells sealed before ``T_inj`` are reported; cells that
    sealing cut off from the gates are excluded from the shot's candidates
-   (they hold no melt) — the domain is *not* re-solved around them, unlike
+   (they hold no melt), and the injection phase is solved again on the
+   reachable cavity alone (``HeleShawSolver._restricted_to``) so that the
+   volume CDF — the arrival times and hence the skin — counts no material
+   the melt never reaches (Codex P2 on PR #78). The re-solve repeats while
+   the cleaner clock seals more (each round sheds at least a cell, capped by
+   ``MAX_DOMAIN_PASSES``). There is no bisection, unlike
    ``HeleShawSolver.solve``: without clock inflation a dead pocket cannot
-   speed up the seal that made it, so the bisection there has no purpose
-   here.
+   speed up the seal that made it, so the largest consistent prefix is the
+   reachable cavity itself.
 2. **Compression phase** — solve ``tau2`` on the *final-thickness* cavity
    with Dirichlet (``tau = 0``) on **all** of ``Omega1`` (the melt pool acts
    as an equipotential source while the mold closes), then advance cells in
@@ -47,7 +56,12 @@ Deliberate limitations (documented, not bugs):
   carried into the pool, but phase 2 is isothermal: the pool is an
   equipotential source, so its internal conductance never enters the
   advance, and the cells the squeeze reaches are fresh. The model has no
-  compression timescale to age them on.
+  compression timescale to age them on. What *did* close during injection
+  stays closed: a sealed cell is solid through its thickness and the mold
+  closing does not melt it, so phase 2 removes the sealed cells from its
+  cavity and advances only into cells the pool reaches through open ones
+  (``compression_unreachable_cells`` counts the rest — a choke that froze
+  shut does not reopen under the squeeze; Claude review on PR #78).
 - **No injection/compression overlap.** The phases are strictly
   sequential; machines that start closing while still injecting are outside
   the model.
@@ -76,9 +90,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from .geometry import Geometry
-from .solver import HeleShawSolver, check_gate_reachability
+from .solver import MAX_DOMAIN_PASSES, HeleShawSolver, check_gate_reachability
 
 # Relative slack for volume comparisons. Tie groups are atomic, so the cut
 # never lands mid-cell; the slack only absorbs float noise in the cumsum.
@@ -204,19 +219,41 @@ def solve_two_phase_short_shot(
     skin_thk: np.ndarray | None = None
     sealed1: np.ndarray | None = None
     dead1 = np.zeros(geom.shape, dtype=bool)
+    reachable = mask.copy()
+    T_reach_total = T_open_total
+    clock_end = T_inj
     skin_meta: dict = {"skin_layer_enabled": skin_on}
     if skin_on:
         # The skin fixed point read at the end of the metered injection.
         # ``_solve_domain`` runs the same exposure clock as the main solve,
-        # stopped at T_inj; the clock length is the plain open-cavity sweep
-        # (the main solve's baseline carries the ICM equivalent-model
-        # speed-up, which is not this model's clock).
-        sol = solver._solve_domain(eta, T_fill_baseline_s=T_open_total, clock_end_s=T_inj)
+        # stopped when the shot runs out (T_inj) — past a fill that ends
+        # earlier the walls keep aging in the standing melt; the clock
+        # length is the plain cavity sweep (the main solve's baseline
+        # carries the ICM equivalent-model speed-up, which is not this
+        # model's clock). Cells a seal cuts off hold no melt,
+        # so the cavity is restricted to what the front reaches and solved
+        # again: their volume must not sit in the CDF that times — and so
+        # ages — the live cells (Codex P2 on PR #78).
+        dom = solver
+        passes = 0
+        while True:
+            T_reach_total = float(vol_open[reachable].sum()) / 1000.0 / Q_cm3s
+            sol = dom._solve_domain(eta, T_fill_baseline_s=T_reach_total, clock_end_s=clock_end)
+            passes += 1
+            sealed_now = sol.frozen_mask if sol.frozen_mask is not None else np.zeros_like(mask)
+            dead_now = np.zeros(geom.shape, dtype=bool)
+            if sealed_now.any():
+                dead_now = dom._unfillable_cells(sealed_now, sol.t_arr, sol.t_close)
+            if not dead_now.any() or passes >= MAX_DOMAIN_PASSES:
+                break
+            dead1 |= dead_now
+            reachable &= ~dead_now
+            if not reachable[gate_dirichlet].any():
+                break
+            dom = solver._restricted_to(reachable)
         tau1 = sol.tau
         skin_thk = sol.skin_thk_mm
-        sealed1 = sol.frozen_mask if sol.frozen_mask is not None else np.zeros_like(mask)
-        if sealed1.any():
-            dead1 = solver._unfillable_cells(sealed1, sol.t_arr, sol.t_close)
+        sealed1 = sealed_now & reachable
         skin_meta.update(
             {
                 "skin_growth_constant": float(solver.skin_growth_constant),
@@ -224,12 +261,14 @@ def solve_two_phase_short_shot(
                 "skin_iterations": sol.iterations,
                 "skin_converged": bool(sol.converged),
                 "thermal_diffusivity_m2_s": float(solver.material.thermal_diffusivity_m2_s),
+                "injection_domain_passes": passes,
+                "injection_clock_end_s": clock_end,
             }
         )
     else:
         S1 = solver._conductance_field(eta, h_open)
         tau1, _ = solver._solve_tau_field(S1, gate_dirichlet)
-    t_arr1 = solver._arrival_time_field(tau1, mask, vol_open, T_open_total)
+    t_arr1 = solver._arrival_time_field(tau1, reachable, vol_open, T_reach_total)
 
     # The gate cells all sit at tau = 0, so they form the first tie group of
     # the volume CDF. A metered shot that cannot even cover that group has no
@@ -247,7 +286,6 @@ def solve_two_phase_short_shot(
 
     # Cells a seal cut off from the gates hold no melt; they neither take
     # shot volume nor count as reachable. Everything else is a candidate.
-    reachable = mask & ~dead1
     V_reach_total = float(vol_open[reachable].sum())
     injection_complete = V_shot_mm3 >= V_reach_total * (1.0 - _REL_EPS)
     omega1 = np.zeros(geom.shape, dtype=bool)
@@ -280,10 +318,31 @@ def solve_two_phase_short_shot(
     vol_fin = dx * dx * h_fin
     V_fin_total = float(vol_fin[mask].sum())
 
+    # The squeeze advances through open cells only. A cell whose skins met
+    # during injection is solid and stays so when the mold closes, so it
+    # leaves the phase-2 cavity, and with it every cell the pool can reach
+    # only through it. (Without the skin model nothing is closed and the
+    # phase-2 cavity is the whole cavity, as before.)
+    closed = injection_sealed if injection_sealed is not None else np.zeros_like(mask)
+    open_cells = mask & ~closed
+    pool_open = omega1 & open_cells
+    if closed.any() and pool_open.any():
+        labels, _ = ndi.label(open_cells)
+        domain2 = open_cells & np.isin(labels, np.unique(labels[pool_open]))
+    elif closed.any():
+        domain2 = np.zeros_like(mask)  # the whole pool sealed: nothing can move
+    else:
+        domain2 = open_cells
+    # phase 2 is solved on its own cavity when that is smaller than the drawn one
+    solver2 = solver._restricted_to(domain2) if closed.any() else solver
+    candidates = domain2 & ~omega1
+    V_fin_reach = float(vol_fin[omega1 | domain2].sum())
+    compression_unreachable = int((mask & ~omega1 & ~domain2).sum())
+
     omega2 = omega1.copy()
     tau2: np.ndarray | None = None
     compression_progress = np.full(geom.shape, np.nan)
-    final_complete = V_shot_mm3 >= V_fin_total * (1.0 - _REL_EPS)
+    final_complete = V_shot_mm3 >= V_fin_reach * (1.0 - _REL_EPS)
     # Phase 2 models the mold closing. When the gap does not actually close
     # anywhere (no ICM, stroke 0, factor 1) there is no squeeze to advance
     # the front — but the atomic phase-1 cutoff can still leave a residual
@@ -293,7 +352,7 @@ def solve_two_phase_short_shot(
     gap_closes = bool(np.any(h_open[mask] > h_fin[mask] * (1.0 + _REL_EPS)))
 
     if final_complete:
-        omega2 |= mask
+        omega2 |= domain2
         # Injection incomplete but the shot covers the whole final cavity —
         # the everyday ICM full-fill case (V_fin <= V_shot < V_open). The
         # shape needs no solve, but the result contract promises a normalized
@@ -301,10 +360,9 @@ def solve_two_phase_short_shot(
         # computed to order them (Codex P2, round 3). With injection already
         # complete there is nothing to order; without gap closure this branch
         # implies injection_complete anyway (V_shot >= V_fin = V_open).
-        candidates = mask & ~omega1
         if gap_closes and not injection_complete and candidates.any():
-            S2 = solver._conductance_field(eta, h_fin)
-            tau2, _ = solver._solve_tau_field(S2, omega1)
+            S2 = solver2._conductance_field(eta, h_fin)
+            tau2, _ = solver2._solve_tau_field(S2, pool_open)
             cand_sel = candidates & ~np.isnan(tau2)
             total = float(vol_fin[cand_sel].sum())
             if total > 0:
@@ -316,10 +374,9 @@ def solve_two_phase_short_shot(
         # complete injection would have implied a complete final fill —
         # reaching this branch means omega1 is a strict subset of the cavity.
         budget = V_shot_mm3 - float(vol_fin[omega1].sum())
-        candidates = mask & ~omega1
         if budget > 0 and candidates.any():
-            S2 = solver._conductance_field(eta, h_fin)
-            tau2, _ = solver._solve_tau_field(S2, omega1)
+            S2 = solver2._conductance_field(eta, h_fin)
+            tau2, _ = solver2._solve_tau_field(S2, pool_open)
             cand_sel = candidates & ~np.isnan(tau2)
             take = _prefix_by_volume(tau2[cand_sel], vol_fin[cand_sel], budget)
             advanced = np.zeros(geom.shape, dtype=bool)
@@ -350,6 +407,9 @@ def solve_two_phase_short_shot(
         else 0.0,
         "final_fill_fraction": achieved_mm3 / V_fin_total if V_fin_total > 0 else 0.0,
         "achieved_volume_final_cm3": achieved_mm3 / 1000.0,
+        # cells outside the pool the squeeze cannot reach through open cells
+        # (behind a seal); 0 without the skin model
+        "compression_unreachable_cells": compression_unreachable,
         "compression_mode": (
             "off"
             if not solver.compression_molding

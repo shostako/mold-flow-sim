@@ -31,7 +31,8 @@ FG1 の 95% ICM ショートショット実物（射出 0.085 s、速度制御�
   `injection_skin_thickness_mm`（Ω₁ 内の役務平均スキン）と `injection_sealed_mask`
   （T_inj までに封止したプールのセル）。metadata に `skin_layer_enabled` /
   `skin_growth_constant` / `skin_clock_mode` / `skin_iterations` / `skin_converged` /
-  `injection_skin_max_mm` / `injection_sealed_cells` / `injection_unfillable_cells`。
+  `injection_skin_max_mm` / `injection_sealed_cells` / `injection_unfillable_cells` /
+  `injection_domain_passes` / `injection_clock_end_s`。
 - 二相マップ／アニメ: 射出中に封止したセルを濃赤で塗り、凡例に `sealed during
   injection` を足す（封止があるときだけ）。スキン ON はタイトルに `c` と `T_inj`。
 - UI: 二相は壁面冷却『なし』または『スキン層』で実行（『層別』は従来どおりスキップ＋
@@ -48,9 +49,13 @@ FG1 の 95% ICM ショートショット実物（射出 0.085 s、速度制御�
 ### 意図した限界
 
 - 圧縮相は等温のまま（プールは等圧ソースなので内部スキンは前進に効かず、圧縮の時間
-  スケールをモデルが持たない）。
-- 射出相で封止が出た場合、封止で切られたセルを候補から外すだけでドメインを解き直さない
-  （速度制御では時計が膨らまないので、`HeleShawSolver.solve` の二分探索の動機が無い）。
+  スケールをモデルが持たない）。ただし射出中に封止したセルは圧縮相でも閉じたまま —
+  固化したスキンは型閉じで溶けない — で、プールから開いたセルで繋がる領域だけを前進候補に
+  する（`compression_unreachable_cells`）。
+- 射出相で封止が出た場合、封止で切られたセルを候補から外して到達可能な領域だけで解き直す
+  （死領域の体積を到着時刻＝スキンの時計から抜く）。二分探索は無い — 速度制御では時計が
+  膨らまないので、最大の一貫した接頭集合は到達可能領域そのもの。露光の打ち切りは
+  `T_inj`（計量が先に埋まっても射出中の壁は老化し続ける、`injection_clock_end_s`）。
 - ゲート部の剪断発熱は無い。射出が封止年齢（PP_T20・ランド 0.35 で 0.24 s）より遅いと
   ランドが封止して製品部が未到達に化ける。UI は警告する。免除／剪断発熱は次の段階。
 - `c_skin` は校正パラメータになる。実物写真 1 枚が最初の校正点（c=1.0 では射出終了で

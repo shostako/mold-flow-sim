@@ -665,7 +665,15 @@ def _edge_channel_inputs(
     slider, _ = _tagged_widgets(tag)
     st.markdown("**縁部深彫り（エッジチャネル）**")
     if default is not None:
-        width_default, depth_default, t_default = default
+        width_default, depth_default, t_drawing = default
+        # The drawing's range only makes sense while the wall still reaches
+        # it. Once the user shortens the wall below the drawing's start the
+        # clamped range would collapse to (t_max, t_max), which validate()
+        # rejects — so a valid wall could not be built (Codex P2). Fall back
+        # to the live wall extent, which is always increasing.
+        lo_d, hi_d = max(0.0, min(t_drawing[0], t_max_mm)), min(t_drawing[1], t_max_mm)
+        if hi_d > lo_d + 0.1:
+            t_default = (lo_d, hi_d)
     else:
         width_default, depth_default = 3.0, ramp_cap + 1.0
     v["ec_on"] = st.checkbox(

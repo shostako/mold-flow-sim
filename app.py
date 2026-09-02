@@ -352,6 +352,14 @@ material_keys = list(db.keys())
 #                                sideways from the valve and enters each fan
 #                                tip from below, perpendicular and centred
 #                                (hamoko_gate_furiwake_twin_mini_L_20260824)
+#   Film gate 6 (扇状/縁部深彫り 0807) Film gate 1 with the 2026/08/07 rework:
+#                                the pocket ends extended to t=5 and a 2 mm
+#                                band at the ramp cap depth (2.5) along the
+#                                outer wall (hamoko_gate_furiwake_edge_20260807)
+#   Film gate 7 (扇状/縁部深彫り 0515) the 2026/05/15 proposal: pocket ends at
+#                                t=4, a 3 mm × 2.4 deep groove along the outer
+#                                wall down to the land
+#                                (hamoko_gate_furiwake_edge_20260515)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -371,6 +379,10 @@ class _ProfileGateDefaults:
     well_wall_angle_deg: float
     # Flat dam inside the 肉盗み: (start t, residual depth from PL). None = no dam.
     weld: tuple[float, float] | None = None
+    # 縁部深彫り along the outer wall: (width, depth, (t_lo, t_hi)). None = the
+    # checkbox starts off. Drawings that *are* the band (Film gate 6 / 7)
+    # start with it on, at the drawing's numbers.
+    edge_channel: tuple[float, float, tuple[float, float]] | None = None
 
 
 _FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
@@ -406,6 +418,51 @@ _FILM_GATE3_DEFAULTS = _ProfileGateDefaults(
     wall_w2=4.45,
     valve_t=20.0,
     well_wall_angle_deg=60.0,
+)
+# Film gate 6 = the 2026/08/07 rework of Film gate 1 (the vector drawing is
+# hamoko_gate_furiwake_rework_20260807; Film gate 2 shares its pocket and adds
+# the dam). What the rework did: the pocket ends grew from t=3 to t=5, the
+# 肉盗み exit narrowed to 100 (w=50 at t=0 → 47.64 at t=1), the well wall
+# steepened to 71.6°, and a 2 mm band at the ramp cap depth runs along the
+# outer wall — on the drawing it is the "2" dimension between the wall and
+# the depth-2.5 contour running parallel to it, from t≈3 at the end until
+# it meets the cap line t=12.11. That contour is an edge channel, not a
+# wider pocket: width 2.0, depth 2.5, along the sloped wall's own t-extent
+# [5.0, 23.28]. The t-range truncates the wall polyline rather than clipping
+# cells, so a lower bound below the wall start would add a stub along the
+# end wall (w=149, t<5) and sink the land there; with the wall's own
+# extent the band at the end is the 2 mm around the wall corner, t≈3–5,
+# exactly where the drawing's contour starts.
+_FILM_GATE6_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=298.0,
+    island_w_near=47.64,
+    island_w_far=9.9,
+    wall_t1=5.0,
+    wall_t2=23.28,
+    wall_w2=4.48,
+    valve_t=None,
+    well_wall_angle_deg=71.6,
+    edge_channel=(2.0, 2.5, (5.0, 23.28)),
+)
+# Film gate 7 = the 2026/05/15 proposal「フィルムゲート(流動長150mm)」: Film
+# gate 1's pocket with the ends at t=4 (the "4" at A) and a groove of constant
+# depth 2.4 along the outer wall all the way to the land — the detail shows
+# its section as a trapezoid 3.0 at the floor / 4.0 at the opening, and the
+# plan draws the 3.0 floor width; the 肉盗み exit is 100 like the rework. The
+# drawing predates the 07/03 Toyota drawing, so everything it does not
+# dimension (ramp, well, valve) is taken from Film gate 1. The band's t-range
+# is the wall's own extent for the same reason as Film gate 6; 3 mm around
+# the wall corner (4, 149) reaches down to t≈1, i.e. right under the land.
+_FILM_GATE7_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=298.0,
+    island_w_near=47.65,
+    island_w_far=10.0,
+    wall_t1=4.0,
+    wall_t2=23.3,
+    wall_w2=4.5,
+    valve_t=None,
+    well_wall_angle_deg=60.0,
+    edge_channel=(3.0, 2.4, (4.0, 23.3)),
 )
 
 
@@ -593,6 +650,7 @@ def _edge_channel_inputs(
     t_max_mm: float,
     t_default: tuple[float, float],
     ramp_cap: float,
+    default: tuple[float, float, tuple[float, float]] | None = None,
 ) -> None:
     """The 縁部深彫り block shared by every Film gate (fills ``v`` in place).
 
@@ -600,13 +658,19 @@ def _edge_channel_inputs(
     (+ ``ec_side`` when ``sided``). The t-range is a two-handle slider so
     its bounds can never collide (min 0 < max = the wall's t-extent); a
     range collapsed to zero width is rejected by ``validate()`` like any
-    other inconsistency.
+    other inconsistency. ``default`` = (width, depth, t_range) starts the
+    block on at those values (a drawing whose feature *is* the band);
+    None starts it off with generic values.
     """
     slider, _ = _tagged_widgets(tag)
     st.markdown("**縁部深彫り（エッジチャネル）**")
+    if default is not None:
+        width_default, depth_default, t_default = default
+    else:
+        width_default, depth_default = 3.0, ramp_cap + 1.0
     v["ec_on"] = st.checkbox(
         "縁部深彫りを有効化",
-        value=False,
+        value=default is not None,
         key=f"{tag}_ec_on",
         help=(
             "壁沿いに一定幅・一定深さの帯を彫り、縁を低抵抗の先行流路にする（S ∝ h³）。"
@@ -633,7 +697,7 @@ def _edge_channel_inputs(
         "帯幅 [mm]（壁からの垂直距離）",
         float(w_min),
         20.0,
-        float(min(max(3.0, w_min), 20.0)),
+        float(min(max(width_default, w_min), 20.0)),
         step=0.5,
         help="下限はメッシュで解像できる幅（おおよそ1セル）。",
     )
@@ -641,7 +705,7 @@ def _edge_channel_inputs(
         "帯深さ [mm]（絶対深さ＝流路肉厚）",
         0.1,
         15.0,
-        float(min(max(ramp_cap + 1.0, 0.1), 15.0)),
+        float(min(max(depth_default, 0.1), 15.0)),
         step=0.1,
         help="帯の中は d = max(既存深さ, この値)。既存より浅い指定はその場所では効かない。",
     )
@@ -820,6 +884,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             t_max_mm=float(v["wall_t2"]),
             t_default=(float(v["wall_t1"]), float(v["wall_t2"])),
             ramp_cap=float(v["ramp_cap"]),
+            default=d.edge_channel,
         )
 
         _well_inputs(tag, v, symmetric=symmetric, wall_angle_deg=d.well_wall_angle_deg)
@@ -1270,6 +1335,18 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "film_gate_5_parametric",
         lambda: _twin_fan_sidebar("f5", _FILM_GATE5_DEFAULTS),
         _twin_fan_from_inputs,
+    ),
+    "Film gate 6 (扇状/縁部深彫り 0807)": _FilmGate(
+        "f6",
+        "film_gate_6_parametric",
+        lambda: _profile_gate_sidebar("f6", True, _FILM_GATE6_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 7 (扇状/縁部深彫り 0515)": _FilmGate(
+        "f7",
+        "film_gate_7_parametric",
+        lambda: _profile_gate_sidebar("f7", True, _FILM_GATE7_DEFAULTS),
+        _profile_gate_from_inputs,
     ),
 }
 

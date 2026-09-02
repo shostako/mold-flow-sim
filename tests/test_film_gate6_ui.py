@@ -92,6 +92,8 @@ def _thickness_at(geom, spec: GateProfileSpec, t: float, w: float, dx: float = 1
     y_plate_bottom = pad + t_max, w from the plate centre (symmetric). With
     t_max = 27.5 the cell centres sit at integer t and half-integer w, so
     callers ask for those and the helper insists the request hits a centre.
+    Assumes ``valve.w == 0`` (the UI always passes it), so the plate centre
+    is the valve axis — a test-local helper, not a general mapping.
     """
     pad = ProfilePlateConfig().pad_mm
     iy = (pad + spec.t_max() - t) / dx - 0.5
@@ -186,6 +188,39 @@ def test_switching_the_band_off_drops_the_channel():
     # everything else is still the rework pocket
     assert np.asarray(got.outer_wall_line[0]) == pytest.approx((5.0, 149.0))
     assert got.well.wall_angle_deg == 71.6
+
+
+def _slider(at: AppTest, label_prefix: str):
+    hits = [s for s in at.slider if str(s.label).startswith(label_prefix)]
+    assert len(hits) == 1, [str(s.label) for s in at.slider]
+    return hits[0]
+
+
+def test_a_wall_shorter_than_the_drawings_band_still_builds():
+    """Codex P2: with the wall end below the drawing's band start (5.0) the
+    drawing's range clamped to [0, wall end] collapses to a zero-width range
+    that ``validate()`` rejects, so an otherwise valid wall could not be
+    built. The default must fall back to the live wall extent instead.
+
+    The well is switched off and the valve moved into the short pocket so
+    the only thing that could stop the build is the band's range — with the
+    well on, a wall ending at t=4.5 strands the well and the gate is
+    unreachable for a reason unrelated to this fix."""
+    at = _film_gate6_app()
+    at.checkbox(key="f6_well_on").set_value(False).run()
+    _slider(at, "外壁開始 t").set_value(1.0).run()
+    _slider(at, "外壁終端 t").set_value(4.5).run()
+    _slider(at, "バルブ位置 t").set_value(2.5).run()
+    assert _slider(at, "範囲 t").value == (1.0, 4.5)
+    at.button[0].click().run()
+    assert not at.exception
+    assert not at.error
+    assert at.session_state["mfs_geom"] is not None
+    got = GateProfileSpec.from_dict({**_recorded_spec(at), "name": "x"})
+    (ec,) = got.edge_channels
+    lo, hi = ec.t_range
+    assert hi > lo
+    assert (lo, hi) == pytest.approx((1.0, 4.5))
 
 
 def test_the_on_by_default_band_does_not_leak_into_film_gate_1():

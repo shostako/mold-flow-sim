@@ -686,6 +686,25 @@ def test_the_restricted_solver_keeps_the_rate_it_was_running_at():
     )
 
 
+def test_the_restricted_solver_keeps_the_nominal_valve_records():
+    """Display-only records must survive the restriction.
+
+    ``valve_axis_x_mm`` / ``valve_marker_mm`` are what the result maps use
+    for the display origin and the gate marker; a copy that dropped them
+    would fall back to the clipped raster, re-creating the centroid drift
+    that PR #76 / #80 removed, for any result built from a restricted solver.
+    """
+    geom = _strip(np.full(40, 1.0))
+    geom.valve_axis_x_mm = 3.5
+    geom.valve_marker_mm = (3.5, 0.5, 1.5)
+    solver = HeleShawSolver(geom, MaterialDB()["PP"])
+    live = geom.mask.copy()
+    live[0, 20:] = False
+    sub = solver._restricted_to(live)
+    assert sub.geometry.valve_axis_x_mm == 3.5
+    assert sub.geometry.valve_marker_mm == (3.5, 0.5, 1.5)
+
+
 # --- the volume map (Issue #52) ----------------------------------------------
 
 

@@ -531,6 +531,12 @@ class HeleShawSolver:
             compression_mask=(
                 None if geom.compression_mask is None else geom.compression_mask & live
             ),
+            # Display-only records: the nominal valve axis / orifice. Not
+            # used by the solve, but a result built from a restricted copy
+            # would otherwise fall back to the clipped raster (@claude on
+            # PR #80).
+            valve_axis_x_mm=geom.valve_axis_x_mm,
+            valve_marker_mm=geom.valve_marker_mm,
         )
         return replace(
             self,

@@ -21,6 +21,7 @@ from core.visualizer import (
     _fill_field_rgb,
     _nearest_extend,
     _unfilled_overlay,
+    draw_gate_markers,
     fill_frame_times,
     fill_time_max,
     gate_groups_mm,
@@ -393,6 +394,32 @@ def test_gate_groups_prefer_the_builder_recorded_nominal_valve():
     g.valve_marker_mm = (11.0, 7.0, 1.5)
     x0, y0 = g.display_origin_mm()
     assert gate_groups_mm(g) == [(11.0 - x0, 7.0 - y0, 1.5)]
+
+
+def test_geometry_level_marker_helper_serves_the_sidebar_preview():
+    """``draw_gate_markers`` takes a bare Geometry — no FlowResult — so the
+    thickness preview in app.py (drawn before any solve) shares the one-disk
+    marker instead of keeping its own per-cell loop (code-review on PR #80)."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    g = _gate_only_geometry([(2, 2), (2, 3), (3, 2), (3, 3)], cell_size_mm=2.0)
+    fig, ax = plt.subplots()
+    draw_gate_markers(ax, g)
+    circles = [c for c in ax.get_children() if isinstance(c, Circle)]
+    assert len(circles) == 1
+    assert circles[0].get_radius() == pytest.approx(gate_groups_mm(g)[0][2])
+    plt.close(fig)
+
+
+def test_display_origin_falls_back_to_the_marker_x_when_the_axis_is_missing():
+    """The two display records must not split: a copy that carried only the
+    marker still puts x = 0 on the disk it draws."""
+    g = _gate_only_geometry([(2, 2), (2, 3)], cell_size_mm=1.0)
+    g.valve_marker_mm = (7.25, 2.5, 1.5)
+    x0, _y0 = g.display_origin_mm()
+    assert x0 == 7.25
+    assert gate_groups_mm(g)[0][0] == pytest.approx(0.0)
 
 
 def test_gate_groups_empty_without_gates():

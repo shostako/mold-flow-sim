@@ -71,6 +71,7 @@ from core.version import build_label
 from core.visualizer import (
     ISOCHRONE_LEVELS,
     THICKNESS_CMAP,
+    draw_gate_markers,
     export_two_phase_frames,
     render_layer_grid,
     render_short_shot_map,
@@ -2033,14 +2034,7 @@ with col_left:
         geom.ny * geom.cell_size_mm - y0_mm,
     ]
     im = ax.imshow(fig_data, origin="lower", extent=extent, cmap=THICKNESS_CMAP)
-    for iy, ix in geom.gates:
-        ax.plot(
-            (ix + 0.5) * geom.cell_size_mm - x0_mm,
-            (iy + 0.5) * geom.cell_size_mm - y0_mm,
-            "ro",
-            markersize=8,
-            markeredgecolor="white",
-        )
+    draw_gate_markers(ax, geom)
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     ax.set_aspect("equal")

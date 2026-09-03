@@ -1459,6 +1459,8 @@ def build_profile_gate_geometry(
         # Defensive: snap to the in-mask cell nearest to the valve center
         # (e.g. tiny orifice, or an asymmetric spec whose orifice circle
         # only half-overlaps the pocket).
+        # The solver used this cell, not the configured orifice: show that.
+        geom.valve_marker_mm = None
         masked_iys, masked_ixs = np.where(mask)
         if masked_iys.size > 0:
             d2 = (yy[masked_iys, masked_ixs] - y_valve) ** 2 + (

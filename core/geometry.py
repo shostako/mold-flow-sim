@@ -40,6 +40,14 @@ class Geometry:
     # the display falls back to the rasterized gate-cell centroid (which an
     # orifice clipped by a one-sided pocket shifts mesh-dependently).
     valve_axis_x_mm: float | None = None
+    # Nominal valve orifice ``(x_mm, y_mm, radius_mm)`` in the grid frame, as
+    # configured — not as rasterized. Set by the parametric builders so the
+    # result maps can draw the valve at its true center and diameter even
+    # when ``mask`` clips the orifice circle (a one-sided pocket keeps only
+    # the cells on one side; their centroid and count would then describe a
+    # shifted, undersized semicircle — Codex P2, PR #80). ``None`` lets the
+    # display fall back to the rasterized gate-cell groups.
+    valve_marker_mm: tuple[float, float, float] | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -661,6 +669,7 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
         label="film_gate",
         compression_mask=compression_mask,
         valve_axis_x_mm=cx,
+        valve_marker_mm=(float(cx), float(y_short), float(d_valve) / 2.0),
     )
     if valve_iys.size == 0:
         # Defensive: if d_valve is too small to cover any cell, snap to the
@@ -896,6 +905,7 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
         label="direct_gate",
         compression_mask=compression_mask,
         valve_axis_x_mm=cx,
+        valve_marker_mm=(float(cx), float(y_gate_center), float(d_gate) / 2.0),
     )
 
     # --- Dirichlet τ=0 cells: the gate disk inside the plate ---
@@ -1315,6 +1325,7 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
         label="film_gate2",
         compression_mask=compression_mask,
         valve_axis_x_mm=x_g,
+        valve_marker_mm=(float(x_g), float(y_c), float(cfg.valve_gate_diameter_mm) / 2.0),
     )
     if valve_iys.size == 0:
         # Defensive: snap to the single cell nearest the valve point.

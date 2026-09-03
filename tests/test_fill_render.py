@@ -387,6 +387,14 @@ def test_gate_markers_are_true_scale_circles_one_per_group():
     plt.close(fig)
 
 
+def test_gate_groups_prefer_the_builder_recorded_nominal_valve():
+    """The configured orifice wins over the raster when a builder recorded it."""
+    g = _gate_only_geometry([(2, 2), (2, 3), (3, 2), (3, 3)], cell_size_mm=2.0)
+    g.valve_marker_mm = (11.0, 7.0, 1.5)
+    x0, y0 = g.display_origin_mm()
+    assert gate_groups_mm(g) == [(11.0 - x0, 7.0 - y0, 1.5)]
+
+
 def test_gate_groups_empty_without_gates():
     g = _gate_only_geometry([])
     assert gate_groups_mm(g) == []

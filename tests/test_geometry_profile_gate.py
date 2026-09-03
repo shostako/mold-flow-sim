@@ -812,6 +812,30 @@ def test_display_origin_x_is_the_nominal_valve_axis_not_the_cell_centroid() -> N
     assert centroid > x_edge + 0.25 * g.cell_size_mm  # the clipped centroid drifts
 
 
+def test_gate_marker_is_the_nominal_orifice_even_when_the_mask_clips_it() -> None:
+    """Same clipped orifice as above: the surviving Dirichlet cells are a
+    half-disc on one side of the valve axis, so a marker rebuilt from them
+    would be a shifted, undersized semicircle. The result maps must draw the
+    configured Φ at the configured center (Codex P2, PR #80)."""
+    from core.visualizer import gate_groups_mm
+
+    spec = _minimal_spec(symmetric=False, gate_exit_width=100.0)
+    g = build_profile_gate_geometry(spec, _plate())
+    assert g.valve_marker_mm is not None
+    groups = gate_groups_mm(g)
+    assert len(groups) == 1
+    gx, gy, gr = groups[0]
+    assert gx == pytest.approx(0.0)  # on the valve axis in the display frame
+    assert gr == pytest.approx(spec.valve.orifice_diameter / 2.0)
+    _x0, y0 = g.display_origin_mm()
+    assert gy + y0 == pytest.approx(g.valve_marker_mm[1])
+    # Without the nominal record the raster would have told a different story.
+    g.valve_marker_mm = None
+    rx, _ry, rr = gate_groups_mm(g)[0]
+    assert rx > 0.25 * g.cell_size_mm  # centroid drifted to the surviving side
+    assert rr < 0.85 * spec.valve.orifice_diameter / 2.0  # half the cells, smaller radius
+
+
 def test_display_origin_x_follows_a_symmetric_valve_offset() -> None:
     """symmetric spec with valve.w != 0: x = 0 on the offset valve axis."""
     spec = _minimal_spec()

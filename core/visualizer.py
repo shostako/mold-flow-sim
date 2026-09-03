@@ -74,10 +74,21 @@ def gate_groups_mm(geometry: Geometry) -> list[tuple[float, float, float]]:
     radius is the area-equivalent one, ``sqrt(n·dx²/π)``, which reproduces
     the orifice diameter for a rasterized disk; a one-cell gate comes out
     as a circle of about one cell.
+
+    When the builder recorded the nominal valve (``Geometry.valve_marker_mm``)
+    that wins: it is the configured center and radius, so an orifice clipped
+    by the cavity mask still draws as the whole Φ.
     """
     g = geometry
     if not g.gates:
         return []
+    if g.valve_marker_mm is not None:
+        # The configured orifice, not its raster: a one-sided pocket clips
+        # the circle and the surviving cells would draw a shifted, smaller
+        # semicircle (Codex P2, PR #80).
+        x0, y0 = g.display_origin_mm()
+        vx, vy, vr = g.valve_marker_mm
+        return [(float(vx) - x0, float(vy) - y0, float(vr))]
     gate_mask = np.zeros(g.mask.shape, dtype=bool)
     for iy, ix in g.gates:
         gate_mask[iy, ix] = True

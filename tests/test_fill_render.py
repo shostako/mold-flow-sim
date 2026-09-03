@@ -23,6 +23,7 @@ from core.visualizer import (
     _unfilled_overlay,
     fill_frame_times,
     fill_time_max,
+    gate_groups_mm,
     render_fill_animation,
 )
 
@@ -285,9 +286,9 @@ def test_isochrones_skip_a_cavity_too_narrow_to_contour(result):
 def test_gate_marker_sits_above_the_unfilled_overlay(result, tmp_path):
     """A boundary gate must stay visible in the very first frame.
 
-    The marker is drawn several cells wide, so with matplotlib's default line
-    z-order of 2 the opaque overlay (3) eats everything outside the single
-    filled gate cell — worst exactly when the animation starts.
+    The marker is drawn at true orifice scale, so with matplotlib's default
+    patch z-order of 1 the opaque overlay (3) eats everything outside the
+    filled gate cells — worst exactly when the animation starts.
 
     Checked without passing ``zorder``: it is the helper's default, so a
     renderer cannot forget it. An earlier version of this test passed the
@@ -295,7 +296,7 @@ def test_gate_marker_sits_above_the_unfilled_overlay(result, tmp_path):
     """
     import matplotlib.pyplot as plt
     from matplotlib.image import AxesImage
-    from matplotlib.lines import Line2D
+    from matplotlib.patches import Circle
 
     fig, ax = plt.subplots()
     _draw_fill_state(
@@ -308,10 +309,87 @@ def test_gate_marker_sits_above_the_unfilled_overlay(result, tmp_path):
     )
     _draw_gate_markers(ax, result)
     overlay_z = max(im.get_zorder() for im in ax.get_children() if isinstance(im, AxesImage))
-    markers = [c for c in ax.get_children() if isinstance(c, Line2D) and c.get_marker() == "o"]
+    markers = [c for c in ax.get_children() if isinstance(c, Circle)]
     assert markers, "expected at least one gate marker"
     assert all(m.get_zorder() > overlay_z for m in markers)
     plt.close(fig)
+
+
+# --- gate markers: one per injection point, at true scale ------------------
+
+
+def _gate_only_geometry(gate_cells, *, cell_size_mm=1.0, shape=(12, 12)):
+    from core.geometry import Geometry
+
+    mask = np.ones(shape, dtype=bool)
+    thk = np.full(shape, 1.0)
+    g = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=cell_size_mm, label="t")
+    for iy, ix in gate_cells:
+        g.gates.append((int(iy), int(ix)))
+    return g
+
+
+def test_gate_groups_one_marker_per_rasterized_valve_disk():
+    """A Φ3 valve on a 0.5 mm grid is ~28 gate cells but one gate.
+
+    Per-cell markers stacked that many offset circles on the valve. The
+    group has one center — the disk's — and its area-equivalent radius
+    reproduces the orifice radius within a cell.
+    """
+    dx = 0.5
+    yy, xx = np.mgrid[0:12, 0:12]
+    cx_mm, cy_mm, r_mm = 3.1, 3.4, 1.5
+    disk = ((xx + 0.5) * dx - cx_mm) ** 2 + ((yy + 0.5) * dx - cy_mm) ** 2 <= r_mm**2
+    cells = list(zip(*np.nonzero(disk), strict=True))
+    assert len(cells) > 20
+    g = _gate_only_geometry(cells, cell_size_mm=dx)
+    x0, y0 = g.display_origin_mm()
+    groups = gate_groups_mm(g)
+    assert len(groups) == 1
+    gx, gy, gr = groups[0]
+    assert abs(gx + x0 - cx_mm) < dx and abs(gy + y0 - cy_mm) < dx
+    assert abs(gr - r_mm) < dx
+
+
+def test_gate_groups_split_feed_keeps_one_marker_per_feed():
+    """Two disks apart along a runner are two gates; a diagonal touch is not a bridge."""
+    left = [(2, 2), (2, 3), (3, 2), (3, 3)]
+    right = [(2, 8), (2, 9), (3, 8), (3, 9)]
+    diag = [(4, 4)]  # touches `left` only at a corner
+    g = _gate_only_geometry(left + right + diag)
+    groups = gate_groups_mm(g)
+    assert len(groups) == 3
+    radii = sorted(r for _, _, r in groups)
+    assert radii[0] == pytest.approx(np.sqrt(1 / np.pi))
+    assert radii[1] == radii[2] == pytest.approx(np.sqrt(4 / np.pi))
+
+
+def test_gate_markers_are_true_scale_circles_one_per_group():
+    """Data-space circles, one per group, radius in mm — not fixed-size symbols."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Circle
+
+    from core import HeleShawSolver, MaterialDB
+
+    g = _gate_only_geometry([(2, 2), (2, 3), (3, 2), (3, 3), (8, 8)], cell_size_mm=2.0)
+    res = HeleShawSolver(g, MaterialDB()["PP"]).solve(num_frames=2)
+    fig, ax = plt.subplots()
+    _draw_gate_markers(ax, res, label="gate")
+    circles = [c for c in ax.get_children() if isinstance(c, Circle)]
+    assert len(circles) == 2
+    assert not [c for c in ax.get_children() if isinstance(c, Line2D) and c.get_marker() == "o"]
+    expected = {(cx, cy): r for cx, cy, r in gate_groups_mm(g)}
+    for c in circles:
+        assert c.get_radius() == pytest.approx(expected[tuple(c.center)])
+    # the legend label is attached once, so the weld map legend shows a single "gate"
+    assert sum(c.get_label() == "gate" for c in circles) == 1
+    plt.close(fig)
+
+
+def test_gate_groups_empty_without_gates():
+    g = _gate_only_geometry([])
+    assert gate_groups_mm(g) == []
 
 
 def test_frame_export_contours_once_for_the_whole_sequence(result, tmp_path, monkeypatch):

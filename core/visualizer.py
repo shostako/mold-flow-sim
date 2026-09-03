@@ -11,9 +11,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.patches import Patch
+from matplotlib.patches import Circle, Patch
 from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import label as ndi_label
 
+from .geometry import Geometry
 from .multilayer_solver import MultilayerFlowResult
 from .solver import (
     WELD_FULL_ANGLE_DEG,
@@ -61,25 +63,64 @@ def _gate_xy_mm(result: FlowResult, iy: int, ix: int) -> tuple[float, float]:
     )
 
 
+def gate_groups_mm(geometry: Geometry) -> list[tuple[float, float, float]]:
+    """One ``(x_mm, y_mm, radius_mm)`` per 4-connected group of gate cells.
+
+    ``Geometry.gates`` lists every Dirichlet cell — a rasterized valve
+    orifice is a disk of them — but what the reader wants to see is *the
+    gate*, one per injection point. Cells are grouped with the same
+    4-connectivity the solver's reachability check uses, so a split feed
+    (several disks along a runner) still shows one marker per feed. The
+    radius is the area-equivalent one, ``sqrt(n·dx²/π)``, which reproduces
+    the orifice diameter for a rasterized disk; a one-cell gate comes out
+    as a circle of about one cell.
+    """
+    g = geometry
+    if not g.gates:
+        return []
+    gate_mask = np.zeros(g.mask.shape, dtype=bool)
+    for iy, ix in g.gates:
+        gate_mask[iy, ix] = True
+    labels, n = ndi_label(gate_mask)  # default structure = 4-connectivity
+    x0, y0 = g.display_origin_mm()
+    dx = g.cell_size_mm
+    groups: list[tuple[float, float, float]] = []
+    for k in range(1, n + 1):
+        iys, ixs = np.nonzero(labels == k)
+        cx = (ixs.mean() + 0.5) * dx - x0
+        cy = (iys.mean() + 0.5) * dx - y0
+        r = float(np.sqrt(iys.size * dx * dx / np.pi))
+        groups.append((float(cx), float(cy), r))
+    return groups
+
+
 def _draw_gate_markers(
     ax,
     result: FlowResult,
     *,
     color: str = "red",
     edgecolor: str = "white",
-    size: int = 8,
     zorder: float = _Z_GATE,
+    label: str | None = None,
 ) -> None:
-    for iy, ix in result.geometry.gates:
-        gx_mm, gy_mm = _gate_xy_mm(result, iy, ix)
-        ax.plot(
-            gx_mm,
-            gy_mm,
-            marker="o",
-            color=color,
-            markersize=size,
-            markeredgecolor=edgecolor,
-            zorder=zorder,
+    """Draw one true-scale disk per gate group (see ``gate_groups_mm``).
+
+    The disk is a data-space ``Circle`` — its diameter on the page is the
+    orifice diameter in mm, like the cavity around it — so the marker reads
+    as "the Φ3 valve" instead of a symbol of arbitrary size. Per-cell
+    markers used to stack several offset circles on one valve.
+    """
+    for k, (cx, cy, r) in enumerate(gate_groups_mm(result.geometry)):
+        ax.add_patch(
+            Circle(
+                (cx, cy),
+                r,
+                facecolor=color,
+                edgecolor=edgecolor,
+                linewidth=1.0,
+                zorder=zorder,
+                label=label if (label and k == 0) else None,
+            )
         )
 
 
@@ -421,7 +462,7 @@ def render_fill_animation(
         isochrone_levels=isochrone_levels,
     )
 
-    _draw_gate_markers(ax, result, color="red", edgecolor="white", size=8)
+    _draw_gate_markers(ax, result)
 
     # progress bar
     if show_progress_bar:
@@ -485,10 +526,7 @@ def render_pressure_map(
         rgba[g.mask & dead] = (*SHORT_SHOT_RGB, 1.0)
     ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
 
-    for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
-        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
-        ax.plot(gx_mm, gy_mm, marker="o", color="lime", markersize=8, markeredgecolor="black")
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
 
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
@@ -610,18 +648,7 @@ def render_weldlines(
         )
 
     # gates
-    for iy, ix in g.gates:
-        gx_mm = (ix + 0.5) * g.cell_size_mm - x0
-        gy_mm = (iy + 0.5) * g.cell_size_mm - y0
-        ax.plot(
-            gx_mm,
-            gy_mm,
-            marker="o",
-            color="lime",
-            markersize=8,
-            markeredgecolor="black",
-            label="gate",
-        )
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black", label="gate")
 
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
@@ -680,15 +707,7 @@ def render_skin_layer_map(
         norm=norm,
         interpolation="nearest",
     )
-    for iy, ix in g.gates:
-        ax.plot(
-            (ix + 0.5) * g.cell_size_mm - x0,
-            (iy + 0.5) * g.cell_size_mm - y0,
-            marker="o",
-            color="lime",
-            markersize=8,
-            markeredgecolor="black",
-        )
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
@@ -737,15 +756,7 @@ def render_core_layer_map(
         norm=norm,
         interpolation="nearest",
     )
-    for iy, ix in g.gates:
-        ax.plot(
-            (ix + 0.5) * g.cell_size_mm - x0,
-            (iy + 0.5) * g.cell_size_mm - y0,
-            marker="o",
-            color="red",
-            markersize=8,
-            markeredgecolor="white",
-        )
+    _draw_gate_markers(ax, result)
     if result.short_shot_mask is not None and result.short_shot_mask.any():
         iy_arr, ix_arr = np.where(result.short_shot_mask)
         ax.scatter(
@@ -866,15 +877,7 @@ def render_layer_map(
     im = ax.imshow(
         masked, origin="lower", extent=extent, cmap=cmap, norm=norm, interpolation="nearest"
     )
-    for iy, ix in g.gates:
-        ax.plot(
-            (ix + 0.5) * g.cell_size_mm - x0,
-            (iy + 0.5) * g.cell_size_mm - y0,
-            marker="o",
-            color="lime",
-            markersize=8,
-            markeredgecolor="black",
-        )
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
@@ -1033,15 +1036,7 @@ def render_short_shot_map(
             fontsize=11,
             color="#2c7a2c",
         )
-    for iy, ix in g.gates:
-        ax.plot(
-            (ix + 0.5) * g.cell_size_mm - x0,
-            (iy + 0.5) * g.cell_size_mm - y0,
-            marker="o",
-            color="lime",
-            markersize=8,
-            markeredgecolor="black",
-        )
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
@@ -1091,7 +1086,7 @@ def export_frames(
         smooth=smooth,
         isochrone_levels=isochrone_levels,
     )
-    _draw_gate_markers(ax, result, color="red", edgecolor="white", size=7)
+    _draw_gate_markers(ax, result)
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")

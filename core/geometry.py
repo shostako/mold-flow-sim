@@ -124,6 +124,10 @@ class Geometry:
             # keeps cells on one side, and the centroid then drifts off the
             # valve axis by a mesh-dependent amount (Codex P2, PR #76).
             x0 = float(self.valve_axis_x_mm)
+        elif self.valve_marker_mm is not None:
+            # Same record, other field: a copy path that carried only the
+            # marker must not put x = 0 off the disk it draws.
+            x0 = float(self.valve_marker_mm[0])
         else:
             x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
         y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
@@ -674,6 +678,8 @@ def build_film_gate_geometry(cfg: FilmGateConfig) -> Geometry:
     if valve_iys.size == 0:
         # Defensive: if d_valve is too small to cover any cell, snap to the
         # single cell nearest to the half-circle center.
+        # The solver used this cell, not the configured orifice: show that.
+        geom.valve_marker_mm = None
         ic_y = int(np.argmin(np.abs(yy[:, 0] - y_short)))
         ic_x = int(np.argmin(np.abs(xx[0, :] - cx)))
         if mask[ic_y, ic_x]:
@@ -912,6 +918,8 @@ def build_direct_gate_geometry(cfg: DirectGateConfig) -> Geometry:
     gate_iys, gate_ixs = np.where(in_gate_disk & mask)
     if gate_iys.size == 0:
         # Defensive: snap to the cell nearest the requested gate center
+        # The solver used this cell, not the configured orifice: show that.
+        geom.valve_marker_mm = None
         ic_y = int(np.argmin(np.abs(yy[:, 0] - y_gate_center)))
         ic_x = int(np.argmin(np.abs(xx[0, :] - cx)))
         if mask[ic_y, ic_x]:
@@ -1329,6 +1337,8 @@ def build_film_gate2_geometry(cfg: FilmGate2Config) -> Geometry:
     )
     if valve_iys.size == 0:
         # Defensive: snap to the single cell nearest the valve point.
+        # The solver used this cell, not the configured orifice: show that.
+        geom.valve_marker_mm = None
         ic_y = int(np.argmin(np.abs(yy[:, 0] - y_c)))
         ic_x = int(np.argmin(np.abs(xx[0, :] - x_g)))
         if mask[ic_y, ic_x]:

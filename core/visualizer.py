@@ -95,9 +95,9 @@ def gate_groups_mm(geometry: Geometry) -> list[tuple[float, float, float]]:
     return groups
 
 
-def _draw_gate_markers(
+def draw_gate_markers(
     ax,
-    result: FlowResult,
+    geometry: Geometry,
     *,
     color: str = "red",
     edgecolor: str = "white",
@@ -109,9 +109,10 @@ def _draw_gate_markers(
     The disk is a data-space ``Circle`` — its diameter on the page is the
     orifice diameter in mm, like the cavity around it — so the marker reads
     as "the Φ3 valve" instead of a symbol of arbitrary size. Per-cell
-    markers used to stack several offset circles on one valve.
+    markers used to stack several offset circles on one valve. Shared by
+    every result map and by the sidebar thickness preview in ``app.py``.
     """
-    for k, (cx, cy, r) in enumerate(gate_groups_mm(result.geometry)):
+    for k, (cx, cy, r) in enumerate(gate_groups_mm(geometry)):
         ax.add_patch(
             Circle(
                 (cx, cy),
@@ -123,6 +124,10 @@ def _draw_gate_markers(
                 label=label if (label and k == 0) else None,
             )
         )
+
+
+def _draw_gate_markers(ax, result: FlowResult, **kwargs) -> None:
+    draw_gate_markers(ax, result.geometry, **kwargs)
 
 
 def _draw_geometry(ax, result: FlowResult) -> None:
@@ -510,7 +515,6 @@ def render_pressure_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.display_origin_mm()
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
@@ -691,7 +695,6 @@ def render_skin_layer_map(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extent = _base_extent(result)
     g = result.geometry
-    x0, y0 = g.display_origin_mm()
 
     s_field = np.where(g.mask, result.skin_thickness_mm, np.nan)
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
@@ -872,7 +875,6 @@ def render_layer_map(
         norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     extent = _base_extent(result)
-    x0, y0 = g.display_origin_mm()
     fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
     _draw_geometry(ax, result)
     im = ax.imshow(

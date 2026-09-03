@@ -836,6 +836,29 @@ def test_gate_marker_is_the_nominal_orifice_even_when_the_mask_clips_it() -> Non
     assert rr < 0.85 * spec.valve.orifice_diameter / 2.0  # half the cells, smaller radius
 
 
+def test_snapped_gate_draws_the_cell_the_solver_used_not_the_nominal_orifice() -> None:
+    """An orifice too small to cover any cell center snaps to the nearest
+    in-mask cell. The marker must then follow the raster (the cell where
+    τ = 0 was applied), not the configured Φ at a center the solver never
+    used (code-review on PR #80)."""
+    from core.visualizer import gate_groups_mm
+
+    spec = _minimal_spec()
+    d = spec.to_dict()
+    d["valve"]["orifice_diameter"] = 0.2
+    d["valve"]["t"] = 20.25  # center between cell rows on a 1 mm grid
+    spec = GateProfileSpec.from_dict(d)
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    assert len(g.gates) == 1
+    assert g.valve_marker_mm is None
+    (gx, gy, gr) = gate_groups_mm(g)[0]
+    iy, ix = g.gates[0]
+    x0, y0 = g.display_origin_mm()
+    assert gx + x0 == pytest.approx((ix + 0.5) * g.cell_size_mm)
+    assert gy + y0 == pytest.approx((iy + 0.5) * g.cell_size_mm)
+    assert gr == pytest.approx(np.sqrt(1 / np.pi))
+
+
 def test_display_origin_x_follows_a_symmetric_valve_offset() -> None:
     """symmetric spec with valve.w != 0: x = 0 on the offset valve axis."""
     spec = _minimal_spec()

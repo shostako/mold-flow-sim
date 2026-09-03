@@ -53,16 +53,6 @@ def _base_extent(result: FlowResult) -> list[float]:
     return [-x0, w_mm - x0, -y0, h_mm - y0]
 
 
-def _gate_xy_mm(result: FlowResult, iy: int, ix: int) -> tuple[float, float]:
-    """Cell (iy, ix) center in mm, in the product-referenced display frame."""
-    g = result.geometry
-    x0, y0 = g.display_origin_mm()
-    return (
-        (ix + 0.5) * g.cell_size_mm - x0,
-        (iy + 0.5) * g.cell_size_mm - y0,
-    )
-
-
 def gate_groups_mm(geometry: Geometry) -> list[tuple[float, float, float]]:
     """One ``(x_mm, y_mm, radius_mm)`` per 4-connected group of gate cells.
 

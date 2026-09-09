@@ -125,8 +125,10 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.latex(r"-\,\nabla \cdot \left( S\, \nabla \tau \right) = 1 \quad \text{in cavity}")
     st.markdown(
         "- ゲートで $\\tau = 0$（ディリクレ境界）、キャビティ壁で no-flux（ノイマン境界）\n"
-        "- 解いた $\\tau$ を最大値で正規化し、絶対時間に換算: "
-        r"$t_{\text{fill}}(x,y) = \dfrac{\tau(x,y)}{\tau_{\max}} \cdot T_{\text{fill}}$"
+        "- 解いた $\\tau$ は**順序**だけを使い、絶対時間は体積 CDF 写像で与える（v0.25.0）: "
+        "セルの充填時刻 ＝ そのセル以下の $\\tau$ を持つセル群の体積 $/\\,Q$。"
+        "定率射出なら先端は注入体積に比例して進むので、これが物理そのもの\n"
+        r"$t_{\text{fill}}(\mathbf{x}) = \dfrac{1}{Q}\int_{\tau(\boldsymbol{\xi}) \le \tau(\mathbf{x})} h\,dA$"
         "\n- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$（射出率一定）\n"
         "- 流動先端の進行は $\\tau$ の等値線として可視化"
     )
@@ -163,7 +165,9 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- スキンが出会う年齢 $t_c$ に役務が届いたセル＝**封止**（充填後に閉じた、赤マーク）。閉じた後に届くセルは**未充填**（充填時間なし）"
     )
 
-    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（推奨・極薄向け既定）")
+    st.markdown(
+        "### 5. 壁面冷却モデル B：層別 N 層離散化（選択式。二相ショートショットとは併用不可）"
+    )
     st.markdown(
         "厚み方向を $N$ 層に離散化し、**各層に固有の温度・粘度・剪断速度** を持たせる。"
         "スキン層モデルが「壁面凍結フロント」しか扱わないのに対し、こちらは**コア内部の温度・粘度プロファイル**"
@@ -186,8 +190,8 @@ with st.expander("📐 使用している方程式と適用範囲"):
     )
     st.markdown(
         "両壁から育つ熱境界層の重ね合わせ。長時間極限の数値発散を避けるため "
-        r"$T_k \ge T_{\text{mold}}$ で clamp。$t_{\text{arr}}(x,y) = (\tau/\tau_{\max}) \cdot T_{\text{fill}}$"
-        " はセル到達時間。"
+        r"$T_k \ge T_{\text{mold}}$ で clamp。$t_{\text{arr}}(x,y)$"
+        " は §2 の体積 CDF 写像によるセル到達時間。"
     )
 
     st.markdown("**5-3. 層別剪断速度（Poiseuille 解析微分）**")
@@ -1722,7 +1726,7 @@ with st.sidebar:
         wall_model = st.radio(
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
-            index=0,
+            index=1,
             key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
@@ -1735,14 +1739,19 @@ with st.sidebar:
                 "コア層 h_core=h-2s だけが流れる（露光時計、役務平均）。封止と未充填も検出。\n"
                 "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
                 "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
-                "極薄プレート (t<0.5mm) では層別を推奨。"
+                "既定はスキン層（二相ショートショットと併用可）。温度まで効かせるなら層別"
+                "（二相とは併用不可）。"
             ),
         )
 
         # default container (so downstream `solver = HeleShawSolver(...)` /
         # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-        # 既定モードは『なし』(index=0) — 二相ショートショット（計量律速、凍結なし）
-        # を既定 ON にしているため。層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
+        # 既定モードは『スキン層』(index=1)。v0.37.0 でスキン層が二相ショートショットの
+        # 射出相に乗るようになったので、既定 ON の二相と両立する。『なし』は η が定数で
+        # S ∝ h³ になり、材料も温度も充填順序に効かない（形状と Q だけで決まる）。
+        # スキン層で効くのは材料の熱拡散率 α（s = c·√(αt)）で、T_melt / T_mold は
+        # 依然として効かない — 温度まで効かせるには層別（二相とは併用不可）。
+        # 層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
         #   層数 N: 7 (壁勾配が急なので N=5 から増量)
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
         skin_on = wall_model == "skin"

@@ -24,13 +24,15 @@ def _texts(at: AppTest) -> str:
     return "\n".join(parts)
 
 
-def test_the_defaults_are_two_phase_on_with_icm_and_no_wall_model():
-    """UI defaults (v0.29.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
-    model 'none' -- the combination the two-phase model actually runs in."""
+def test_the_defaults_are_two_phase_on_with_icm_and_skin_wall_model():
+    """UI defaults (v0.39.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
+    model 'skin' -- the skin layer rides on the two-phase injection phase
+    since v0.37.0, and 'none' (constant eta, S ~ h^3) lets neither material
+    nor temperature touch the fill order."""
     at = _app()
     assert at.checkbox(key="two_phase_on").value is True
     assert at.checkbox(key="icm_on").value is True
-    assert at.radio(key="wall_model").value == "none"
+    assert at.radio(key="wall_model").value == "skin"
     stroke = [s for s in at.slider if str(s.label).startswith("圧縮ストローク")]
     assert len(stroke) == 1 and stroke[0].value == 0.50
 

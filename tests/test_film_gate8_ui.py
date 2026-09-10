@@ -24,6 +24,18 @@ APP = Path(__file__).resolve().parent.parent / "app.py"
 FILM_GATE8_LABEL = "Film gate 8 (T字/横ランナー+縦ランナー)"
 DX = 0.5
 
+# 肉盗み in front of the vertical runner: flat plateau at the land depth that
+# splits the flow -- base 5 wide at the ramp head (t=1, land side), apex on the
+# centreline at the ramp foot (t=2, where the runner's resin arrives). In BOTH
+# fans -- overlapping fans take the deeper value, so one alone is overwritten.
+T_GATE_ISLAND = {
+    "angle_deg": 0.0,
+    "inner_line": [[1.0, 0.0], [2.0, 0.0]],
+    "outer_line": [[1.0, 2.5], [2.0, 0.01]],
+    "end_dist": 2.0,
+    "floor_depth": 0.35,
+}
+
 T_GATE_SPEC = {
     "name": "hamoko_gate_T_20260910",
     "units": "mm",
@@ -36,11 +48,13 @@ T_GATE_SPEC = {
             "inner_wall_line": [[1.0, 0.0], [4.0, 0.0]],
             "outer_wall_line": [[1.0, 149.0], [4.0, 149.0]],
             "tip_t": 4.0,
+            "island": T_GATE_ISLAND,
         },
         {
             "inner_wall_line": [[1.0, 0.0], [23.0, 0.0]],
             "outer_wall_line": [[1.0, 2.5], [23.0, 2.5]],
             "tip_t": 23.0,
+            "island": T_GATE_ISLAND,
         },
     ],
     "well": {
@@ -118,7 +132,11 @@ def test_default_sliders_reproduce_the_t_gate_spec(film_gate8_run):
     assert len(got.sub_gates) == 2
     for fan, ref in zip(got.sub_gates, expected.sub_gates):
         assert fan.tip_t == ref.tip_t
-        assert fan.island is None and not fan.edge_channels
+        assert not fan.edge_channels
+        assert fan.island.angle_deg == 0.0 and fan.island.floor_depth == 0.35
+        assert fan.island.end_dist == ref.island.end_dist
+        assert np.asarray(fan.island.inner_line) == pytest.approx(np.asarray(ref.island.inner_line))
+        assert np.asarray(fan.island.outer_line) == pytest.approx(np.asarray(ref.island.outer_line))
         assert np.asarray(fan.inner_wall_line) == pytest.approx(np.asarray(ref.inner_wall_line))
         assert np.asarray(fan.outer_wall_line) == pytest.approx(np.asarray(ref.outer_wall_line))
     assert got.well.t_range == expected.well.t_range
@@ -152,6 +170,16 @@ def test_the_pocket_is_a_t(film_gate8_run):
     assert h[_cell(3.75, 100.25)] == pytest.approx(2.0)
     assert h[_cell(3.75, -148.75)] == pytest.approx(2.0)
     assert not geom.mask[_cell(4.25, 100.25)]
+    # 肉盗み: on the axis the ramp rows are the 0.35 plateau. The triangle is
+    # wide at the land (half-width 1.875 at t=1.25: w=±1.75 in, ±2.25 out) and
+    # narrows to the apex at the floor (half-width 0.625 at t=1.75: w=±0.25 in,
+    # ±0.75 out) -- the point faces the vertical runner.
+    tan_r = np.tan(np.radians(58.78))
+    assert h[_cell(1.25, 0.25)] == pytest.approx(0.35)
+    assert h[_cell(1.25, -1.75)] == pytest.approx(0.35)
+    assert h[_cell(1.25, 2.25)] == pytest.approx(0.35 + tan_r * 0.25, abs=1e-6)
+    assert h[_cell(1.75, 0.25)] == pytest.approx(0.35)
+    assert h[_cell(1.75, 0.75)] == pytest.approx(0.35 + tan_r * 0.75, abs=1e-6)
     # stem: full 5 mm right behind the bar and half-way to the well, steel beside it
     for t in (4.25, 10.25):
         assert h[_cell(t, 2.25)] == pytest.approx(2.0)
@@ -192,6 +220,13 @@ def test_ramp_angle_and_stem_follow_the_sliders():
     rec = _recorded_spec(at)
     assert rec["main_ramp"] == {"angle_deg": 47.07, "cap_depth": 2.5}  # atan((2.5 − 0.35) / 2)
     bar, stem = rec["sub_gates"]
+    # island follows the new ramp: base at land depth (t=1), apex where the
+    # ramp reaches 2.5 = t 1 + 2 = 3; both fans carry the same island
+    assert bar["island"] == stem["island"]
+    assert bar["island"]["floor_depth"] == 0.35
+    assert bar["island"]["inner_line"] == [[1.0, 0.0], [3.0, 0.0]]
+    assert bar["island"]["outer_line"] == [[1.0, 2.5], [3.0, 0.01]]
+    assert bar["island"]["end_dist"] == 3.0
     assert bar["tip_t"] == 6.0 and bar["outer_wall_line"] == [[1.0, 149.0], [6.0, 149.0]]
     assert stem["tip_t"] == 25.5 and stem["outer_wall_line"] == [[1.0, 4.0], [25.5, 4.0]]
     assert rec["valve"]["t"] == 24.0
@@ -229,6 +264,65 @@ def test_stem_reaches_a_well_placed_beyond_the_valve():
     assert rec["valve"]["t"] == 10.0 and rec["well"]["t_range"] == [40.0, 50.0]
     assert rec["sub_gates"][1]["tip_t"] == 44.5  # well start + half-width, not valve + radius
     assert "mfs_result" in at.session_state
+
+
+def test_island_can_be_switched_off():
+    at = _film_gate8_app()
+    at.checkbox(key="f8_island_on").set_value(False)
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    assert all(sg["island"] is None for sg in rec["sub_gates"])
+    h = at.session_state["mfs_geom"].thickness_mm
+    assert h[_cell(1.75, 0.25)] == pytest.approx(0.35 + np.tan(np.radians(58.78)) * 0.75, abs=1e-6)
+
+
+def test_island_depths_and_width_follow_the_sliders():
+    """Top depth 0.8 puts the base where the ramp reaches 0.8 (t = 1 + 0.45/1.65
+    ≈ 1.2727), foot depth 1.5 puts the apex at t ≈ 1.697; the plateau is 0.8
+    and the ramp stays untouched before the base and beyond the apex."""
+    at = _film_gate8_app()
+    _slider(at, "肉盗み 底辺幅").set_value(8.0).run()
+    _slider(at, "肉盗み 天面深さ").set_value(0.8).run()
+    _slider(at, "肉盗み 足の深さ").set_value(1.5).run()
+    at.button[0].click().run()
+    assert not at.exception
+    isl = _recorded_spec(at)["sub_gates"][0]["island"]
+    t_base, t_apex = 1.0 + 0.45 / 1.65, 1.0 + 1.15 / 1.65
+    assert isl["floor_depth"] == 0.8
+    assert np.asarray(isl["inner_line"]) == pytest.approx(
+        np.asarray([[t_base, 0.0], [t_apex, 0.0]]), abs=1e-4
+    )
+    assert np.asarray(isl["outer_line"]) == pytest.approx(
+        np.asarray([[t_base, 4.0], [t_apex, 0.01]]), abs=1e-4
+    )
+    assert isl["end_dist"] == pytest.approx(t_apex, abs=1e-4)
+    # At 0.5 mm the ramp rows are t = 1.25 (before the base) and 1.75 (past
+    # the apex): both must be the untouched ramp. The plateau itself falls
+    # between the cell centres here; its cells are pinned at 0.1 mm in
+    # tests/test_geometry_twin_fan.py.
+    h = at.session_state["mfs_geom"].thickness_mm
+    tan_r = np.tan(np.radians(58.78))
+    assert h[_cell(1.75, 0.25)] == pytest.approx(0.35 + tan_r * 0.75, abs=1e-6)
+    assert h[_cell(1.25, 0.25)] == pytest.approx(0.35 + tan_r * 0.25, abs=1e-6)
+
+
+def test_island_sliders_keep_min_below_max_at_the_shallowest_bar():
+    """bar depth min is land + 0.3 so top ∈ [land, bar − 0.2] and foot ∈
+    [top + 0.1, bar] both keep a range; a min == max slider would raise and
+    drop the rest of the sidebar."""
+    at = _film_gate8_app()
+    bar = _slider(at, "横ランナー深さ")
+    assert bar.min == pytest.approx(0.65)
+    bar.set_value(0.65).run()
+    assert not at.exception
+    top = _slider(at, "肉盗み 天面深さ")
+    assert top.min < top.max
+    top.set_value(top.max).run()
+    foot = _slider(at, "肉盗み 足の深さ")
+    assert foot.min < foot.max
+    at.button[0].click().run()
+    assert not at.exception
 
 
 def test_film_gate_8_sliders_do_not_leak_into_film_gate_1():

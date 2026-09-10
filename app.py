@@ -544,6 +544,16 @@ class _TGateDefaults:
     stem_width: float  # ⑤
     well_wall_angle_deg: float
     cell_size: float  # the bar is 4 mm deep in t; 1.0 mm cells alias its land/ramp rows
+    # 肉盗み in front of the vertical runner (added 2026/9/10): a flat
+    # triangular plateau on the ramp that splits the flow arriving from the
+    # vertical runner. Apex (narrow end) on the centreline where the ramp
+    # reaches ``island_foot_depth`` -- the runner side, where the resin
+    # arrives -- base ``island_width`` wide where it reaches
+    # ``island_top_depth`` (the land side); the plateau is at the top depth.
+    island_on: bool
+    island_width: float
+    island_top_depth: float | None  # None = land depth
+    island_foot_depth: float | None  # None = bar depth
 
 
 # hamoko_gate_T_20260910: the chairman's hand sketch "T字ゲート" (2026/9/10).
@@ -557,7 +567,16 @@ _FILM_GATE8_DEFAULTS = _TGateDefaults(
     stem_width=5.0,
     well_wall_angle_deg=60.0,
     cell_size=0.5,
+    island_on=True,
+    island_width=5.0,
+    island_top_depth=None,
+    island_foot_depth=None,
 )
+
+# The island's outer line has to start strictly outside the inner one at the
+# apex (validate() checks the two lines never touch), so the triangle's tip is
+# this wide -- far below any mesh the UI offers, so no cell ever sees it.
+_T_GATE_ISLAND_APEX_W = 0.01
 
 
 def _tagged_widgets(tag: str):
@@ -1397,7 +1416,11 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
         )
         # validate() needs 0 < ramp angle < 89°: the bar must be deeper than
         # the land, and the steepest offer (depth span 9.9 over 0.2) is 88.8°.
-        bar_min = float(v["land_depth"] + 0.1)
+        # 0.3 rather than 0.1 so the 肉盗み depth sliders below (top ∈ [land,
+        # bar − 0.2], foot ∈ [top + 0.1, bar]) always keep min < max -- a
+        # slider with min == max raises and takes the rest of the sidebar
+        # with it.
+        bar_min = float(v["land_depth"] + 0.3)
         v["bar_depth"] = slider(
             "横ランナー深さ ② [mm] (> ランド深さ)",
             min_value=bar_min,
@@ -1445,6 +1468,50 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
             help="横ランナー奥端から井戸まで走る中央の帯。深さは横ランナーと同じ ②。下限はメッシュで解像できる幅。",
         )
 
+        st.markdown("**肉盗み（縦ランナー正面の三角台）**")
+        v["island_on"] = st.checkbox(
+            "肉盗みを有効化",
+            value=bool(d.island_on),
+            key=f"{tag}_island_on",
+            help=(
+                "ランプ上に置く平らな三角の台。頂点（細い側）は中心線上でランプが足の深さに達する t（縦ランナー側）、"
+                "底辺はランプが天面深さに達する t（ランド側）。縦ランナーから来た樹脂を頂点で左右に分ける楔。"
+            ),
+        )
+        if v["island_on"]:
+            v["island_width"] = slider(
+                "肉盗み 底辺幅 [mm]",
+                1.0,
+                float(max(1.5, min(30.0, math.floor(gew / 2.0)))),
+                float(min(max(d.island_width, 1.0), min(30.0, math.floor(gew / 2.0)))),
+                step=0.5,
+                help="左右の頂点を結ぶ長さ（底辺はランド側、天面深さの位置）。",
+            )
+            top_default = float(
+                d.island_top_depth if d.island_top_depth is not None else v["land_depth"]
+            )
+            top_max = float(round(v["bar_depth"] - 0.2, 2))
+            v["island_top_depth"] = slider(
+                "肉盗み 天面深さ（上限の頂点）[mm]",
+                float(v["land_depth"]),
+                top_max,
+                float(min(max(top_default, v["land_depth"]), top_max)),
+                step=0.05,
+                help="台の天面 = 流路厚。既定はランド深さ（底辺がランド終端に来る）。深くすると底辺がランプの奥へ動く。",
+            )
+            foot_default = float(
+                d.island_foot_depth if d.island_foot_depth is not None else v["bar_depth"]
+            )
+            foot_min = float(round(v["island_top_depth"] + 0.1, 2))
+            v["island_foot_depth"] = slider(
+                "肉盗み 足の深さ（下限の頂点）[mm]",
+                foot_min,
+                float(v["bar_depth"]),
+                float(min(max(foot_default, foot_min), v["bar_depth"])),
+                step=0.05,
+                help="頂点を置く位置をランプの深さで指定。既定は横ランナー深さ（頂点が床の始まり＝縦ランナーの出口に来る）。",
+            )
+
         _well_inputs(tag, v, symmetric=True, wall_angle_deg=d.well_wall_angle_deg)
         well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"]) if v["well_on"] else v["bar_end_t"] + 17.5
 
@@ -1486,15 +1553,38 @@ def _t_gate_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfilePla
     stem_tip = float(v["valve_t"]) + float(v["valve_d"]) / 2.0
     if v["well_on"]:
         stem_tip = max(stem_tip, float(v["well_t1"]) + float(v["well_half_w"]))
+    island = None
+    if v.get("island_on"):
+        # Where the ramp centreline reaches each depth: t = land + ramp_len ·
+        # (depth − land) / (bar − land). The triangle's base sits at the
+        # top-depth point (land side) and its apex at the foot-depth point
+        # (vertical-runner side), so the resin arriving from the runner meets
+        # the point and splits.
+        land_d, bar_d = float(v["land_depth"]), float(v["bar_depth"])
+        ramp_len = float(v["ramp_length"])
+        top_d, foot_d = float(v["island_top_depth"]), float(v["island_foot_depth"])
+        t_base = round(t_land + ramp_len * (top_d - land_d) / (bar_d - land_d), 4)
+        t_apex = round(t_land + ramp_len * (foot_d - land_d) / (bar_d - land_d), 4)
+        island = SubIslandSpec(
+            angle_deg=0.0,
+            inner_line=((t_base, 0.0), (t_apex, 0.0)),
+            outer_line=((t_base, float(v["island_width"]) / 2.0), (t_apex, _T_GATE_ISLAND_APEX_W)),
+            end_dist=t_apex,
+            floor_depth=top_d,
+        )
+    # Overlapping fans take the deeper value, so the plateau has to be in both
+    # the bar and the stem -- in one alone the other fan's ramp wins.
     bar = SubGateSpec(
         inner_wall_line=((t_land, 0.0), (bar_end, 0.0)),
         outer_wall_line=((t_land, w_full), (bar_end, w_full)),
         tip_t=bar_end,
+        island=island,
     )
     stem = SubGateSpec(
         inner_wall_line=((t_land, 0.0), (stem_tip, 0.0)),
         outer_wall_line=((t_land, half_stem), (stem_tip, half_stem)),
         tip_t=stem_tip,
+        island=island,
     )
     spec = GateProfileSpec(
         name=name,

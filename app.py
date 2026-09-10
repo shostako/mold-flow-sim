@@ -131,7 +131,8 @@ with st.expander("📐 使用している方程式と適用範囲"):
         r"$t_{\text{fill}}(\mathbf{x}) = T_{\text{fill}} \cdot \dfrac{V(\tau \le \tau(\mathbf{x}))}{V_{\text{solved}}}$"
         "\n- $V_{\\text{solved}}$ は充填可能なセルの体積。封止で切られた未充填セルは含まないので、"
         "ショートショット時は最後に届くセルが $T_{\\text{fill}}$ を持つ\n"
-        "- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$ は**定率射出・圧縮なし・壁面冷却なし**のとき。"
+        "- $T_{\\text{fill}} = V_{\\text{solved}} / Q$ は**定率射出・圧縮なし**のとき"
+        "（壁面冷却なし、またはスキン層の「速度制御」時計）。"
         "射出圧縮 ON なら §7 の等価モデルで短縮され、スキン層の「圧力一定」時計と層別の熱結合は"
         "体積重み付き $\\tau$ の比（抵抗比）で膨張させる（そのとき $t_{\\text{fill}}$ は $V/Q$ で割った値ではない）\n"
         "- 流動先端の進行は $\\tau$ の等値線として可視化"
@@ -1758,7 +1759,7 @@ with st.sidebar:
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
         skin_on = wall_model == "skin"
         c_skin = 0.0
-        skin_max_iter = 5
+        skin_max_iter = 20
         skin_tol = 1e-3
         skin_clock_mode = "constant_pressure"
         multilayer_on = wall_model == "multilayer"
@@ -1780,9 +1781,14 @@ with st.sidebar:
             skin_max_iter = st.slider(
                 "fixed-point 反復上限",
                 1,
-                10,
-                5,
-                help="τ ↔ h_core 結合の反復回数。3〜5で十分なケースが多い。",
+                40,
+                20,
+                help=(
+                    "τ ↔ h_core 結合の反復回数。ソルバ既定と同じ 20。圧力一定時計では封止が"
+                    "雪崩（スキン↑→抵抗↑→T_fill↑→スキン↑）になることがあり、途中で打ち切ると"
+                    "半分凍った絵が収束したように見える（テストで 9 反復要した例あり）。"
+                    "未収束なら結果ペインに警告が出る。"
+                ),
             )
             skin_tol_log10 = st.slider(
                 "収束判定 log10(tol)",
@@ -2568,6 +2574,19 @@ if "mfs_result" in st.session_state:
 
         if skin_path is not None and core_path is not None:
             with st.expander("スキン層 / コア層 / ショートショット"):
+                md = result.metadata
+                st.caption(
+                    f"反復={md.get('skin_iterations')}, 収束={md.get('skin_converged')}, "
+                    f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
+                    f"封止セル={md.get('short_shot_cells', 0)}, "
+                    f"未充填セル={md.get('unfillable_cells', 0)}"
+                )
+                if md.get("skin_converged") is False:
+                    st.warning(
+                        "スキン層の fixed-point 反復が上限で打ち切られた。表示は途中状態で、"
+                        "封止・未充填が実際より少なく見えることがある。反復上限を上げるか、"
+                        "時計を「速度制御」にして再実行を。"
+                    )
                 st.image(str(skin_path))
                 st.caption("スキン層厚さ s(x,y) [mm]。流動が遅いほど・薄肉ほど s が大きい。")
                 _download("⬇ スキン層 PNGをダウンロード", skin_path, "image/png", "dl_skin_png")

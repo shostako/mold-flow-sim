@@ -684,3 +684,141 @@ def test_demo_twin_fan_spec_has_no_edge_channels() -> None:
     spec = GateProfileSpec.from_json_file(DEMO_JSON)
     assert all(sg.edge_channels == () for sg in spec.sub_gates)
     assert "edge_channels" not in spec.to_dict()["sub_gates"][0]
+
+
+# ----------------------- flat-floored island (floor_depth) ------------------
+
+
+def _t_gate_dict(floor_depth: float | None = 0.35, **overrides) -> dict:
+    """The T gate: a full-width bar fan and a narrow stem fan, both carrying
+    the same triangular island in front of the stem -- a flow splitter: base
+    5 wide where the ramp reaches ``floor_depth`` (land side), apex on the
+    centreline where it reaches the bar floor (stem side)."""
+    tan_r = (2.0 - 0.35) / 1.0  # 58.78°: land 0.35 -> bar floor 2.0 over 1 mm
+    t_base = 1.0 + ((floor_depth or 0.35) - 0.35) / tan_r
+    island = {
+        "angle_deg": 0.0,
+        "inner_line": [[t_base, 0.0], [2.0, 0.0]],
+        "outer_line": [[t_base, 2.5], [2.0, 0.01]],
+        "end_dist": 2.0,
+    }
+    if floor_depth is not None:
+        island["floor_depth"] = floor_depth
+    base = {
+        "name": "t_gate",
+        "units": "mm",
+        "symmetric": True,
+        "gate_exit_width": 298.0,
+        "land": {"depth": 0.35, "length": 1.0},
+        "main_ramp": {"angle_deg": math.degrees(math.atan(tan_r)), "cap_depth": 2.0},
+        "sub_gates": [
+            {
+                "inner_wall_line": [[1.0, 0.0], [4.0, 0.0]],
+                "outer_wall_line": [[1.0, 149.0], [4.0, 149.0]],
+                "tip_t": 4.0,
+                "island": dict(island),
+            },
+            {
+                "inner_wall_line": [[1.0, 0.0], [23.0, 0.0]],
+                "outer_wall_line": [[1.0, 2.5], [23.0, 2.5]],
+                "tip_t": 23.0,
+                "island": dict(island),
+            },
+        ],
+        "valve": {"t": 21.5, "w": 0.0, "orifice_diameter": 3.0},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_floor_depth_island_is_a_flat_plateau_that_never_deepens_the_ramp() -> None:
+    """Plateau at 0.8: the band is 0.8 where the ramp is deeper, and stays on
+    the ramp (untouched) where the ramp is still shallower than 0.8."""
+    spec = GateProfileSpec.from_dict(_t_gate_dict(floor_depth=0.8))
+    plate = _plate()
+    g = build_profile_gate_geometry(spec, plate, cell_size_mm=0.1)
+    t, wa = _tw(g, spec, plate)
+    tan_r = 2.0 - 0.35
+    ramp = 0.35 + tan_r * (t - 1.0)
+    t_base = 1.0 + (0.8 - 0.35) / tan_r  # ≈ 1.273
+    half_w = 2.5 * (2.0 - t) / (2.0 - t_base)  # the triangle's half-width at t
+    on_plateau = g.mask & (t > t_base + 0.05) & (t < 1.95) & (wa < half_w - 0.05)
+    beside = g.mask & (t > t_base + 0.05) & (t < 1.95) & (wa > half_w + 0.05) & (wa < 20)
+    assert on_plateau.sum() > 50 and beside.sum() > 50
+    assert np.allclose(g.thickness_mm[on_plateau], 0.8)
+    assert np.allclose(g.thickness_mm[beside], ramp[beside], atol=1e-9)
+    # the same footprint without floor_depth (angle 0) would be at land depth
+    ref_d = _t_gate_dict(floor_depth=0.8)
+    for sg in ref_d["sub_gates"]:
+        del sg["island"]["floor_depth"]
+    ref = GateProfileSpec.from_dict(ref_d)
+    g0 = build_profile_gate_geometry(ref, plate, cell_size_mm=0.1)
+    assert np.allclose(g0.thickness_mm[on_plateau], 0.35)
+    # nothing else moves: the stem, the bar floor and the land are identical
+    elsewhere = g.mask & ~on_plateau & ~((t > 1.0) & (t <= 2.0) & (wa <= 2.5))
+    assert np.array_equal(g.mask, g0.mask)
+    assert np.allclose(g.thickness_mm[elsewhere], g0.thickness_mm[elsewhere])
+
+
+def test_floor_depth_island_must_be_in_every_overlapping_fan() -> None:
+    """Overlapping fans take the deeper value, so a plateau in only one of the
+    two fans is overwritten by the other fan's ramp -- the bar's ramp (2.0 at
+    t=2) wins over the stem's plateau. Documented trap, pinned here."""
+    d = _t_gate_dict(floor_depth=0.35)
+    d["sub_gates"][0]["island"] = None
+    spec = GateProfileSpec.from_dict(d)
+    plate = _plate()
+    g = build_profile_gate_geometry(spec, plate, cell_size_mm=0.1)
+    t, wa = _tw(g, spec, plate)
+    near_base = g.mask & (t > 1.05) & (t < 1.15) & (wa < 1.0)  # wide end of the plateau
+    assert near_base.any()
+    assert g.thickness_mm[near_base].min() > 0.4  # the ramp, not the 0.35 plateau
+
+
+def test_floor_depth_island_round_trips_and_is_omitted_when_absent() -> None:
+    spec = GateProfileSpec.from_dict(_t_gate_dict(floor_depth=0.8))
+    d = spec.to_dict()
+    assert d["sub_gates"][0]["island"]["floor_depth"] == 0.8
+    assert GateProfileSpec.from_dict(d) == spec
+    plain = GateProfileSpec.from_dict(_t_gate_dict(floor_depth=None))
+    assert "floor_depth" not in plain.to_dict()["sub_gates"][0]["island"]
+    assert plain.sub_gates[0].island.floor_depth is None
+    # the demo spec is untouched by the new field
+    assert "floor_depth" not in json.dumps(_demo().to_dict())
+
+
+@pytest.mark.parametrize(
+    ("floor_depth", "angle", "match"),
+    [
+        (0.0, 0.0, "floor_depth must be positive"),
+        (-0.2, 0.0, "floor_depth must be positive"),
+        (2.5, 0.0, r"must be ≤ main_ramp\.cap_depth"),
+        (0.8, 2.5, "angle_deg must be 0 when floor_depth"),
+    ],
+)
+def test_floor_depth_island_validation(floor_depth, angle, match) -> None:
+    d = _t_gate_dict(floor_depth=0.8)
+    for sg in d["sub_gates"]:
+        sg["island"]["floor_depth"] = floor_depth
+        sg["island"]["angle_deg"] = angle
+    with pytest.raises(ValueError, match=match):
+        GateProfileSpec.from_dict(d).validate()
+
+
+def test_island_lines_starting_past_the_land_are_checked_clamped_like_the_raster() -> None:
+    """The plateau's base sits where the ramp reaches floor_depth (t ≈ 1.27),
+    so its lines start past land.length. Extrapolating the outer line (which
+    narrows toward the apex) back to the land gives a w above the fan's, the
+    inner one stays 0 -- harmless here, but a line pair that narrows the
+    other way would cross on extrapolation. The rasteriser clamps before the
+    first point, and validate() must see the same shape."""
+    spec = GateProfileSpec.from_dict(_t_gate_dict(floor_depth=0.8))
+    (t1, _), _ = spec.sub_gates[0].island.outer_line
+    assert t1 > spec.land.length + 0.2
+    spec.validate()  # must not raise
+    # ...while a real crossing is still caught
+    d = _t_gate_dict(floor_depth=0.8)
+    for sg in d["sub_gates"]:
+        sg["island"]["outer_line"] = [[sg["island"]["outer_line"][0][0], 2.5], [2.0, -1.0]]
+    with pytest.raises(ValueError, match="outer_line must stay outside inner_line"):
+        GateProfileSpec.from_dict(d).validate()

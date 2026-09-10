@@ -37,7 +37,10 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    ``outer_wall_line`` in the (t, w) plane and ending at ``tip_t``. Inside a
    fan the depth is the land + main ramp, optionally overridden by the fan's
    own ``island`` (a shallow band between ``inner_line`` and ``outer_line``,
-   ending at ``end_dist``). Everything outside the fans is steel at the PL:
+   ending at ``end_dist``; with ``floor_depth`` the band is a flat plateau at
+   ``min(ramp, floor_depth)`` instead of a shallow ramp — the T gate's
+   肉盗み in front of the vertical runner). Everything outside the fans is
+   steel at the PL:
    with two mirrored fans whose inner walls meet on the land at ``w=0`` the
    steel between them is the "deformed rhombus" full cut-out. Exactly one of
    ``outer_wall_line`` / ``sub_gates`` must be given.
@@ -168,6 +171,13 @@ class SubIslandSpec:
     inner_line: Line
     outer_line: Line
     end_dist: float
+    # Flat-floored variant: inside the band the channel is
+    # ``min(ramp depth, floor_depth)`` -- a plateau at ``floor_depth`` that
+    # never deepens the ramp (where the ramp is still shallower the band
+    # leaves it alone, so the plateau's upstream tip is where the ramp
+    # reaches ``floor_depth``). ``angle_deg`` must be 0 when this is set.
+    # Used by the T gate's 肉盗み in front of the vertical runner.
+    floor_depth: float | None = None
 
 
 @dataclass(frozen=True)
@@ -482,13 +492,20 @@ class GateProfileSpec:
                 si_d = _section(sg_d, "island", required=False)
                 if si_d is not None:
                     _check_unknown(
-                        si_d, {"angle_deg", "inner_line", "outer_line", "end_dist"}, f"{p}.island"
+                        si_d,
+                        {"angle_deg", "inner_line", "outer_line", "end_dist", "floor_depth"},
+                        f"{p}.island",
                     )
                     sub_island = SubIslandSpec(
                         angle_deg=_num(si_d, "angle_deg", f"{p}.island."),
                         inner_line=_line(si_d, "inner_line", f"{p}.island."),
                         outer_line=_line(si_d, "outer_line", f"{p}.island."),
                         end_dist=_num(si_d, "end_dist", f"{p}.island."),
+                        floor_depth=(
+                            _num(si_d, "floor_depth", f"{p}.island.")
+                            if si_d.get("floor_depth") is not None
+                            else None
+                        ),
                     )
                 sub_gates.append(
                     SubGateSpec(
@@ -610,6 +627,8 @@ class GateProfileSpec:
                         "outer_line": [list(p) for p in sg.island.outer_line],
                         "end_dist": sg.island.end_dist,
                     }
+                    if sg.island.floor_depth is not None:
+                        sg_d["island"]["floor_depth"] = sg.island.floor_depth
                 if sg.edge_channels:
                     sg_d["edge_channels"] = [_edge_channel_dict(ec) for ec in sg.edge_channels]
                 d["sub_gates"].append(sg_d)
@@ -837,11 +856,33 @@ class GateProfileSpec:
                         raise ValueError(
                             f"{p}.island.{label} t must be increasing, got {t1} → {t2}"
                         )
+                # Evaluate the lines the way the rasteriser does -- clamped to
+                # the first point's w before it, not extrapolated. A line that
+                # starts past the land (the T gate's 肉盗み tip sits where the
+                # ramp reaches the plateau depth) extrapolates to a negative w
+                # at land.length and would be rejected for a crossing that the
+                # raster never draws.
                 for t_chk in (self.land.length, si.end_dist):
-                    if _line_w(si.outer_line, t_chk) <= _line_w(si.inner_line, t_chk) + _EPS:
+                    if _edge_w(si.outer_line, t_chk) <= _edge_w(si.inner_line, t_chk) + _EPS:
                         raise ValueError(
                             f"{p}.island: outer_line must stay outside inner_line over "
                             f"[land.length, end_dist]; they cross by t = {t_chk}"
+                        )
+                if si.floor_depth is not None:
+                    if not si.floor_depth > 0:
+                        raise ValueError(
+                            f"{p}.island.floor_depth must be positive, got {si.floor_depth}"
+                        )
+                    if si.floor_depth > self.main_ramp.cap_depth + _EPS:
+                        raise ValueError(
+                            f"{p}.island.floor_depth ({si.floor_depth}) must be ≤ "
+                            f"main_ramp.cap_depth ({self.main_ramp.cap_depth}); "
+                            "the island is the shallow side"
+                        )
+                    if si.angle_deg != 0:
+                        raise ValueError(
+                            f"{p}.island.angle_deg must be 0 when floor_depth is set "
+                            f"(the floor is flat), got {si.angle_deg}"
                         )
             _validate_edge_channels(
                 sg.edge_channels,
@@ -1328,7 +1369,12 @@ def build_profile_gate_geometry(
                     & (wa >= w_si_in)
                     & (wa <= w_si_out)
                 )
-                d_fan = np.where(in_si, land_depth + tan_si * (t - land_len), d_base)
+                if si.floor_depth is not None:
+                    # Plateau: never deeper than the ramp it sits on.
+                    d_si = np.minimum(d_base, si.floor_depth)
+                else:
+                    d_si = land_depth + tan_si * (t - land_len)
+                d_fan = np.where(in_si, d_si, d_base)
             d_fan = _apply_edge_channels(
                 sg.edge_channels,
                 walls={

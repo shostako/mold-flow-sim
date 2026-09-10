@@ -522,6 +522,44 @@ _FILM_GATE4_DEFAULTS = _TwinFanDefaults(
 _FILM_GATE5_DEFAULTS = dataclasses.replace(_FILM_GATE4_DEFAULTS, runner_style="L")
 
 
+@dataclasses.dataclass(frozen=True)
+class _TGateDefaults:
+    """Film gate 8: T-shaped gate -- a full-width runner bar behind the film
+    land (the T's crossbar) and one centre stem down to the valve well (the
+    T's upright). Both are built as ``sub_gates``: the bar is a rectangle
+    ``w ≤ exit/2, t ≤ bar_end_t`` and the stem a rectangle ``w ≤ stem/2``
+    running from the land past the valve, so the junction is square (a
+    ``runner`` capsule would round it or, started far enough back to keep
+    the round end out of the land, notch it). The depth in both is the
+    land + ramp capped at ``bar_depth`` -- one depth ② for bar and stem, as
+    the sketch dimensions it.
+    """
+
+    gate_exit_width: float
+    land_depth: float
+    land_length: float
+    ramp_length: float  # land end -> bar floor (the sketch's 1 mm)
+    bar_depth: float  # ② floor of the bar and the stem
+    bar_end_t: float  # PL-side far edge of the bar (sketch: floor to 3.5, sloped wall to 4.0)
+    stem_width: float  # ⑤
+    well_wall_angle_deg: float
+    cell_size: float  # the bar is 4 mm deep in t; 1.0 mm cells alias its land/ramp rows
+
+
+# hamoko_gate_T_20260910: the chairman's hand sketch "T字ゲート" (2026/9/10).
+_FILM_GATE8_DEFAULTS = _TGateDefaults(
+    gate_exit_width=298.0,
+    land_depth=0.35,
+    land_length=1.0,
+    ramp_length=1.0,
+    bar_depth=2.0,
+    bar_end_t=4.0,
+    stem_width=5.0,
+    well_wall_angle_deg=60.0,
+    cell_size=0.5,
+)
+
+
 def _tagged_widgets(tag: str):
     """``st.slider`` / ``st.number_input`` with ``tag``-prefixed keys.
 
@@ -1310,6 +1348,167 @@ def _twin_fan_runner_path(
     return tuple(path)
 
 
+def _t_gate_ramp_angle_deg(land_depth: float, bar_depth: float, ramp_length: float) -> float:
+    """The main-ramp angle that drops from the land to the bar floor over
+    ``ramp_length`` -- the sketch dimensions the drop, not the angle.
+    Rounded to 0.01° like the recorded spec."""
+    return round(math.degrees(math.atan((bar_depth - land_depth) / ramp_length)), 2)
+
+
+def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
+    """Film gate 8: T-shaped gate (full-width runner bar + centre stem).
+
+    The land runs the full gate-exit width, drops over a short ramp into a
+    full-width bar of depth ② (the T's crossbar), and a stem of width ⑤ and
+    the same depth runs from the bar to the valve well (the T's upright).
+    Everything else is steel at the PL. The sketch's trapezoidal bar section
+    (opening 2.5 / floor 1.5) is reduced to the ramp on the product side and
+    a vertical wall at ``bar_end_t`` on the far side.
+    """
+    v: dict = {"symmetric": True}
+    slider, number_input = _tagged_widgets(tag)
+
+    _plate_shape_inputs(tag, v)
+
+    with st.expander("ゲート形状", expanded=False):
+        st.caption(
+            "t = ゲート出口（製品長辺）からの距離、w = バルブ軸からの半幅。左右対称。"
+            "深さ = 流路肉厚。ポケットは全幅のランナー棒（Tの横棒）と中央のステム（Tの縦棒）と井戸だけで、"
+            "それ以外は鋼材が PL に接する。"
+        )
+        gew = slider(
+            "ゲート出口幅 [mm] (≤ 製品幅)",
+            min_value=10.0,
+            max_value=float(v["plate_w"]),
+            value=float(min(d.gate_exit_width, v["plate_w"])),
+            step=1.0,
+        )
+        v["gate_exit_width"] = gew
+
+        st.markdown("**ランド（出口）**")
+        v["land_depth"] = slider("ランド深さ [mm]", 0.1, 2.0, float(d.land_depth), step=0.05)
+        v["land_length"] = slider("ランド長さ [mm]", 0.5, 5.0, float(d.land_length), step=0.1)
+        t_land = float(v["land_length"])
+
+        st.markdown("**ランナー棒（Tの横棒、全幅）**")
+        st.caption(
+            "ランド終端からランプ長で棒の深さ ② まで落ち、奥端 t まで平らな床が続く。"
+            "原図の台形断面（開口 2.5・床 1.5）の手前壁がこのランプ、奥壁は奥端 t の垂直壁に置き換える。"
+        )
+        # validate() needs 0 < ramp angle < 89°: the bar must be deeper than
+        # the land, and the steepest offer (depth span 9.9 over 0.2) is 88.8°.
+        bar_min = float(v["land_depth"] + 0.1)
+        v["bar_depth"] = slider(
+            "棒の深さ ② [mm] (> ランド深さ)",
+            min_value=bar_min,
+            max_value=10.0,
+            value=float(max(d.bar_depth, bar_min)),
+            step=0.1,
+            help="ステムも同じ深さ（原図は両方 ②）。",
+        )
+        v["ramp_length"] = slider(
+            "ランプ長 [mm]（ランド終端 → 棒の床）",
+            0.2,
+            10.0,
+            float(d.ramp_length),
+            step=0.1,
+        )
+        ramp_deg = _t_gate_ramp_angle_deg(
+            float(v["land_depth"]), float(v["bar_depth"]), float(v["ramp_length"])
+        )
+        t_floor = t_land + float(v["ramp_length"])
+        st.caption(f"ランプ角 {ramp_deg:g}°、床は t={t_floor:g} から。")
+        bar_end_min = float(round(t_floor + 0.1, 1))
+        v["bar_end_t"] = slider(
+            "棒の奥端 t [mm] (> ランド長 + ランプ長)",
+            min_value=bar_end_min,
+            max_value=20.0,
+            value=float(max(d.bar_end_t, bar_end_min)),
+            step=0.1,
+            help="棒の PL 側開口の奥端。原図は床 3.5 ＋ 斜め奥壁で PL に 4.0。",
+        )
+
+        st.markdown("**ステム（Tの縦棒、中央）**")
+        # The stem is a fan whose walls are w=0 and w=width/2; it needs at
+        # least one column of cell centres inside, so the floor is one cell
+        # (the mesh slider is drawn below -- read its current value, as the
+        # twin-fan runner does).
+        dx_now = float(st.session_state.get(f"{tag}_メッシュ粗さ [mm/cell]", d.cell_size))
+        stem_w_min = max(1.0, math.ceil(dx_now * 2.0) / 2.0)
+        stem_w_max = max(stem_w_min + 0.5, min(30.0, float(gew) / 2.0))
+        v["stem_width"] = slider(
+            "ステム幅 ⑤ [mm]",
+            float(stem_w_min),
+            float(stem_w_max),
+            float(min(max(d.stem_width, stem_w_min), stem_w_max)),
+            step=0.5,
+            help="棒の奥端から井戸まで走る中央の帯。深さは棒と同じ ②。下限はメッシュで解像できる幅。",
+        )
+
+        _well_inputs(tag, v, symmetric=True, wall_angle_deg=d.well_wall_angle_deg)
+        well_t_mid = 0.5 * (v["well_t1"] + v["well_t2"]) if v["well_on"] else v["bar_end_t"] + 17.5
+
+        st.markdown("**バルブゲート**")
+        v["valve_d"] = slider("バルブゲート径 [mm]", 1.0, 10.0, 3.0, step=0.5)
+        # The stem runs from the land to valve t + radius, so the orifice
+        # always sits in the pocket. Keep the valve past the bar: inside it
+        # there is no stem and the "T" is just a bar.
+        t_min = float(round(v["bar_end_t"] + v["valve_d"] / 2.0, 1))
+        t_max = float(max(t_min + 0.1, 60.0 - v["valve_d"] / 2.0))
+        v["valve_t"] = slider(
+            "バルブ位置 t [mm]",
+            t_min,
+            t_max,
+            float(min(max(round(well_t_mid, 1), t_min), t_max)),
+            step=0.1,
+            help="既定は井戸の中央（原図: 製品端からの距離は従来どおり）。ステムはここまで（＋半径）届く。",
+        )
+
+        v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, float(d.cell_size), step=0.1)
+        st.caption(
+            "この形状の想定解像度は 0.5mm。棒は t 方向に 4mm しかなく、1.0mm だとランドとランプの行が"
+            "1行ずつ太って体積が 2 割増える。"
+        )
+    return v
+
+
+def _t_gate_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfilePlateConfig, float]:
+    """Assemble the spec + plate from ``_t_gate_sidebar`` values."""
+    t_land = float(v["land_length"])
+    w_full = float(v["gate_exit_width"]) / 2.0
+    bar_end = float(v["bar_end_t"])
+    half_stem = float(v["stem_width"]) / 2.0
+    stem_tip = float(v["valve_t"]) + float(v["valve_d"]) / 2.0
+    bar = SubGateSpec(
+        inner_wall_line=((t_land, 0.0), (bar_end, 0.0)),
+        outer_wall_line=((t_land, w_full), (bar_end, w_full)),
+        tip_t=bar_end,
+    )
+    stem = SubGateSpec(
+        inner_wall_line=((t_land, 0.0), (stem_tip, 0.0)),
+        outer_wall_line=((t_land, half_stem), (stem_tip, half_stem)),
+        tip_t=stem_tip,
+    )
+    spec = GateProfileSpec(
+        name=name,
+        units="mm",
+        symmetric=True,
+        gate_exit_width=float(v["gate_exit_width"]),
+        land=LandSpec(depth=float(v["land_depth"]), length=t_land),
+        main_ramp=MainRampSpec(
+            angle_deg=_t_gate_ramp_angle_deg(
+                float(v["land_depth"]), float(v["bar_depth"]), float(v["ramp_length"])
+            ),
+            cap_depth=float(v["bar_depth"]),
+        ),
+        outer_wall_line=None,
+        valve=ValveSpec(t=float(v["valve_t"]), w=0.0, orifice_diameter=float(v["valve_d"])),
+        well=_well_from_inputs(v),
+        sub_gates=(bar, stem),
+    )
+    return spec, _plate_from_inputs(v), float(v["cell_size"])
+
+
 @dataclasses.dataclass(frozen=True)
 class _FilmGate:
     """One entry of the Film gate radio: how to draw its sidebar and build it."""
@@ -1364,6 +1563,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "film_gate_7_parametric",
         lambda: _profile_gate_sidebar("f7", True, _FILM_GATE7_DEFAULTS),
         _profile_gate_from_inputs,
+    ),
+    "Film gate 8 (T字/全幅ランナー棒)": _FilmGate(
+        "f8",
+        "film_gate_8_parametric",
+        lambda: _t_gate_sidebar("f8", _FILM_GATE8_DEFAULTS),
+        _t_gate_from_inputs,
     ),
 }
 

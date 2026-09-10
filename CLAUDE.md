@@ -35,7 +35,8 @@ python run_demo.py
 python run_demo.py --out outputs --cases PP_baseline FilmGate_PP_default
 
 # テスト・lint
-.venv/bin/pytest tests/                        # 92 tests
+.venv/bin/pytest tests/ -n auto --dist loadscope   # 全テスト（pytest-xdist で並列、CI と同条件）
+.venv/bin/pytest tests/test_solver_1d.py       # 1 ファイルだけなら直列のほうが速い
 .venv/bin/ruff check .                         # lint
 .venv/bin/ruff format --check .                # format check（CI と同条件）
 .venv/bin/ruff format .                        # format apply
@@ -420,7 +421,7 @@ git checkout main && git pull
 **push 前に必ず**:
 - `ruff check .` （CI と同じ lint）
 - `ruff format --check .` （format check は CI で別ステップ。`ruff check` だけでは検出されない）
-- `pytest tests/` （56件全部 pass を確認）
+- `pytest tests/ -n auto --dist loadscope` （全部 pass を確認。pytest-xdist、CI も同じ。AppTest 系が 1 件 30 秒級で 60 件超あるので直列だと 20 分 50 秒。`--dist loadscope` は module 単位で配るので module スコープの fixture（既定形状を解く 30〜60 秒）が worker ごとに再実行されない — 4 並列で 5 分 48 秒、既定の `load` だと 10 分 25 秒）
 
 CI 設定: `.github/workflows/ci.yml`。Python 3.11 / 3.12 マトリクスで上記3つを走らせる。Node.js 20 actions の deprecation warning が出るが2026-06-02までは無害。
 

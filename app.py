@@ -1478,7 +1478,14 @@ def _t_gate_from_inputs(name: str, v: dict) -> tuple[GateProfileSpec, ProfilePla
     w_full = float(v["gate_exit_width"]) / 2.0
     bar_end = float(v["bar_end_t"])
     half_stem = float(v["stem_width"]) / 2.0
+    # The stem ends past the valve orifice -- and, when the well is on, no
+    # earlier than the well's first centre point, so a well placed beyond the
+    # valve is not left as an island that check_gate_reachability() rejects
+    # at analysis time (Codex P2 on PR #83). Past that point the stem cells
+    # sit inside the well footprint, so the two pockets share cavity.
     stem_tip = float(v["valve_t"]) + float(v["valve_d"]) / 2.0
+    if v["well_on"]:
+        stem_tip = max(stem_tip, float(v["well_t1"]) + float(v["well_half_w"]))
     bar = SubGateSpec(
         inner_wall_line=((t_land, 0.0), (bar_end, 0.0)),
         outer_wall_line=((t_land, w_full), (bar_end, w_full)),

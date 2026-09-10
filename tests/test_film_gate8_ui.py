@@ -215,6 +215,22 @@ def test_bar_end_and_valve_bounds_follow_the_ramp_and_the_bar():
     assert rec["valve"]["t"] >= 13.5
 
 
+def test_stem_reaches_a_well_placed_beyond_the_valve():
+    """The stem tip follows the valve, but a well past the valve must still
+    be fed: otherwise it is an isolated cavity component and the solver
+    rejects the geometry at analysis time (Codex P2 on PR #83)."""
+    at = _film_gate8_app()
+    _slider(at, "井戸開始 t").set_value(40.0).run()
+    _slider(at, "井戸終端 t").set_value(50.0).run()
+    _slider(at, "バルブ位置").set_value(10.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at)
+    assert rec["valve"]["t"] == 10.0 and rec["well"]["t_range"] == [40.0, 50.0]
+    assert rec["sub_gates"][1]["tip_t"] == 44.5  # well start + half-width, not valve + radius
+    assert "mfs_result" in at.session_state
+
+
 def test_film_gate_8_sliders_do_not_leak_into_film_gate_1():
     at = _film_gate8_app()
     _slider(at, "製品幅").set_value(200.0).run()

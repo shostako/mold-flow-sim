@@ -45,7 +45,11 @@ def test_switching_the_toggle_off_runs_nothing_two_phase():
     assert not at.exception
     assert at.session_state["mfs_two_phase_path"] is None
     assert at.session_state["mfs_two_phase_result"] is None
-    assert "二相ショートショット" not in _texts(at)
+    # 実行時にしか出ない文言だけを見る。静的な説明文（方程式エクスパンダー等）が
+    # 「二相ショートショット」の語を含んでも落ちないように（@claude on PR #81）。
+    texts = _texts(at)
+    assert "二相ショートショット解析はスキップされました" not in texts
+    assert "二相ショートショット（計量制限 + 圧縮前進）" not in texts
 
 
 def test_the_two_phase_run_renders_the_map_and_packs_the_zip():

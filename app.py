@@ -1366,14 +1366,14 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
     a vertical wall at ``bar_end_t`` on the far side.
     """
     v: dict = {"symmetric": True}
-    slider, number_input = _tagged_widgets(tag)
+    slider, _ = _tagged_widgets(tag)
 
     _plate_shape_inputs(tag, v)
 
     with st.expander("ゲート形状", expanded=False):
         st.caption(
             "t = ゲート出口（製品長辺）からの距離、w = バルブ軸からの半幅。左右対称。"
-            "深さ = 流路肉厚。ポケットは全幅のランナー棒（Tの横棒）と中央のステム（Tの縦棒）と井戸だけで、"
+            "深さ = 流路肉厚。ポケットは全幅の横ランナー（Tの横棒）と中央の縦ランナー（Tの縦棒）と井戸だけで、"
             "それ以外は鋼材が PL に接する。"
         )
         gew = slider(
@@ -1390,24 +1390,24 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
         v["land_length"] = slider("ランド長さ [mm]", 0.5, 5.0, float(d.land_length), step=0.1)
         t_land = float(v["land_length"])
 
-        st.markdown("**ランナー棒（Tの横棒、全幅）**")
+        st.markdown("**横ランナー（Tの横棒、全幅）**")
         st.caption(
-            "ランド終端からランプ長で棒の深さ ② まで落ち、奥端 t まで平らな床が続く。"
+            "ランド終端からランプ長で横ランナー深さ ② まで落ち、奥端 t まで平らな床が続く。"
             "原図の台形断面（開口 2.5・床 1.5）の手前壁がこのランプ、奥壁は奥端 t の垂直壁に置き換える。"
         )
         # validate() needs 0 < ramp angle < 89°: the bar must be deeper than
         # the land, and the steepest offer (depth span 9.9 over 0.2) is 88.8°.
         bar_min = float(v["land_depth"] + 0.1)
         v["bar_depth"] = slider(
-            "棒の深さ ② [mm] (> ランド深さ)",
+            "横ランナー深さ ② [mm] (> ランド深さ)",
             min_value=bar_min,
             max_value=10.0,
             value=float(max(d.bar_depth, bar_min)),
             step=0.1,
-            help="ステムも同じ深さ（原図は両方 ②）。",
+            help="縦ランナーも同じ深さ（原図は両方 ②）。",
         )
         v["ramp_length"] = slider(
-            "ランプ長 [mm]（ランド終端 → 棒の床）",
+            "ランプ長 [mm]（ランド終端 → 横ランナーの床）",
             0.2,
             10.0,
             float(d.ramp_length),
@@ -1420,15 +1420,15 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
         st.caption(f"ランプ角 {ramp_deg:g}°、床は t={t_floor:g} から。")
         bar_end_min = float(round(t_floor + 0.1, 1))
         v["bar_end_t"] = slider(
-            "棒の奥端 t [mm] (> ランド長 + ランプ長)",
+            "横ランナー奥端 t [mm] (> ランド長 + ランプ長)",
             min_value=bar_end_min,
             max_value=20.0,
             value=float(max(d.bar_end_t, bar_end_min)),
             step=0.1,
-            help="棒の PL 側開口の奥端。原図は床 3.5 ＋ 斜め奥壁で PL に 4.0。",
+            help="横ランナーの PL 側開口の奥端。原図は床 3.5 ＋ 斜め奥壁で PL に 4.0。",
         )
 
-        st.markdown("**ステム（Tの縦棒、中央）**")
+        st.markdown("**縦ランナー（Tの縦棒、中央）**")
         # The stem is a fan whose walls are w=0 and w=width/2; it needs at
         # least one column of cell centres inside, so the floor is one cell
         # (the mesh slider is drawn below -- read its current value, as the
@@ -1437,12 +1437,12 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
         stem_w_min = max(1.0, math.ceil(dx_now * 2.0) / 2.0)
         stem_w_max = max(stem_w_min + 0.5, min(30.0, float(gew) / 2.0))
         v["stem_width"] = slider(
-            "ステム幅 ⑤ [mm]",
+            "縦ランナー幅 ⑤ [mm]",
             float(stem_w_min),
             float(stem_w_max),
             float(min(max(d.stem_width, stem_w_min), stem_w_max)),
             step=0.5,
-            help="棒の奥端から井戸まで走る中央の帯。深さは棒と同じ ②。下限はメッシュで解像できる幅。",
+            help="横ランナー奥端から井戸まで走る中央の帯。深さは横ランナーと同じ ②。下限はメッシュで解像できる幅。",
         )
 
         _well_inputs(tag, v, symmetric=True, wall_angle_deg=d.well_wall_angle_deg)
@@ -1461,12 +1461,12 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
             t_max,
             float(min(max(round(well_t_mid, 1), t_min), t_max)),
             step=0.1,
-            help="既定は井戸の中央（原図: 製品端からの距離は従来どおり）。ステムはここまで（＋半径）届く。",
+            help="既定は井戸の中央（原図: 製品端からの距離は従来どおり）。縦ランナーはここまで（＋半径）届く。",
         )
 
         v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, float(d.cell_size), step=0.1)
         st.caption(
-            "この形状の想定解像度は 0.5mm。棒は t 方向に 4mm しかなく、1.0mm だとランドとランプの行が"
+            "この形状の想定解像度は 0.5mm。横ランナーは t 方向に 4mm しかなく、1.0mm だとランドとランプの行が"
             "1行ずつ太って体積が 2 割増える。"
         )
     return v
@@ -1571,7 +1571,7 @@ _FILM_GATES: dict[str, _FilmGate] = {
         lambda: _profile_gate_sidebar("f7", True, _FILM_GATE7_DEFAULTS),
         _profile_gate_from_inputs,
     ),
-    "Film gate 8 (T字/全幅ランナー棒)": _FilmGate(
+    "Film gate 8 (T字/横ランナー+縦ランナー)": _FilmGate(
         "f8",
         "film_gate_8_parametric",
         lambda: _t_gate_sidebar("f8", _FILM_GATE8_DEFAULTS),

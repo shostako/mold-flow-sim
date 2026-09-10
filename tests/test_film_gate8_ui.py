@@ -1,4 +1,4 @@
-"""AppTest wiring checks for the parametric Film gate 8 (T字/全幅ランナー棒).
+"""AppTest wiring checks for the parametric Film gate 8 (T字/横ランナー+縦ランナー).
 
 A T-shaped gate: the film land runs the full exit width, drops over a short
 ramp into a full-width runner bar (the T's crossbar), and one centre stem of
@@ -21,7 +21,7 @@ from streamlit.testing.v1 import AppTest
 from core import GateProfileSpec, ProfilePlateConfig, build_profile_gate_geometry
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
-FILM_GATE8_LABEL = "Film gate 8 (T字/全幅ランナー棒)"
+FILM_GATE8_LABEL = "Film gate 8 (T字/横ランナー+縦ランナー)"
 DX = 0.5
 
 T_GATE_SPEC = {
@@ -182,10 +182,10 @@ def test_ramp_angle_and_stem_follow_the_sliders():
     """The ramp angle is derived from the drop over the ramp length; the stem
     tip from the valve; the bar end and stem width are dimensioned."""
     at = _film_gate8_app()
-    _slider(at, "棒の深さ").set_value(2.5).run()
+    _slider(at, "横ランナー深さ").set_value(2.5).run()
     _slider(at, "ランプ長").set_value(2.0).run()
-    _slider(at, "棒の奥端").set_value(6.0).run()
-    _slider(at, "ステム幅").set_value(8.0).run()
+    _slider(at, "横ランナー奥端").set_value(6.0).run()
+    _slider(at, "縦ランナー幅").set_value(8.0).run()
     _slider(at, "バルブ位置").set_value(24.0).run()
     at.button[0].click().run()
     assert not at.exception
@@ -202,10 +202,10 @@ def test_bar_end_and_valve_bounds_follow_the_ramp_and_the_bar():
     sit inside the bar (there the stem has no length)."""
     at = _film_gate8_app()
     _slider(at, "ランプ長").set_value(5.0).run()
-    bar_end = _slider(at, "棒の奥端")
+    bar_end = _slider(at, "横ランナー奥端")
     assert bar_end.min == pytest.approx(6.1)
     assert bar_end.value >= bar_end.min
-    _slider(at, "棒の奥端").set_value(12.0).run()
+    _slider(at, "横ランナー奥端").set_value(12.0).run()
     valve = _slider(at, "バルブ位置")
     assert valve.min == pytest.approx(13.5)
     at.button[0].click().run()

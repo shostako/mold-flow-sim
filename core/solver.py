@@ -26,9 +26,17 @@ h is local cavity thickness, and eta_eff is an effective viscosity
 evaluated at representative shear rate and bulk temperature.
 
 The resulting scalar field tau is a monotonic "arrival time" map
-(pseudo conduction time). Normalising by tau_max and scaling by the
-total fill time T_fill = V_cavity / Q reproduces the time evolution of
-the flow front as level sets of tau.
+(pseudo conduction time). Only its *order* is used: cells fill in tau
+order, and the absolute arrival time is the volume CDF (v0.25.0,
+``_arrival_time_field``) -- ``t(x) = T_fill * V(tau <= tau(x)) /
+V_solved``, where ``V_solved`` is the volume of the cells that can fill.
+``T_fill`` is ``V_solved / Q`` for constant-rate filling without
+compression (isothermal, or the skin layer on its ``constant_rate``
+clock); the ICM equivalent model shortens it, and the skin layer's
+``constant_pressure`` clock (and the multilayer solver's thermal
+coupling) rescale it by the volume-weighted tau ratio. The old
+``tau / tau_max * T_fill`` linear map is gone (it misplaced even the
+1D strip's midpoint).
 
 Caveats:
 - Single representative shear rate (no local rate iteration).
@@ -253,7 +261,9 @@ class FlowResult:
     pressure_norm: np.ndarray  # normalized pressure (1 at gate, 0 at last fill)
     weld_score: np.ndarray  # weld-line indicator [0..1] at the default thresholds
     air_traps: np.ndarray  # bool mask of air-trap cells (local tau maxima)
-    total_fill_time_s: float  # T_fill from volume / Q (scaled when skin layer ON)
+    total_fill_time_s: (
+        float  # T_fill: V/Q at constant rate; ICM shortens, constant-pressure skin rescales
+    )
     viscosity_Pa_s: float  # effective representative viscosity used
     geometry: Geometry
     metadata: dict

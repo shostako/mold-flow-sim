@@ -858,15 +858,18 @@ class GateProfileSpec:
                         )
                 # Evaluate the lines the way the rasteriser does -- clamped to
                 # the first point's w before it, not extrapolated. A line that
-                # starts past the land (the T gate's 肉盗み tip sits where the
-                # ramp reaches the plateau depth) extrapolates to a negative w
-                # at land.length and would be rejected for a crossing that the
-                # raster never draws.
-                for t_chk in (self.land.length, si.end_dist):
+                # starts past the land (the T gate's 肉盗み base sits where the
+                # ramp reaches the plateau depth) extrapolates to a w the
+                # raster never draws. Clamping makes each line piecewise
+                # linear with a corner at its first point, so the gap between
+                # them is extremal at a corner or an end: check all of them
+                # (Codex P2 on PR #85 -- with only the two ends, outer
+                # (2,10)→(6,6) / inner (6,7)→(10,1) passes yet crosses at t=6).
+                for t_chk in _island_breakpoints(si, self.land.length):
                     if _edge_w(si.outer_line, t_chk) <= _edge_w(si.inner_line, t_chk) + _EPS:
                         raise ValueError(
                             f"{p}.island: outer_line must stay outside inner_line over "
-                            f"[land.length, end_dist]; they cross by t = {t_chk}"
+                            f"[land.length, end_dist]; they cross by t = {t_chk:g}"
                         )
                 if si.floor_depth is not None:
                     if not si.floor_depth > 0:
@@ -1116,6 +1119,14 @@ def _count_components(mask: np.ndarray) -> int:
     from scipy import ndimage as ndi
 
     return int(ndi.label(mask)[1])
+
+
+def _island_breakpoints(si: SubIslandSpec, land_len: float) -> list[float]:
+    """Where a fan island's band width can turn over ``[land, end_dist]``:
+    both lines' clamp points plus the ends (the clamped lines are piecewise
+    linear, so the gap between them is extremal only there)."""
+    pts = {float(land_len), float(si.end_dist), si.inner_line[0][0], si.outer_line[0][0]}
+    return sorted(p for p in pts if land_len - _EPS <= p <= si.end_dist + _EPS)
 
 
 def _fan_breakpoints(sg: SubGateSpec) -> list[float]:
@@ -1369,6 +1380,20 @@ def build_profile_gate_geometry(
                     & (wa >= w_si_in)
                     & (wa <= w_si_out)
                 )
+                # An island that selects no cell centre is a silent no-op: the
+                # spec records it, the geometry does not have it, and the
+                # solve is the one without the restrictor (Codex P1 on PR
+                # #85: the T gate's splitter at 1.0 mm has its only ramp-row
+                # centres at t=1 -- excluded by t > land -- and t=2, where the
+                # triangle is 0.01 wide). Same defect class as a zero-cell
+                # edge channel, so the same answer: reject at build time.
+                if not in_si.any():
+                    raise ValueError(
+                        f"sub_gates[{sg_i}].island rasterises to zero cells at "
+                        f"cell_size_mm={dx}: no cell centre falls inside the band "
+                        f"(t ∈ ({land_len:g}, {si.end_dist:g}]). Enlarge the island, "
+                        "refine the mesh, or drop the island."
+                    )
                 if si.floor_depth is not None:
                     # Plateau: never deeper than the ramp it sits on.
                     d_si = np.minimum(d_base, si.floor_depth)

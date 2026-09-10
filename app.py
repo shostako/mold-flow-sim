@@ -1534,7 +1534,8 @@ def _t_gate_sidebar(tag: str, d: _TGateDefaults) -> dict:
         v["cell_size"] = slider("メッシュ粗さ [mm/cell]", 0.2, 3.0, float(d.cell_size), step=0.1)
         st.caption(
             "この形状の想定解像度は 0.5mm。横ランナーは t 方向に 4mm しかなく、1.0mm だとランドとランプの行が"
-            "1行ずつ太って体積が 2 割増える。"
+            "1行ずつ太って体積が 2 割増える。肉盗み ON で粗いメッシュだと三角がセル中心を 1 つも拾わず、"
+            "組立が「zero cells」で拒否する（黙って消える代わり）。"
         )
     return v
 

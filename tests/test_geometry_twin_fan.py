@@ -822,3 +822,48 @@ def test_island_lines_starting_past_the_land_are_checked_clamped_like_the_raster
         sg["island"]["outer_line"] = [[sg["island"]["outer_line"][0][0], 2.5], [2.0, -1.0]]
     with pytest.raises(ValueError, match="outer_line must stay outside inner_line"):
         GateProfileSpec.from_dict(d).validate()
+
+
+def test_island_that_selects_no_cell_is_rejected_at_build_time() -> None:
+    """At 1.0 mm the T gate's splitter picks no cell centre (with the well the
+    row centres sit on integer t: t=1 is excluded by t > land, at t=2 the
+    triangle is 0.01 wide) -- a silent no-op that would report the restrictor
+    in the spec and solve without it (Codex P1 on PR #85). Reject like a
+    zero-cell edge channel; 0.5 mm resolves it."""
+    well = {
+        "shape": "obround",
+        "t_range": [15.5, 27.5],
+        "half_width": 4.5,
+        "depth": 4.5,
+        "wall_angle_deg": 60,
+    }
+    spec = GateProfileSpec.from_dict(_t_gate_dict(floor_depth=0.35, well=well))
+    with pytest.raises(ValueError, match=r"sub_gates\[0\]\.island rasterises to zero cells"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.5)
+    t, wa = _tw(g, spec, _plate())
+    assert (g.mask & (t > 1.0) & (t < 2.0) & (wa < 0.5) & (g.thickness_mm < 0.36)).any()
+
+
+def test_island_lines_are_checked_at_their_clamp_corners() -> None:
+    """Clamped lines are piecewise linear with a corner at each first point,
+    so ordering at the two ends does not imply ordering in between: outer
+    (2,10)→(6,6) with inner (6,7)→(9,2.5) is ordered at t=2 (10 > 7) and t=9
+    (3 > 2.5) yet crosses at t=6 (6 < 7) -- Codex P2 on PR #85. A pair with
+    different starts that stays ordered must pass."""
+    outer = ((2.0, 10.0), (6.0, 6.0))
+    inner = ((6.0, 7.0), (9.0, 2.5))
+    assert _edge_w(outer, 2.0) > _edge_w(inner, 2.0) and _edge_w(outer, 9.0) > _edge_w(inner, 9.0)
+    assert _edge_w(outer, 6.0) < _edge_w(inner, 6.0)
+    d = _twin_dict()
+    d["sub_gates"][0]["island"] = {
+        "angle_deg": 2.5,
+        "outer_line": [list(p) for p in outer],
+        "inner_line": [list(p) for p in inner],
+        "end_dist": 9.0,
+    }
+    with pytest.raises(ValueError, match="cross by t = 6"):
+        GateProfileSpec.from_dict(d).validate()
+    # same corners, ordered everywhere: inner stays below the outer's corner
+    d["sub_gates"][0]["island"]["inner_line"] = [[6.0, 5.0], [9.0, 2.0]]
+    GateProfileSpec.from_dict(d).validate()

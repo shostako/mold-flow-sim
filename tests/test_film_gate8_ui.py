@@ -325,6 +325,25 @@ def test_island_sliders_keep_min_below_max_at_the_shallowest_bar():
     assert not at.exception
 
 
+def test_island_that_the_mesh_cannot_resolve_is_an_error_not_a_silent_no_op():
+    """At 1.0 mm the row centres sit on integer t and the splitter selects no
+    cell (Codex P1 on PR #85). The build must refuse with a message, not
+    solve the geometry without the restrictor; with the island off 1.0 mm is
+    a legitimate (if coarse) mesh."""
+    at = _film_gate8_app()
+    _slider(at, "メッシュ粗さ").set_value(1.0).run()
+    assert not at.exception
+    errors = "\n".join(str(e.value) for e in at.error)
+    assert "island" in errors and "zero cells" in errors
+    assert "mfs_geom" not in at.session_state
+    at.checkbox(key="f8_island_on").set_value(False).run()
+    assert not at.exception
+    assert not [e for e in at.error if "zero cells" in str(e.value)]
+    at.button[0].click().run()
+    assert not at.exception
+    assert at.session_state["mfs_geom"].cell_size_mm == 1.0
+
+
 def test_film_gate_8_sliders_do_not_leak_into_film_gate_1():
     at = _film_gate8_app()
     _slider(at, "製品幅").set_value(200.0).run()

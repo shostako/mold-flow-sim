@@ -940,3 +940,12 @@ def test_frame_pngs_and_labels_ride_the_same_series_as_the_gif(tmp_path):
     assert fills == sorted(fills) and fills[-1] == pytest.approx(
         100.0 * res.final_mask.sum() / res.geometry.mask.sum(), abs=0.05
     )
+
+
+def test_the_map_title_does_not_round_a_short_shot_up_to_100_percent():
+    from core.visualizer import _fraction_label
+
+    assert _fraction_label(1.0) == "100%"
+    assert _fraction_label(0.9963944854905861) == "99.6%"
+    assert _fraction_label(0.9996) == "100.0%"  # still visibly not "100%"
+    assert _fraction_label(0.5) == "50.0%"

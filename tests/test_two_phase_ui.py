@@ -193,6 +193,54 @@ def test_the_shot_volume_defaults_to_the_cavity_volume_and_follows_the_geometry(
     assert at.session_state["mfs_shot_volume_auto"] == v0
 
 
+def _edited(at) -> bool:
+    return (
+        "mfs_shot_volume_user_edited" in at.session_state
+        and at.session_state["mfs_shot_volume_user_edited"]
+    )
+
+
+def test_the_shot_volume_keeps_following_when_the_browser_echoes_a_stale_value():
+    """Rapid clicks on a geometry widget can start the next rerun before the
+    previous rerun's new shot volume reached the browser; Streamlit then writes
+    the browser's stale widget value back into session_state. That must not
+    count as a user edit (only on_change does), so the default keeps following
+    the cavity volume (2026-09-11: t0.65 shot volume run at t0.9)."""
+    at = _app()
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    _width(at).set_value(400.0)
+    at.run()
+    v1 = at.number_input(key="two_phase_shot_volume").value
+    assert v1 != v0
+    # the stale echo: session_state carries the previous value, no on_change
+    at.session_state["two_phase_shot_volume"] = v0
+    _width(at).set_value(200.0)  # sim の製品幅は 40〜400: 450 は範囲外で既定 300 に戻る
+    at.run()
+    v2 = at.number_input(key="two_phase_shot_volume").value
+    assert v2 == at.session_state["mfs_shot_volume_auto"] and v2 not in (v0, v1)
+    assert not _edited(at)
+    assert "計量がキャビティ体積を" not in _texts(at)
+
+
+def test_an_edited_shot_volume_shows_the_shortfall_and_the_reset_button_resumes_following():
+    at = _app()
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    at.number_input(key="two_phase_shot_volume").set_value(v0 - 1.0).run()
+    assert at.session_state["mfs_shot_volume_user_edited"] is True
+    assert "計量がキャビティ体積を 1.00 cm³ 下回る" in _texts(at)
+    at.button(key="two_phase_shot_volume_reset").click().run()
+    assert not at.session_state["mfs_shot_volume_user_edited"]
+    assert at.number_input(key="two_phase_shot_volume").value == v0
+    assert "計量がキャビティ体積を" not in _texts(at)
+    _width(at).set_value(400.0)
+    at.run()
+    assert (
+        at.number_input(key="two_phase_shot_volume").value
+        == at.session_state["mfs_shot_volume_auto"]
+        != v0
+    )
+
+
 def test_the_two_phase_run_ships_a_scrubber_and_its_standalone_player():
     at = _app()
     at.radio(key="wall_model").set_value("none")

@@ -2302,27 +2302,56 @@ with st.sidebar:
                 # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
                 # 丸めない: solver は素の体積と比較するので、下に丸めた既定は
                 # 「完全充填ちょうど」でなく極小のショートショットになる（Codex P2）。
+                # 「触った」の判定は on_change（計量欄そのものへのユーザー操作）で
+                # 立つフラグに限る。「前回の自動値と今の値が一致するか」で判定すると、
+                # 形状ウィジェットの連打で前の rerun の新値がブラウザに届く前に次の
+                # rerun が始まったとき、ブラウザが持つ古い値が session_state に書き
+                # 戻されて「不一致＝触った」と誤判定し、以後の追従が黙って止まる
+                # （2026-09-11、翼 t0.65 の計量のまま t0.9 を解析して 0.4% ショート）。
                 _v_cav = float(geom.volume_cm3())
-                _prev_auto = st.session_state.get("mfs_shot_volume_auto")
-                _current = st.session_state.get("two_phase_shot_volume")
-                if _prev_auto is None or _current is None or _current == _prev_auto:
+                if not st.session_state.get("mfs_shot_volume_user_edited", False):
                     st.session_state["two_phase_shot_volume"] = _v_cav
                 st.session_state["mfs_shot_volume_auto"] = _v_cav
+
+                def _mark_shot_volume_edited() -> None:
+                    st.session_state["mfs_shot_volume_user_edited"] = True
+
+                def _reset_shot_volume() -> None:
+                    st.session_state["mfs_shot_volume_user_edited"] = False
+                    st.session_state["two_phase_shot_volume"] = st.session_state[
+                        "mfs_shot_volume_auto"
+                    ]
+
                 shot_volume_cm3 = st.number_input(
                     "計量体積 V_shot [cm³]",
                     min_value=0.01,
                     step=0.1,
                     key="two_phase_shot_volume",
+                    on_change=_mark_shot_volume_edited,
                     help=(
                         "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
-                        "体積（完全充填ちょうど）。減らすとショートショットになる。"
+                        "体積（完全充填ちょうど）で、欄を編集するまで形状変更に追従する。"
+                        "減らすとショートショットになる。"
                     ),
                 )
                 _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
                 if icm and comp_stroke is not None:
                     _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
                     _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
-                st.caption(_hint + "。計量が最終キャビティ体積以上だと完全充填になる。")
+                _short = _v_cav - float(shot_volume_cm3)
+                if _short > 1e-9:
+                    _hint += (
+                        f"。**計量がキャビティ体積を {_short:.2f} cm³ 下回る → ショートショット**"
+                    )
+                else:
+                    _hint += "。計量が最終キャビティ体積以上だと完全充填になる"
+                st.caption(_hint)
+                if st.session_state.get("mfs_shot_volume_user_edited", False):
+                    st.button(
+                        "計量をキャビティ体積に戻す（形状追従を再開）",
+                        key="two_phase_shot_volume_reset",
+                        on_click=_reset_shot_volume,
+                    )
             else:
                 shot_volume_cm3 = None
 

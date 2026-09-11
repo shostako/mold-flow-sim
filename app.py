@@ -2319,7 +2319,21 @@ with st.sidebar:
                 if _v_cav not in _auto_hist:
                     _auto_hist.append(_v_cav)
                     del _auto_hist[:-32]
-                if not st.session_state.get("mfs_shot_volume_user_edited", False):
+                # 二相を OFF にした rerun で widget が描かれないと Streamlit は
+                # `two_phase_shot_volume` を session_state から落とすが、非 widget の
+                # 編集フラグは残る。そのまま ON に戻すと「編集済みなので触らない」で
+                # 初期化を飛ばし、number_input が min の 0.01 cm³ で再登場して次の
+                # 実行がほぼ空の計量になる（Codex P2 on PR #87）。編集値は widget と
+                # 別のキーに写しておき、widget が消えていたらそこから復元する。
+                _edited = st.session_state.get("mfs_shot_volume_user_edited", False)
+                if "two_phase_shot_volume" not in st.session_state:
+                    _kept = st.session_state.get("mfs_shot_volume_user_value")
+                    if _edited and _kept is not None:
+                        st.session_state["two_phase_shot_volume"] = _kept
+                    else:
+                        st.session_state["mfs_shot_volume_user_edited"] = _edited = False
+                        st.session_state["two_phase_shot_volume"] = _v_cav
+                elif not _edited:
                     st.session_state["two_phase_shot_volume"] = _v_cav
                 st.session_state["mfs_shot_volume_auto"] = _v_cav
 
@@ -2327,9 +2341,11 @@ with st.sidebar:
                     _v = st.session_state["two_phase_shot_volume"]
                     if _v not in st.session_state.get("mfs_shot_volume_auto_history", []):
                         st.session_state["mfs_shot_volume_user_edited"] = True
+                        st.session_state["mfs_shot_volume_user_value"] = _v
 
                 def _reset_shot_volume() -> None:
                     st.session_state["mfs_shot_volume_user_edited"] = False
+                    st.session_state.pop("mfs_shot_volume_user_value", None)
                     st.session_state["two_phase_shot_volume"] = st.session_state[
                         "mfs_shot_volume_auto"
                     ]

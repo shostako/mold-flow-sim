@@ -16,12 +16,16 @@ sim はこのロジックの出所で、同じコードがそのまま残って�
 
 ### 修正
 
-- `app.py`: 未編集の判定を計量欄の `on_change` で立つフラグ `mfs_shot_volume_user_edited` に変更（echo 遅れでは
-  `on_change` は発火しない）。編集後は「計量をキャビティ体積に戻す（形状追従を再開）」ボタンで復帰。
+- `app.py`: 未編集の判定を計量欄の `on_change` で立つフラグ `mfs_shot_volume_user_edited` に変更。ただし Streamlit は
+  script 本体より先に「前回の状態と違う widget 値」の `on_change` を発火するので、stale echo でもコールバックは呼ばれる
+  （無条件フラグの変異版で再現、Codex P1）— 届いた値が過去の自動値（`mfs_shot_volume_auto_history`、直近 32 件）の
+  どれかと一致するなら echo とみなして編集扱いにしない。編集後は「計量をキャビティ体積に戻す（形状追従を再開）」ボタンで復帰。
   計量が最終キャビティ体積を下回るときは caption に不足量と「→ ショートショット」を明示
-- `core/visualizer.py`: 二相マップのタイトルの圧縮後充填率は 100% 未満なら小数 1 桁（`99.6%`）— `_fraction_label`
-- テスト: ブラウザの stale echo を session_state 直書きで再現して追従が続くこと、編集→不足表示→リセットで
-  追従が再開すること（`tests/test_two_phase_ui.py` +2）、`_fraction_label`（`tests/test_two_phase.py` +1）
+- `core/visualizer.py`: 二相マップのタイトルの圧縮後充填率は 100% 未満なら小数 1 桁に **floor**（`99.6%`。99.99% が
+  `100.0%` に化けない、Codex P2）— `_fraction_label`
+- テスト: ブラウザの stale echo を `set_value(旧自動値)` で本番と同じコールバック経路で再現し、1 rerun 遅れでも
+  2 rerun 遅れでも追従が続くこと、編集→不足表示→リセットで追従が再開すること（`tests/test_two_phase_ui.py` +2）、
+  `_fraction_label`（`tests/test_two_phase.py` +1）
 
 ## [0.41.0] — 2026-09-10
 

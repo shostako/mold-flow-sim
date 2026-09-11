@@ -2308,13 +2308,25 @@ with st.sidebar:
                 # rerun が始まったとき、ブラウザが持つ古い値が session_state に書き
                 # 戻されて「不一致＝触った」と誤判定し、以後の追従が黙って止まる
                 # （2026-09-11、翼 t0.65 の計量のまま t0.9 を解析して 0.4% ショート）。
+                # ただし Streamlit は script 本体より先に「前回の状態と違う widget 値」の
+                # on_change を発火するので、stale echo でもコールバックは呼ばれる。
+                # 届いた値が過去の自動値のどれかと一致するなら echo であって編集では
+                # ない（13 桁の浮動小数を手で打つことはない）— それだけを除外する。
                 _v_cav = float(geom.volume_cm3())
+                _auto_hist: list[float] = st.session_state.setdefault(
+                    "mfs_shot_volume_auto_history", []
+                )
+                if _v_cav not in _auto_hist:
+                    _auto_hist.append(_v_cav)
+                    del _auto_hist[:-32]
                 if not st.session_state.get("mfs_shot_volume_user_edited", False):
                     st.session_state["two_phase_shot_volume"] = _v_cav
                 st.session_state["mfs_shot_volume_auto"] = _v_cav
 
                 def _mark_shot_volume_edited() -> None:
-                    st.session_state["mfs_shot_volume_user_edited"] = True
+                    _v = st.session_state["two_phase_shot_volume"]
+                    if _v not in st.session_state.get("mfs_shot_volume_auto_history", []):
+                        st.session_state["mfs_shot_volume_user_edited"] = True
 
                 def _reset_shot_volume() -> None:
                     st.session_state["mfs_shot_volume_user_edited"] = False

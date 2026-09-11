@@ -1662,7 +1662,7 @@ _FILM_GATES: dict[str, _FilmGate] = {
         lambda: _profile_gate_sidebar("f7", True, _FILM_GATE7_DEFAULTS),
         _profile_gate_from_inputs,
     ),
-    "Film gate 8 (T字/横ランナー+縦ランナー)": _FilmGate(
+    "Film gate 8 (T字ランナー)": _FilmGate(
         "f8",
         "film_gate_8_parametric",
         lambda: _t_gate_sidebar("f8", _FILM_GATE8_DEFAULTS),

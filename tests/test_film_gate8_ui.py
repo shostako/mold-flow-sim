@@ -1,4 +1,4 @@
-"""AppTest wiring checks for the parametric Film gate 8 (T字/横ランナー+縦ランナー).
+"""AppTest wiring checks for the parametric Film gate 8 (T字ランナー).
 
 A T-shaped gate: the film land runs the full exit width, drops over a short
 ramp into a full-width runner bar (the T's crossbar), and one centre stem of
@@ -21,7 +21,7 @@ from streamlit.testing.v1 import AppTest
 from core import GateProfileSpec, ProfilePlateConfig, build_profile_gate_geometry
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
-FILM_GATE8_LABEL = "Film gate 8 (T字/横ランナー+縦ランナー)"
+FILM_GATE8_LABEL = "Film gate 8 (T字ランナー)"
 DX = 0.5
 
 # 肉盗み in front of the vertical runner: flat plateau at the land depth that

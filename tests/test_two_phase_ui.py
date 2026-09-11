@@ -202,24 +202,37 @@ def _edited(at) -> bool:
 
 def test_the_shot_volume_keeps_following_when_the_browser_echoes_a_stale_value():
     """Rapid clicks on a geometry widget can start the next rerun before the
-    previous rerun's new shot volume reached the browser; Streamlit then writes
-    the browser's stale widget value back into session_state. That must not
-    count as a user edit (only on_change does), so the default keeps following
-    the cavity volume (2026-09-11: t0.65 shot volume run at t0.9)."""
+    previous rerun's new shot volume reached the browser; the browser then
+    sends its stale widget value, which differs from the server's latest
+    value, so Streamlit dispatches the field's on_change before the script
+    body runs (Codex P1). Going through ``set_value`` takes exactly that
+    path. A value that is one of the earlier auto values is an echo, not an
+    edit, so the default keeps following (2026-09-11: t0.65 shot at t0.9)."""
     at = _app()
     v0 = at.number_input(key="two_phase_shot_volume").value
     _width(at).set_value(400.0)
     at.run()
     v1 = at.number_input(key="two_phase_shot_volume").value
     assert v1 != v0
-    # the stale echo: session_state carries the previous value, no on_change
-    at.session_state["two_phase_shot_volume"] = v0
+    # the stale echo: the browser still holds v0 while the server holds v1,
+    # and the user's next click changes the geometry again
+    at.number_input(key="two_phase_shot_volume").set_value(v0)
     _width(at).set_value(200.0)  # sim の製品幅は 40〜400: 450 は範囲外で既定 300 に戻る
     at.run()
     v2 = at.number_input(key="two_phase_shot_volume").value
     assert v2 == at.session_state["mfs_shot_volume_auto"] and v2 not in (v0, v1)
     assert not _edited(at)
     assert "計量がキャビティ体積を" not in _texts(at)
+    # and the same echo, one more rerun late (the browser is two runs behind)
+    at.number_input(key="two_phase_shot_volume").set_value(v1)
+    _width(at).set_value(300.0)  # 既定の幅に戻す → 自動値は v0 に戻る
+    at.run()
+    assert (
+        at.number_input(key="two_phase_shot_volume").value
+        == v0
+        == at.session_state["mfs_shot_volume_auto"]
+    )
+    assert not _edited(at)
 
 
 def test_an_edited_shot_volume_shows_the_shortfall_and_the_reset_button_resumes_following():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import matplotlib
@@ -1208,9 +1209,12 @@ def _two_phase_rgba(result, injection_filled, compression_filled) -> np.ndarray:
 
 
 def _fraction_label(fr: float) -> str:
-    """``100%`` only for a complete fill; anything short keeps one decimal so a
-    99.6% short shot does not print as ``100%`` (2026-09-11)."""
-    return f"{fr:.0%}" if fr >= 1.0 else f"{fr:.1%}"
+    """``100%`` only for a complete fill. Anything short is floored to one
+    decimal, so neither a 99.6% nor a 99.99% short shot can round up to
+    ``100%`` (2026-09-11, Codex P2)."""
+    if fr >= 1.0:
+        return f"{fr:.0%}"
+    return f"{math.floor(fr * 1000) / 1000:.1%}"
 
 
 def render_two_phase_map(

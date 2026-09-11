@@ -950,3 +950,4 @@ def test_the_map_title_does_not_round_a_short_shot_up_to_100_percent():
     assert _fraction_label(0.9996) == "99.9%"  # floored: never rounds up to 100
     assert _fraction_label(0.99999) == "99.9%"
     assert _fraction_label(0.5) == "50.0%"
+    assert _fraction_label(float("nan")) == "nan%"  # metadata fallback must not raise

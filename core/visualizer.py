@@ -1212,6 +1212,8 @@ def _fraction_label(fr: float) -> str:
     """``100%`` only for a complete fill. Anything short is floored to one
     decimal, so neither a 99.6% nor a 99.99% short shot can round up to
     ``100%`` (2026-09-11, Codex P2)."""
+    if math.isnan(fr):
+        return "nan%"  # the pre-floor label printed this; math.floor(nan) raises
     if fr >= 1.0:
         return f"{fr:.0%}"
     return f"{math.floor(fr * 1000) / 1000:.1%}"

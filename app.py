@@ -2316,6 +2316,8 @@ with st.sidebar:
                 _auto_hist: list[float] = st.session_state.setdefault(
                     "mfs_shot_volume_auto_history", []
                 )
+                # 32 = ブラウザが遅れうる rerun 数の上限の見積もり（実測は 1〜2 run
+                # 遅れ）。同じ値の再訪では伸びず、新規の自動値 32 件で溢れる。
                 if _v_cav not in _auto_hist:
                     _auto_hist.append(_v_cav)
                     del _auto_hist[:-32]

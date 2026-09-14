@@ -218,16 +218,18 @@ def solve_two_phase_short_shot(
     # volume takes longer if the machine spends it on a slow first stage.
     T_inj = float(solver._injection_time_for_volume_s(V_shot_mm3))
     # Past the V/P point the profile has no stage left, so its map keeps the
-    # last stage's rate. That is an "if the machine kept going" reading, not
-    # a shot the machine runs -- and here it can be reached from either side:
-    # a metered shot larger than the stroke displaces, or an open cavity that
-    # takes longer to sweep than the stroke lasts. Report it, because the
-    # sidebar's own check compares the stroke against the *final* cavity and
-    # would not see either of these (@claude review on PR #89).
+    # last stage's rate: an "if the machine kept going" reading rather than a
+    # shot the machine runs. The metered shot is the only volume that can put
+    # the *reported* numbers there. ``T_open_total`` is read through the map
+    # too, but only as the normalizer of the injection-phase arrival field,
+    # where it cancels: the times that come out are the map at each cell's own
+    # cumulative volume, and every cell past the shot arrives after ``T_inj``
+    # and is excluded from the pool and from the skin clock. Flagging on the
+    # open cavity as well claimed an extrapolated injection time for shots
+    # that never leave the stroke (Codex P2 on the port PRs).
     _prof = solver.injection_profile
     injection_extrapolated = bool(
-        _prof is not None
-        and max(V_shot_mm3, V_open_total) > _prof.total_volume_mm3 * (1.0 + _REL_EPS)
+        _prof is not None and V_shot_mm3 > _prof.total_volume_mm3 * (1.0 + _REL_EPS)
     )
 
     skin_on = bool(solver.skin_layer_enabled)

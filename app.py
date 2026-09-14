@@ -3079,22 +3079,26 @@ if "mfs_result" in st.session_state:
         _prof_rec = result.metadata.get("injection_profile")
         if _prof_rec is not None:
             _V_shot_cm3 = float(_prof_rec["total_volume_cm3"])
-            _V_cav_cm3 = geom.volume_cm3()
             st.caption(
                 f"射出条件: 平均 {_prof_rec['mean_rate_cm3s']:.1f} cm³/s、"
                 f"V/P まで {_prof_rec['total_time_s']:.3f} s、"
                 f"理論射出量 {_V_shot_cm3:.2f} cm³"
             )
-            if _V_shot_cm3 < _V_cav_cm3:
+            if result.metadata.get("injection_extrapolated_past_vp"):
                 # Past V/P the volume-to-time map extrapolates at the last
                 # stage's rate — the fill time is then "if the machine kept
-                # going", not a fill this shot achieves. Say so rather than
-                # letting the number pass as a prediction.
+                # going", not a fill this shot achieves. The comparison is the
+                # solver's, against the volume it actually read the map
+                # through: with ICM that is the *open-gap* volume of the cells
+                # that fill, which a stroke can clear the final cavity and
+                # still fall short of (Codex P2 on the port PRs).
+                _V_swept_cm3 = float(result.metadata.get("injection_swept_volume_cm3", 0.0))
                 st.warning(
-                    f"理論射出量 {_V_shot_cm3:.2f} cm³ がキャビティ体積 "
-                    f"{_V_cav_cm3:.2f} cm³ を下回っています。V/P 以降も最終段の"
-                    "射出率で射出し続けた前提の時間軸になっているので、"
-                    f"{_V_shot_cm3:.2f} cm³ を超えた分の充填時刻は外挿です。"
+                    f"理論射出量 {_V_shot_cm3:.2f} cm³ が、この解析が掃く体積 "
+                    f"{_V_swept_cm3:.2f} cm³ を下回っています"
+                    + ("（射出圧縮 ON なので開いた隙間の体積です）。" if icm else "。")
+                    + "V/P 以降も最終段の射出率で射出し続けた前提の時間軸になって"
+                    f"いるので、{_V_shot_cm3:.2f} cm³ を超えた分の充填時刻は外挿です。"
                     "計量律速のショートショットは「ショートショット（計量制限）」"
                     "で見てください。"
                 )
@@ -3184,11 +3188,10 @@ if "mfs_result" in st.session_state:
                     # shot nor the open-gap cavity is that number, so this
                     # panel has to say it for itself (@claude on PR #89).
                     st.warning(
-                        "この二相解析は V/P より先を外挿しています。理論射出量 "
-                        f"{md2.get('injection_profile_volume_cm3', 0.0):.2f} cm³ に対し、"
-                        f"計量 {md2['shot_volume_cm3']:.2f} cm³ ／ 開きキャビティ "
-                        f"{md2.get('cavity_volume_open_cm3', float('nan')):.2f} cm³ が"
-                        "それを超えているためで、射出時間は最終段の射出率で射出し続けた"
+                        "この二相解析は V/P より先を外挿しています。計量 "
+                        f"{md2['shot_volume_cm3']:.2f} cm³ が理論射出量 "
+                        f"{md2.get('injection_profile_volume_cm3', 0.0):.2f} cm³ を"
+                        "超えているためで、射出時間は最終段の射出率で射出し続けた"
                         "前提の値です。計量位置と V/P 位置を実機に合わせるか、"
                         "計量体積を理論射出量以下にしてください。"
                     )

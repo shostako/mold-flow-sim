@@ -97,7 +97,7 @@ freezing front in isolation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import scipy.ndimage as ndi
@@ -296,7 +296,15 @@ class HeleShawSolver:
     #: axis: the rate is no longer one number but a piecewise-linear
     #: volume-to-time map, so a slow first stage reads as a slow start rather
     #: than being averaged away. ``None`` keeps the constant-rate behaviour.
-    injection_profile: InjectionProfile | None = None
+    #:
+    #: Keyword-only so that inserting it here does not renumber the positional
+    #: arguments of a public dataclass: a caller passing the seventh value
+    #: positionally meant ``compression_molding`` before this field existed,
+    #: and would otherwise now bind a bool to the profile and reach
+    #: ``bool.time_at_volume_mm3`` inside ``solve()`` (Codex P2 on the port
+    #: PRs). ``kw_only`` moves it to the end of ``__init__`` while leaving it
+    #: next to the rate it replaces in the source.
+    injection_profile: InjectionProfile | None = field(default=None, kw_only=True)
 
     compression_molding: bool = False
     compression_factor: float = 1.5  # h_effective / h_actual during compression phase
@@ -1155,6 +1163,13 @@ class HeleShawSolver:
         h_open_final = domain_solver._open_thickness_field()
         cell_volume_final = (float(self.geometry.cell_size_mm) ** 2) * h_open_final
         fill_time_s = self._arrival_time_field(tau, fillable, cell_volume_final, T_fill)
+        # The volume the profile map was read through -- the *open-gap* volume
+        # of the cells that fill, not the cavity as drawn. With ICM those
+        # differ, and the difference is exactly the band where a stroke can
+        # cover the part yet still run the map past V/P (Codex P2 on the port
+        # PRs: the UI used to compare the stroke against the final volume and
+        # stayed silent through that band).
+        swept_volume_mm3 = float(np.sum(cell_volume_final[fillable])) if fillable.any() else 0.0
 
         # pressure proxy: P ~ (tau_max - tau) / tau_max -> 1 at gate, 0 at last fill
         pressure_norm = np.full_like(tau, np.nan)
@@ -1179,6 +1194,11 @@ class HeleShawSolver:
             "injection_velocity_mms": self.injection_velocity_mms,
             "injection_Q_cm3s": self.injection_volume_flow_cm3s,
             "injection_Q_effective_cm3s": self._effective_flow_rate_cm3s(),
+            "injection_swept_volume_cm3": swept_volume_mm3 / 1000.0,
+            "injection_extrapolated_past_vp": bool(
+                self.injection_profile is not None
+                and swept_volume_mm3 > self.injection_profile.total_volume_mm3 * (1.0 + 1e-12)
+            ),
             "injection_profile": (
                 None if self.injection_profile is None else self.injection_profile.as_record()
             ),

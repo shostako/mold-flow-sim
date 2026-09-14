@@ -6,6 +6,29 @@
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 バージョン 0.1.0〜0.14.0 は**開発履歴から遡及的に付与**したもの（2026-08-07 時点で整理）。
 
+## [0.42.3] — 2026-09-15
+
+**Codex P2 4 件（横展開 PR shostako/mold-flow-fangate#16・shostako/mold-flow-fangate2#8 で検出）の修正。**
+
+### 修正
+
+- **`injection_profile` を dataclass の途中に挿したせいで位置引数がずれていた。** 0.41 までは
+  7 番目の位置引数が `compression_molding` で、そこに bool を渡していた呼び出しは
+  `injection_profile` に bool を束縛し、`solve()` の中で `bool.time_at_volume_mm3` に到達する。
+  `field(kw_only=True)` にしてソース上の位置（置き換える対象の射出率の隣）は保ったまま
+  `__init__` の末尾へ移した。`MultilayerHeleShawSolver` も同じ。
+- **層別ソルバーの metadata に `injection_Q_effective_cm3s` が無かった。** `HeleShawSolver` は
+  出すのに層別は出さず、`FlowResult` / `MultilayerFlowResult` の契約が非対称だった。
+- **二相の外挿フラグが、計量がストローク内でも開きキャビティが超えていれば立っていた。**
+  `T_open_total` も写像を通るが、それは射出相の到着時刻場の正規化係数としてであって、
+  そこでは約分される — 出てくるのは各セル自身の累積体積での写像値で、計量より先のセルは
+  `T_inj` 以降に到着するのでプールからもスキンの時計からも外れる。外挿値は報告に一切乗らない。
+  判定を `V_shot` だけにし、警告の文言も「計量が理論射出量を超えている」に直した。
+- **メイン結果ペインの外挿警告が最終キャビティ体積としか比べていなかった。** ICM ON では
+  体積 CDF 写像が読むのは**開いた隙間**の体積なので、ストロークが最終形状を覆っていても
+  写像が V/P より先を読む帯がある。判定をソルバー側へ移し（`solve()` の metadata に
+  `injection_extrapolated_past_vp` と `injection_swept_volume_cm3`）、UI はそのフラグを読む。
+
 ## [0.42.2] — 2026-09-15
 
 **スキン層の時計の UI 既定を「速度制御」にした。**

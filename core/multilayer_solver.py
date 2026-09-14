@@ -245,7 +245,9 @@ class MultilayerHeleShawSolver:
     injection_volume_flow_cm3s: float | None = None
     #: Screw-side conditions; see ``HeleShawSolver.injection_profile``.
     #: Replaces the constant rate as the source of the time axis.
-    injection_profile: InjectionProfile | None = None
+    #: Keyword-only for the same reason as the base solver's field: inserting
+    #: it here must not renumber the positional arguments (Codex P2).
+    injection_profile: InjectionProfile | None = field(default=None, kw_only=True)
 
     compression_molding: bool = False
     compression_factor: float = 1.5
@@ -602,6 +604,7 @@ class MultilayerHeleShawSolver:
             "mold_K": self.mold_temperature_K,
             "injection_velocity_mms": self.injection_velocity_mms,
             "injection_Q_cm3s": self.injection_volume_flow_cm3s,
+            "injection_Q_effective_cm3s": base._effective_flow_rate_cm3s(),
             "injection_profile": (
                 None if self.injection_profile is None else self.injection_profile.as_record()
             ),

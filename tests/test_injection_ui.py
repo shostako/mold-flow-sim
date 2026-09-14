@@ -272,6 +272,7 @@ def test_a_shot_smaller_than_the_cavity_is_flagged_as_extrapolated():
     at.button[0].click().run()
     assert not at.exception
     assert "理論射出量" in _warnings(at) and "外挿" in _warnings(at)
+    assert at.session_state["mfs_result"].metadata["injection_extrapolated_past_vp"] is True
 
 
 def test_a_shot_that_covers_the_cavity_is_not_flagged():
@@ -282,6 +283,27 @@ def test_a_shot_that_covers_the_cavity_is_not_flagged():
     assert not at.exception
     assert "外挿" not in _warnings(at)
     assert "理論射出量" in _captions(at)
+    assert at.session_state["mfs_result"].metadata["injection_extrapolated_past_vp"] is False
+
+
+def test_the_extrapolation_warning_reads_the_solver_flag():
+    """Not the UI's own volume comparison (Codex P2).
+
+    With ICM the profile map is read through the *open-gap* volume, which a
+    stroke can miss while still clearing the cavity as drawn. The flag lives
+    in the solver, which knows what it swept.
+    """
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.number_input(key="inj_num_stages").set_value(1).run()
+    at.number_input(key="inj_meter_pos").set_value(DEF_VP + 0.5).run()
+    at.button[0].click().run()
+    assert not at.exception
+    md = at.session_state["mfs_result"].metadata
+    assert md["injection_extrapolated_past_vp"] is True
+    assert md["injection_swept_volume_cm3"] > 0
+    assert "掃く体積" in _warnings(at)
 
 
 def test_the_default_clock_is_velocity_control():

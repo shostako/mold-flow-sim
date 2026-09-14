@@ -42,6 +42,7 @@ from core import (
     render_skin_layer_map,
     render_weldlines,
 )
+from core.injection_profile import InjectionProfile, InjectionStage
 from core.two_phase import solve_two_phase_short_shot
 from core.visualizer import (
     render_layer_grid,
@@ -61,6 +62,7 @@ def _solve_and_export(
     mold_K: float,
     inj_velocity_mms: float,
     inj_Q_cm3s: float,
+    injection_profile: InjectionProfile | None = None,
     compression: bool = False,
     compression_factor: float = 1.5,
     compression_stroke_mm: float | None = None,
@@ -98,6 +100,7 @@ def _solve_and_export(
             mold_temperature_K=mold_K,
             injection_velocity_mms=inj_velocity_mms,
             injection_volume_flow_cm3s=inj_Q_cm3s,
+            injection_profile=injection_profile,
             compression_molding=compression,
             compression_factor=compression_factor,
             compression_stroke_mm=compression_stroke_mm,
@@ -118,6 +121,7 @@ def _solve_and_export(
             mold_temperature_K=mold_K,
             injection_velocity_mms=inj_velocity_mms,
             injection_volume_flow_cm3s=inj_Q_cm3s,
+            injection_profile=injection_profile,
             compression_molding=compression,
             compression_factor=compression_factor,
             compression_stroke_mm=compression_stroke_mm,
@@ -516,6 +520,29 @@ FILM_GATE_CASES: dict[str, dict] = {
         skin_growth_constant=0.8,
         skin_clock_mode="constant_rate",
         two_phase_shot_volume_cm3=4.5,
+    ),
+    # Screw-side conditions instead of a flat rate: a 50 mm screw stepping
+    # 30 -> 28.25 -> 18 mm, slow first (20 mm/s) then fast (200 mm/s). The
+    # switch is placed at 1.75 mm of stroke = 3.44 cm^3, about half this
+    # cavity, so the kink lands mid-part: the first half of the fill takes
+    # ten times as long as the second and the isochrones bunch near the gate.
+    # Compare against ``FilmGate_PP_default`` (flat rate) on the same
+    # geometry to see what the staging does to the animation.
+    "FilmGate_PP_staged_injection": dict(
+        cfg=_film_gate_cfg_stepped_plate(),
+        material_key="PP",
+        melt_K=503.15,
+        mold_K=313.15,
+        inj_velocity_mms=200.0,
+        inj_Q_cm3s=None,
+        injection_profile=InjectionProfile(
+            screw_diameter_mm=50.0,
+            metering_position_mm=30.0,
+            stages=(
+                InjectionStage(end_position_mm=28.25, velocity_mms=20.0),
+                InjectionStage(end_position_mm=18.0, velocity_mms=200.0),
+            ),
+        ),
     ),
     # Same stepped-plate baseline as above, but driven by the multilayer
     # solver with N=5 wall-refined layers. Per-layer Neumann temperature

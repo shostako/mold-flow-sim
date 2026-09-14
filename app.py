@@ -44,6 +44,7 @@ from core import (
     wrap_standalone_html,
 )
 from core.geometry import Geometry
+from core.injection_profile import InjectionProfile, InjectionStage
 from core.profile_gate import (
     EdgeChannelSpec,
     IslandSpec,
@@ -84,6 +85,26 @@ APP_DIR = Path(__file__).parent
 
 #: Sentinel occupying index 0 of the spec dropdown. See
 #: ``choose_spec_origin`` for why the list does not default to a real file.
+#: Default machine conditions for the screw-side injection block. A real
+#: shot is a screw diameter plus positions and speeds; the rate follows from
+#: them. The previous default -- a flat 589 cm^3/s -- was a spec-sheet
+#: *maximum*, so every condition ran as if the screw were flat out.
+DEF_SCREW_DIAMETER_MM = 50.0
+DEF_METERING_POSITION_MM = 30.0
+DEF_VP_POSITION_MM = 18.0
+DEF_SCREW_VELOCITY_MMS = 200.0
+#: The machine is actually set up in three steps. All three run at the same
+#: speed, so the profile is arithmetically a single stage -- it is the default
+#: because it is what the machine's screen says, and because it puts the
+#: staged path in front of the user instead of behind a spinner they have to
+#: find. Switch positions are stage ends, counted down from the metering
+#: position: 30 -> 28 -> 22 -> 18 (V/P).
+DEF_INJECTION_STAGES = 3
+DEF_SWITCH_POSITIONS_MM = (28.0, 22.0)
+#: Cap on the stage count the UI will unfold. Machines go further; this is
+#: the point past which the sidebar stops being readable.
+MAX_INJECTION_STAGES = 5
+
 SPEC_UNSELECTED = "— 未選択 —"
 #: Widget key for the spec uploader. Needed so the dropdown above it can
 #: read the dropped file from session state in the same run it lands.
@@ -136,6 +157,10 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "射出圧縮 ON なら §7 の等価モデルで短縮され、スキン層の「圧力一定」時計と層別の熱結合は"
         "体積重み付き $\\tau$ の比（抵抗比）で再スケールする — スキン層は膨張のみ、層別は層の粘度分布"
         "次第で 1 を挟んでどちらにも動く（そのとき $t_{\\text{fill}}$ は $V/Q$ で割った値ではない）\n"
+        "- 多段射出（実機条件モードで段数 2 以上）では $Q$ が段ごとに変わるので、"
+        "体積 → 時刻の写像が段の切替体積で折れる区分線形になる。"
+        "各段の注入体積 $\\pi D^2/4 \\cdot L_i$ は速度によらずストロークだけで決まるので、"
+        "折れ点の体積は固定で、傾き（＝射出率）だけが段ごとに変わる\n"
         "- 流動先端の進行は $\\tau$ の等値線として可視化"
     )
 
@@ -1671,6 +1696,162 @@ _FILM_GATES: dict[str, _FilmGate] = {
 }
 
 
+def _injection_rate_inputs(
+    mode: str,
+) -> tuple[InjectionProfile | None, float | None, str | None]:
+    """The rate half of the injection block: a screw profile, or a flat Q.
+
+    Returns ``(profile, Q_cm3s, error)``. Exactly one of the first two is set
+    when ``error`` is None. On a rejected machine condition both are None and
+    ``error`` carries the message -- the caller stops the run rather than
+    this function calling ``st.stop()``, which sits above the version caption
+    and would take it off the screen with the error still on it.
+
+    The stage widgets are laid out with static bounds (the metering and V/P
+    positions of the run) and the ordering is checked afterwards instead of
+    being enforced by nesting each stage's ``max_value`` under the previous
+    one's value. Chained dynamic bounds re-create the widget on every edit,
+    and the value snaps back to the default while the user is still typing --
+    the same trap the shot-volume follow already fell into (v0.41.1).
+    """
+    if mode == "direct":
+        Q = st.slider(
+            "射出率 [cm³/s]",
+            1.0,
+            800.0,
+            589.0,
+            step=1.0,
+            key="inj_Q_direct",
+            help="ソディック等の成形機取説の射出率に対応。"
+            "取説の値は機械の最大射出率なので、実際より速く充填されることがある。",
+        )
+        return None, float(Q), None
+
+    screw_d = st.number_input(
+        "スクリュー径 [mm]",
+        min_value=5.0,
+        max_value=200.0,
+        value=DEF_SCREW_DIAMETER_MM,
+        step=1.0,
+        key="inj_screw_d",
+        help="バレル内でスクリューが押しのける断面の直径。Q = πD²/4 × v。",
+    )
+    meter_pos = st.number_input(
+        "計量位置 [mm]",
+        min_value=0.5,
+        max_value=1000.0,
+        value=DEF_METERING_POSITION_MM,
+        step=1.0,
+        key="inj_meter_pos",
+        help="射出開始時のスクリュー位置。ここから前進する。",
+    )
+    vp_pos = st.number_input(
+        "V/P切替位置 [mm]",
+        min_value=0.0,
+        max_value=1000.0,
+        value=DEF_VP_POSITION_MM,
+        step=0.5,
+        key="inj_vp_pos",
+        help="速度制御から保圧に切り替わる位置。ここまでが充填。",
+    )
+    n_stages = int(
+        st.number_input(
+            "射出段数",
+            min_value=1,
+            max_value=MAX_INJECTION_STAGES,
+            value=DEF_INJECTION_STAGES,
+            step=1,
+            key="inj_num_stages",
+            help="1 なら計量位置から V/P まで一定速度。2 以上にすると"
+            "各段の速度切替位置と速度の欄が出る。",
+        )
+    )
+
+    if vp_pos >= meter_pos:
+        return (
+            None,
+            None,
+            (
+                f"V/P切替位置 ({vp_pos:g} mm) が計量位置 ({meter_pos:g} mm) 以上です。"
+                "スクリューは前進するので、V/P は計量位置より小さい必要があります。"
+            ),
+        )
+
+    # Only the boundaries between stages are asked for; the last stage always
+    # ends at V/P, which is what makes it the V/P transfer. Defaults are the
+    # machine's own switch points at the default stage count, an even split of
+    # the stroke otherwise.
+    span = meter_pos - vp_pos
+    switches: list[float] = []
+    for i in range(n_stages - 1):
+        default = meter_pos - span * (i + 1) / n_stages
+        if (
+            n_stages == DEF_INJECTION_STAGES
+            and i < len(DEF_SWITCH_POSITIONS_MM)
+            and vp_pos < DEF_SWITCH_POSITIONS_MM[i] < meter_pos
+        ):
+            # The machine's own switch points, as long as they still sit
+            # inside the stroke the user has dialled in.
+            default = DEF_SWITCH_POSITIONS_MM[i]
+        switches.append(
+            float(
+                st.number_input(
+                    f"第{i + 1}段 速度切替位置 [mm]",
+                    min_value=float(vp_pos),
+                    max_value=float(meter_pos),
+                    value=float(default),
+                    step=0.5,
+                    key=f"inj_switch_{i}",
+                )
+            )
+        )
+    velocities = [
+        float(
+            st.number_input(
+                f"第{i + 1}段 射出速度 [mm/s]",
+                min_value=0.1,
+                max_value=1000.0,
+                value=DEF_SCREW_VELOCITY_MMS,
+                step=1.0,
+                key=f"inj_velocity_{i}",
+            )
+        )
+        for i in range(n_stages)
+    ]
+
+    ends = [*switches, float(vp_pos)]
+    try:
+        profile = InjectionProfile(
+            screw_diameter_mm=float(screw_d),
+            metering_position_mm=float(meter_pos),
+            stages=tuple(
+                InjectionStage(end_position_mm=e, velocity_mms=v) for e, v in zip(ends, velocities)
+            ),
+        )
+    except ValueError as exc:
+        return (
+            None,
+            None,
+            (
+                f"射出条件が成立しません: {exc}。"
+                "速度切替位置は計量位置から V/P 位置へ向かって降順に並べてください。"
+            ),
+        )
+
+    lines = [
+        f"射出率（平均）: **{profile.mean_rate_cm3s:.1f} cm³/s**",
+        f"射出時間 (V/P まで): **{profile.total_time_s:.3f} s**",
+        f"理論射出量 (V/P 時点): **{profile.total_volume_cm3:.2f} cm³**",
+    ]
+    if profile.num_stages > 1:
+        for i, (rate, t, vol) in enumerate(
+            zip(profile.stage_rates_cm3s(), profile.stage_times_s(), profile.stage_volumes_mm3())
+        ):
+            lines.append(f"　第{i + 1}段: {rate:.1f} cm³/s / {t:.3f} s / {vol / 1000.0:.2f} cm³")
+    st.caption("  \n".join(lines))
+    return profile, None, None
+
+
 def _valve_orifice_hits_pocket(
     geom: Geometry, spec: GateProfileSpec, plate: ProfilePlateConfig, dx: float
 ) -> bool:
@@ -2019,15 +2200,31 @@ with st.sidebar:
             _mold_max,
             max(_mold_min, min(50, _mold_max)),
         )
-        inj_v = st.slider("射出速度 [mm/s] (代表)", 5.0, 400.0, 200.0, step=5.0)
-        inj_Q = st.slider(
-            "射出率 [cm³/s]",
-            1.0,
-            800.0,
-            589.0,
-            step=1.0,
-            help="ソディック等の成形機取説の射出率に対応。",
+        inj_v = st.slider(
+            "代表流動速度 [mm/s]",
+            5.0,
+            400.0,
+            200.0,
+            step=5.0,
+            key="inj_rep_velocity",
+            help="キャビティ内のギャップ平均流速。代表せん断速度 6V/h に入り、"
+            "Cross-WLF の粘度だけを決める。**スクリューの射出速度とは別物**で、"
+            "薄板では 1 桁大きい（バレルの断面積とキャビティの断面積が違う）。"
+            "充填時間の絶対値はこの値ではなく下の射出率が決める。",
         )
+        inj_mode = st.radio(
+            "射出率の指定",
+            options=("machine", "direct"),
+            index=0,
+            key="inj_mode",
+            format_func=lambda m: {
+                "machine": "実機条件から計算（スクリュー径・位置・速度）",
+                "direct": "射出率を直接入力",
+            }[m],
+            help="実機条件: Q = πD²/4 × v。成形機に実際に入れる数字から射出率と"
+            "V/P までの射出時間を出す。直接入力: 取説の射出率をそのまま使う。",
+        )
+        inj_profile, inj_Q, inj_error = _injection_rate_inputs(inj_mode)
 
     with st.expander("壁面冷却モデル", expanded=False):
         wall_model = st.radio(
@@ -2458,6 +2655,9 @@ if do_run:
             "（メモリ枯渇によるアプリのクラッシュを防ぐためのガードです。）"
         )
         st.stop()
+    if inj_error is not None:
+        st.error(inj_error)
+        st.stop()
     with st.spinner("Hele-Shaw方程式を解いている…"):
         if multilayer_on:
             solver = MultilayerHeleShawSolver(
@@ -2467,6 +2667,7 @@ if do_run:
                 mold_temperature_K=mold_C + 273.15,
                 injection_velocity_mms=inj_v,
                 injection_volume_flow_cm3s=inj_Q,
+                injection_profile=inj_profile,
                 compression_molding=icm,
                 compression_factor=comp_factor,
                 compression_stroke_mm=comp_stroke,
@@ -2487,6 +2688,7 @@ if do_run:
                 mold_temperature_K=mold_C + 273.15,
                 injection_velocity_mms=inj_v,
                 injection_volume_flow_cm3s=inj_Q,
+                injection_profile=inj_profile,
                 compression_molding=icm,
                 compression_factor=comp_factor,
                 compression_stroke_mm=comp_stroke,
@@ -2541,7 +2743,9 @@ if do_run:
                 "melt_temperature_C": melt_C,
                 "mold_temperature_C": mold_C,
                 "injection_velocity_mms": inj_v,
+                "rate_input_mode": inj_mode,
                 "injection_volume_flow_cm3s": inj_Q,
+                "injection_profile": (None if inj_profile is None else inj_profile.as_record()),
             },
             "wall_cooling": (
                 {

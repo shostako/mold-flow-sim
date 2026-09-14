@@ -105,6 +105,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from .geometry import Geometry
+from .injection_profile import InjectionProfile
 from .materials import Material, cross_wlf_viscosity, representative_shear_rate
 
 # Weld-line detector thresholds (opening angle between two converging flow
@@ -290,6 +291,12 @@ class HeleShawSolver:
     mold_temperature_K: float = 313.15
     injection_velocity_mms: float = 100.0  # average flow front velocity scale
     injection_volume_flow_cm3s: float | None = None  # if None, derived from V/T_fill_default
+    #: Screw-side conditions (diameter, positions, per-stage speeds). When set
+    #: it *replaces* ``injection_volume_flow_cm3s`` as the source of the time
+    #: axis: the rate is no longer one number but a piecewise-linear
+    #: volume-to-time map, so a slow first stage reads as a slow start rather
+    #: than being averaged away. ``None`` keeps the constant-rate behaviour.
+    injection_profile: InjectionProfile | None = None
 
     compression_molding: bool = False
     compression_factor: float = 1.5  # h_effective / h_actual during compression phase
@@ -482,9 +489,27 @@ class HeleShawSolver:
         left, which is where the live-volume scaling would quietly stop
         working.
         """
+        if self.injection_profile is not None:
+            # The profile is a map, not a rate; the single number it averages
+            # to over *this* cavity is what a constant-rate reader wants.
+            V_cm3 = self.geometry.volume_cm3()
+            t = float(self.injection_profile.time_at_volume_mm3(V_cm3 * 1000.0))
+            return max(V_cm3 / t, 1e-9) if t > 0 else self.injection_profile.mean_rate_cm3s
         if self.injection_volume_flow_cm3s is not None:
             return max(float(self.injection_volume_flow_cm3s), 1e-6)
         return max(self.geometry.volume_cm3() / DEFAULT_FILL_TIME_S, 1e-9)
+
+    def _injection_time_for_volume_s(self, volume_mm3):
+        """Time [s] to inject ``volume_mm3`` at the configured conditions.
+
+        Scalar in, scalar out; array in, array out. With a profile this is
+        its piecewise-linear map; without one it is ``V / Q``.
+        """
+        if self.injection_profile is not None:
+            return self.injection_profile.time_at_volume_mm3(volume_mm3)
+        Q = self._effective_flow_rate_cm3s()
+        out = np.asarray(volume_mm3, dtype=float) / 1000.0 / Q
+        return out if out.ndim else float(out)
 
     def _baseline_fill_time(self, geom: Geometry) -> float:
         """Skin-free fill time [s] of ``geom`` at constant Q.
@@ -499,7 +524,13 @@ class HeleShawSolver:
         its own shrunken volume would cancel against the numerator and hand
         back the default 1.5 s no matter how little is left.
         """
-        base = geom.volume_cm3() / self._effective_flow_rate_cm3s()
+        if self.injection_profile is None:
+            base = geom.volume_cm3() / self._effective_flow_rate_cm3s()
+        else:
+            # Absolute, not a fraction of some full-cavity time: a restricted
+            # cavity is filled by the *start* of the same shot, so it reaches
+            # the end of the first stage before the second one is entered.
+            base = float(self.injection_profile.time_at_volume_mm3(geom.volume_cm3() * 1000.0))
         if not self.compression_molding:
             return base
         # Effective inflation acting on the whole cavity (Q = const proxy).
@@ -548,6 +579,11 @@ class HeleShawSolver:
             valve_axis_x_mm=geom.valve_axis_x_mm,
             valve_marker_mm=geom.valve_marker_mm,
         )
+        if self.injection_profile is not None:
+            # A profile is absolute: the same machine runs the same stages
+            # regardless of how much of the cavity is live, and the copy asks
+            # it for the time to inject *its* volume. Nothing to pin.
+            return replace(self, geometry=sub_geom)
         return replace(
             self,
             geometry=sub_geom,
@@ -634,9 +670,12 @@ class HeleShawSolver:
         value = float(np.nanmax(tau[sel]))
         return value if value > 0 else None
 
-    @staticmethod
     def _arrival_time_field(
-        tau: np.ndarray, where: np.ndarray, cell_volume: np.ndarray, T_fill: float
+        self,
+        tau: np.ndarray,
+        where: np.ndarray,
+        cell_volume: np.ndarray,
+        T_fill: float,
     ) -> np.ndarray:
         """Map tau to arrival times through the volume CDF (Issue #52).
 
@@ -652,6 +691,14 @@ class HeleShawSolver:
         Ties share the arrival of the last cell in the group, so equal tau
         never orders itself by memory layout. Cells outside ``where`` (or with
         NaN tau) stay NaN.
+
+        With an ``injection_profile`` the rate is no longer one number, so the
+        swept volume maps through the profile instead of scaling linearly.
+        The result is still renormalized onto ``T_fill``: that argument
+        already carries the skin inflation and the ICM speed-up, and the last
+        cell has to land on it either way. What the profile changes is the
+        *shape* in between -- a slow first stage pushes the early isochrones
+        together and stretches the time the front spends near the gate.
         """
         t_arr = np.full_like(tau, np.nan)
         sel = where & ~np.isnan(tau)
@@ -667,7 +714,14 @@ class HeleShawSolver:
             return t_arr
         last = np.searchsorted(tau_sorted, tau_sorted, side="right") - 1
         vals = np.empty_like(tau_v)
-        vals[order] = (cum[last] / total) * T_fill
+        if self.injection_profile is None:
+            vals[order] = (cum[last] / total) * T_fill
+        else:
+            t_prof = np.asarray(self.injection_profile.time_at_volume_mm3(cum[last]), float)
+            t_total = float(self.injection_profile.time_at_volume_mm3(total))
+            if t_total <= 0:
+                return t_arr
+            vals[order] = (t_prof / t_total) * T_fill
         t_arr[sel] = vals
         return t_arr
 
@@ -1124,6 +1178,10 @@ class HeleShawSolver:
             "mold_K": self.mold_temperature_K,
             "injection_velocity_mms": self.injection_velocity_mms,
             "injection_Q_cm3s": self.injection_volume_flow_cm3s,
+            "injection_Q_effective_cm3s": self._effective_flow_rate_cm3s(),
+            "injection_profile": (
+                None if self.injection_profile is None else self.injection_profile.as_record()
+            ),
             "compression": self.compression_molding,
             "compression_factor": self.compression_factor,
             "compression_stroke_mm": self.compression_stroke_mm,

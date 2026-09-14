@@ -257,3 +257,55 @@ def test_the_stretch_notice_is_absent_in_direct_rate_mode():
     at.radio(key="inj_mode").set_value("direct").run()
     captions = "\n".join(str(c.value) for c in at.caption)
     assert "速度制御そのもの" not in captions
+
+
+def test_the_two_phase_panel_warns_when_the_shot_runs_past_vp():
+    """Two-phase ON *and* machine conditions ON — the default combination.
+
+    Every other two-phase test here turns the panel off, so this pair had no
+    coverage together (@claude on PR #89). Shortening the stroke to 0.5 mm
+    puts the theoretical displacement (0.98 cm^3) under both the cavity and
+    the metered shot, which is exactly the silent-extrapolation case.
+    """
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(True)
+    at.checkbox(key="icm_on").set_value(True)
+    at.number_input(key="inj_num_stages").set_value(1).run()
+    at.number_input(key="inj_meter_pos").set_value(18.5).run()
+    at.number_input(key="two_phase_shot_volume").set_value(4.5)
+    at.button[0].click().run()
+    assert not at.exception
+    res = at.session_state["mfs_two_phase_result"]
+    assert res is not None
+    assert res.metadata["injection_extrapolated_past_vp"] is True
+    warnings = "\n".join(str(w.value) for w in at.warning)
+    assert "V/P より先を外挿" in warnings
+
+
+def test_the_two_phase_panel_is_quiet_when_the_shot_fits_the_stroke():
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(True)
+    at.checkbox(key="icm_on").set_value(True).run()
+    at.number_input(key="two_phase_shot_volume").set_value(4.5)
+    at.button[0].click().run()
+    assert not at.exception
+    res = at.session_state["mfs_two_phase_result"]
+    assert res is not None and res.metadata["injection_extrapolated_past_vp"] is False
+    warnings = "\n".join(str(w.value) for w in at.warning)
+    assert "V/P より先を外挿" not in warnings
+
+
+def test_adding_a_stage_below_an_edited_switch_names_the_stage_in_japanese():
+    """The exact path called out in review: 2 段で switch_0=19 → 3 段。"""
+    at = _app()
+    at.number_input(key="inj_num_stages").set_value(2).run()
+    at.number_input(key="inj_switch_0").set_value(19.0).run()
+    at.number_input(key="inj_num_stages").set_value(3).run()
+    at.button[0].click().run()
+    assert not at.exception
+    errors = "\n".join(str(e.value) for e in at.error)
+    assert "第2段の速度切替位置" in errors and "第1段の速度切替位置" in errors
+    # No internal field path survives into the message.
+    assert "stages[" not in errors and "end_position_mm" not in errors

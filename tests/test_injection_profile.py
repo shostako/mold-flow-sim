@@ -389,6 +389,60 @@ def test_multilayer_accepts_a_profile():
     assert res.fill_time_s[0, -1] == pytest.approx(res.total_fill_time_s)
 
 
+def test_two_phase_flags_a_shot_that_runs_past_vp():
+    """A metered shot larger than the stroke displaces is an extrapolation.
+
+    The sidebar's own check compares the stroke against the *final* cavity,
+    which is neither the metered shot nor the open-gap cavity -- so the
+    two-phase result has to carry the flag itself (@claude on PR #89).
+    """
+    geom = _strip(n=20, thickness_mm=5.0, cell_mm=10.0)  # 10 cm^3
+    # A 10 mm screw over 5 mm of stroke displaces 0.39 cm^3: far less than
+    # either the cavity or any usable shot.
+    p = InjectionProfile(10.0, 20.0, (InjectionStage(15.0, 50.0),))
+    solver = HeleShawSolver(
+        geometry=geom,
+        material=MaterialDB()["PP"],
+        injection_profile=p,
+        compression_molding=True,
+        compression_stroke_mm=0.5,
+    )
+    res = solve_two_phase_short_shot(solver, 5.0)
+    assert res.metadata["injection_extrapolated_past_vp"] is True
+    assert res.metadata["injection_profile_volume_cm3"] == pytest.approx(p.total_volume_cm3)
+    # Still the profile's own reading, extrapolated at the last stage's rate.
+    assert res.injection_time_s == pytest.approx(p.time_at_volume_mm3(5000.0))
+    assert res.injection_time_s > p.total_time_s
+
+
+def test_two_phase_does_not_flag_a_shot_inside_the_stroke():
+    geom = _strip(n=20)
+    p = _staged()
+    solver = HeleShawSolver(
+        geometry=geom,
+        material=MaterialDB()["PP"],
+        injection_profile=p,
+        compression_molding=True,
+        compression_stroke_mm=0.5,
+    )
+    res = solve_two_phase_short_shot(solver, geom.volume_cm3() * 0.5)
+    assert res.metadata["injection_extrapolated_past_vp"] is False
+
+
+def test_two_phase_flag_is_false_without_a_profile():
+    geom = _strip(n=20)
+    solver = HeleShawSolver(
+        geometry=geom,
+        material=MaterialDB()["PP"],
+        injection_volume_flow_cm3s=0.5,
+        compression_molding=True,
+        compression_stroke_mm=0.5,
+    )
+    res = solve_two_phase_short_shot(solver, geom.volume_cm3() * 0.5)
+    assert res.metadata["injection_extrapolated_past_vp"] is False
+    assert res.metadata["injection_profile_volume_cm3"] is None
+
+
 def test_two_phase_injection_time_comes_from_the_profile():
     """The metered shot ends later when the machine spends it on a slow stage."""
     geom = _strip(n=20)

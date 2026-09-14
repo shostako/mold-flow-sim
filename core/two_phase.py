@@ -217,6 +217,18 @@ def solve_two_phase_short_shot(
     # With a staged profile the metered shot does not end at V/Q: the same
     # volume takes longer if the machine spends it on a slow first stage.
     T_inj = float(solver._injection_time_for_volume_s(V_shot_mm3))
+    # Past the V/P point the profile has no stage left, so its map keeps the
+    # last stage's rate. That is an "if the machine kept going" reading, not
+    # a shot the machine runs -- and here it can be reached from either side:
+    # a metered shot larger than the stroke displaces, or an open cavity that
+    # takes longer to sweep than the stroke lasts. Report it, because the
+    # sidebar's own check compares the stroke against the *final* cavity and
+    # would not see either of these (@claude review on PR #89).
+    _prof = solver.injection_profile
+    injection_extrapolated = bool(
+        _prof is not None
+        and max(V_shot_mm3, V_open_total) > _prof.total_volume_mm3 * (1.0 + _REL_EPS)
+    )
 
     skin_on = bool(solver.skin_layer_enabled)
     skin_thk: np.ndarray | None = None
@@ -399,6 +411,8 @@ def solve_two_phase_short_shot(
         **skin_meta,
         "shot_volume_cm3": float(shot_volume_cm3),
         "flow_rate_cm3s": Q_cm3s,
+        "injection_profile_volume_cm3": (None if _prof is None else _prof.total_volume_cm3),
+        "injection_extrapolated_past_vp": injection_extrapolated,
         "injection_time_s": T_inj,
         "cavity_volume_open_cm3": V_open_total / 1000.0,
         "cavity_volume_final_cm3": V_fin_total / 1000.0,

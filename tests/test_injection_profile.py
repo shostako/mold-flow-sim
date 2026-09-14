@@ -12,6 +12,7 @@ volume.
 
 from __future__ import annotations
 
+import inspect
 import math
 
 import numpy as np
@@ -389,6 +390,81 @@ def test_multilayer_accepts_a_profile():
     assert res.fill_time_s[0, -1] == pytest.approx(res.total_fill_time_s)
 
 
+def test_the_new_field_is_keyword_only():
+    """Inserting it must not renumber a public dataclass's positional args.
+
+    Before the profile existed, the seventh positional value was
+    ``compression_molding``; a caller passing it that way must keep getting
+    compression, not a bool bound to the profile (Codex P2).
+    """
+    geom = _strip(n=6)
+    solver = HeleShawSolver(geom, MaterialDB()["PP"], 523.15, 323.15, 100.0, 5.0, True)
+    assert solver.compression_molding is True
+    assert solver.injection_profile is None
+    kind = inspect.signature(HeleShawSolver).parameters["injection_profile"].kind
+    assert kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_multilayer_profile_field_is_keyword_only_too():
+    geom = _strip(n=6)
+    solver = MultilayerHeleShawSolver(geom, MaterialDB()["PP"], 523.15, 323.15, 100.0, 5.0, True)
+    assert solver.compression_molding is True
+    assert solver.injection_profile is None
+    kind = inspect.signature(MultilayerHeleShawSolver).parameters["injection_profile"].kind
+    assert kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_multilayer_metadata_carries_the_effective_rate_like_the_base_solver():
+    """The two solvers publish the same metadata contract (Codex P2)."""
+    geom = _strip(n=8)
+    p = _staged()
+    base = _solve(geom, injection_profile=p)
+    multi = MultilayerHeleShawSolver(
+        geometry=geom,
+        material=MaterialDB()["PP"],
+        num_layers=3,
+        thermal_coupling=False,
+        injection_profile=p,
+    ).solve(num_frames=3)
+    assert "injection_Q_effective_cm3s" in multi.metadata
+    assert multi.metadata["injection_Q_effective_cm3s"] == pytest.approx(
+        base.metadata["injection_Q_effective_cm3s"]
+    )
+
+
+def test_solve_flags_extrapolation_against_the_volume_it_swept():
+    """Not against the cavity as drawn: with ICM the map reads the open gap.
+
+    A stroke between the final and open-gap volumes clears the part on paper
+    and still runs the map past V/P (Codex P2).
+    """
+    geom = _strip(n=20, thickness_mm=5.0, cell_mm=10.0)  # 10 cm^3 final
+    area = screw_area_mm2(20.0)
+    # Stroke displaces 12 cm^3: over the final cavity, under the open gap
+    # (0.5 mm of stroke on 20 cells of 100 mm^2 = +1 cm^3 ... so open = 11).
+    stroke_mm = 12000.0 / area
+    prof = InjectionProfile(20.0, 5.0 + stroke_mm, (InjectionStage(5.0, 100.0),))
+    plain = HeleShawSolver(geom, MaterialDB()["PP"], injection_profile=prof).solve(num_frames=3)
+    assert plain.metadata["injection_extrapolated_past_vp"] is False
+    assert plain.metadata["injection_swept_volume_cm3"] == pytest.approx(10.0)
+
+    icm = HeleShawSolver(
+        geom,
+        MaterialDB()["PP"],
+        injection_profile=prof,
+        compression_molding=True,
+        compression_stroke_mm=30.0,  # open gap 35 mm -> 70 cm^3 swept
+    ).solve(num_frames=3)
+    assert icm.metadata["injection_swept_volume_cm3"] > 12.0
+    assert icm.metadata["injection_extrapolated_past_vp"] is True
+
+
+def test_solve_does_not_flag_without_a_profile():
+    res = _solve(_strip(), injection_volume_flow_cm3s=50.0)
+    assert res.metadata["injection_extrapolated_past_vp"] is False
+    assert res.metadata["injection_swept_volume_cm3"] > 0
+
+
 def test_two_phase_flags_a_shot_that_runs_past_vp():
     """A metered shot larger than the stroke displaces is an extrapolation.
 
@@ -427,6 +503,31 @@ def test_two_phase_does_not_flag_a_shot_inside_the_stroke():
     )
     res = solve_two_phase_short_shot(solver, geom.volume_cm3() * 0.5)
     assert res.metadata["injection_extrapolated_past_vp"] is False
+
+
+def test_two_phase_does_not_flag_on_the_open_cavity_alone():
+    """A shot inside the stroke reports no extrapolated time (Codex P2).
+
+    The open cavity is swept through the map too, but only as the normalizer
+    of the arrival field, where it cancels -- and every cell past the shot
+    arrives after T_inj and is dropped. Nothing extrapolated reaches the
+    reported numbers, so the warning would be false.
+    """
+    geom = _strip(n=20, thickness_mm=5.0, cell_mm=10.0)  # 10 cm^3
+    area = screw_area_mm2(20.0)
+    stroke_mm = 6000.0 / area  # 6 cm^3: over the shot, under the cavity
+    p = InjectionProfile(20.0, 5.0 + stroke_mm, (InjectionStage(5.0, 100.0),))
+    solver = HeleShawSolver(
+        geometry=geom,
+        material=MaterialDB()["PP"],
+        injection_profile=p,
+        compression_molding=True,
+        compression_stroke_mm=0.5,
+    )
+    res = solve_two_phase_short_shot(solver, 5.0)  # inside the 6 cm^3 stroke
+    assert res.metadata["injection_extrapolated_past_vp"] is False
+    assert res.injection_time_s == pytest.approx(p.time_at_volume_mm3(5000.0))
+    assert res.injection_time_s < p.total_time_s
 
 
 def test_two_phase_flag_is_false_without_a_profile():

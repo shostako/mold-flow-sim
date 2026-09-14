@@ -208,3 +208,52 @@ def test_the_version_caption_survives_an_invalid_injection_condition():
     at.button[0].click().run()
     captions = "\n".join(str(c.value) for c in at.caption)
     assert "v0." in captions
+
+
+def test_a_shot_smaller_than_the_cavity_is_flagged_as_extrapolated():
+    """Past V/P the map extrapolates; the pane has to say so.
+
+    Default stroke displaces 23.6 cm^3, well over the default cavity, so the
+    warning is provoked by shortening the stroke rather than by growing the
+    part.
+    """
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.number_input(key="inj_num_stages").set_value(1).run()
+    at.number_input(key="inj_meter_pos").set_value(19.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    warnings = "\n".join(str(w.value) for w in at.warning)
+    assert "理論射出量" in warnings and "外挿" in warnings
+
+
+def test_a_shot_that_covers_the_cavity_is_not_flagged():
+    at = _app()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    warnings = "\n".join(str(w.value) for w in at.warning)
+    assert "外挿" not in warnings
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "理論射出量" in captions
+
+
+def test_constant_pressure_with_a_screw_profile_says_the_clock_will_stretch():
+    """Positions and speeds are velocity control; holding pressure is not."""
+    at = _app()
+    assert at.radio(key="wall_model").value == "skin"
+    assert at.radio(key="skin_clock").value == "constant_pressure"
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "速度制御そのもの" in captions
+    at.radio(key="skin_clock").set_value("constant_rate").run()
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "速度制御そのもの" not in captions
+
+
+def test_the_stretch_notice_is_absent_in_direct_rate_mode():
+    at = _app()
+    at.radio(key="inj_mode").set_value("direct").run()
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "速度制御そのもの" not in captions

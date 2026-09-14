@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .geometry import Geometry
+from .injection_profile import InjectionProfile
 from .materials import Material, cross_wlf_viscosity
 from .multilayer_thermal import (
     brinkman_number,
@@ -242,6 +243,9 @@ class MultilayerHeleShawSolver:
     mold_temperature_K: float = 313.15
     injection_velocity_mms: float = 100.0
     injection_volume_flow_cm3s: float | None = None
+    #: Screw-side conditions; see ``HeleShawSolver.injection_profile``.
+    #: Replaces the constant rate as the source of the time axis.
+    injection_profile: InjectionProfile | None = None
 
     compression_molding: bool = False
     compression_factor: float = 1.5
@@ -292,6 +296,7 @@ class MultilayerHeleShawSolver:
             mold_temperature_K=self.mold_temperature_K,
             injection_velocity_mms=self.injection_velocity_mms,
             injection_volume_flow_cm3s=self.injection_volume_flow_cm3s,
+            injection_profile=self.injection_profile,
             compression_molding=self.compression_molding,
             compression_factor=self.compression_factor,
             compression_stroke_mm=self.compression_stroke_mm,
@@ -356,7 +361,9 @@ class MultilayerHeleShawSolver:
 
         # absolute time scaling baseline (same logic as HeleShawSolver.solve)
         V_cm3 = self.geometry.volume_cm3()
-        if self.injection_volume_flow_cm3s is None:
+        if self.injection_profile is not None:
+            T_fill_baseline = float(self.injection_profile.time_at_volume_mm3(V_cm3 * 1000.0))
+        elif self.injection_volume_flow_cm3s is None:
             T_fill_baseline = 1.5
         else:
             Q = max(float(self.injection_volume_flow_cm3s), 1e-6)
@@ -595,6 +602,9 @@ class MultilayerHeleShawSolver:
             "mold_K": self.mold_temperature_K,
             "injection_velocity_mms": self.injection_velocity_mms,
             "injection_Q_cm3s": self.injection_volume_flow_cm3s,
+            "injection_profile": (
+                None if self.injection_profile is None else self.injection_profile.as_record()
+            ),
             "compression": self.compression_molding,
             "compression_factor": self.compression_factor,
             "compression_stroke_mm": self.compression_stroke_mm,

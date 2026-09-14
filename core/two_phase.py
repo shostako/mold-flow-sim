@@ -212,8 +212,11 @@ def solve_two_phase_short_shot(
         )
     vol_open = dx * dx * h_open  # mm^3 per cell when swept at the open gap
     V_open_total = float(vol_open[mask].sum())
-    T_open_total = V_open_total / 1000.0 / Q_cm3s  # s to fill the whole open cavity
-    T_inj = V_shot_mm3 / 1000.0 / Q_cm3s
+    # s to fill the whole open cavity (profile-aware: not V/Q when staged)
+    T_open_total = float(solver._injection_time_for_volume_s(V_open_total))
+    # With a staged profile the metered shot does not end at V/Q: the same
+    # volume takes longer if the machine spends it on a slow first stage.
+    T_inj = float(solver._injection_time_for_volume_s(V_shot_mm3))
 
     skin_on = bool(solver.skin_layer_enabled)
     skin_thk: np.ndarray | None = None
@@ -237,7 +240,9 @@ def solve_two_phase_short_shot(
         dom = solver
         passes = 0
         while True:
-            T_reach_total = float(vol_open[reachable].sum()) / 1000.0 / Q_cm3s
+            T_reach_total = float(
+                solver._injection_time_for_volume_s(float(vol_open[reachable].sum()))
+            )
             sol = dom._solve_domain(eta, T_fill_baseline_s=T_reach_total, clock_end_s=clock_end)
             passes += 1
             sealed_now = sol.frozen_mask if sol.frozen_mask is not None else np.zeros_like(mask)

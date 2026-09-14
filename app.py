@@ -2315,6 +2315,17 @@ with st.sidebar:
                     "二相ショートショットの射出相は計量 V/Q の定義上つねに速度制御。"
                 ),
             )
+            if inj_profile is not None and skin_clock_mode == "constant_pressure":
+                # A screw profile prescribes a rate. Holding pressure instead
+                # is the "machine could not keep up" scenario; the profile's
+                # shape survives (every stage stretches by the same factor)
+                # but the times are no longer the ones on the machine.
+                st.caption(
+                    "実機条件（スクリュー位置と速度）は速度制御そのものです。"
+                    "圧力一定を選ぶと、抵抗増のぶん**プロファイル全体が同じ倍率で**"
+                    "引き伸ばされ、V/P までの射出時間は設定値と一致しなくなります。"
+                    "設定どおりの充填時間を見たいなら「速度制御」を選んでください。"
+                )
         elif wall_model == "multilayer":
             num_layers = st.slider(
                 "層数 N",
@@ -3019,6 +3030,30 @@ if "mfs_result" in st.session_state:
         c1.metric("総充填時間 T_fill", f"{result.total_fill_time_s:.3f} s")
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
+        # Read the run's own record, not the sidebar: the pane also renders
+        # from a cached result, and the sidebar may have moved since.
+        _prof_rec = result.metadata.get("injection_profile")
+        if _prof_rec is not None:
+            _V_shot_cm3 = float(_prof_rec["total_volume_cm3"])
+            _V_cav_cm3 = geom.volume_cm3()
+            st.caption(
+                f"射出条件: 平均 {_prof_rec['mean_rate_cm3s']:.1f} cm³/s、"
+                f"V/P まで {_prof_rec['total_time_s']:.3f} s、"
+                f"理論射出量 {_V_shot_cm3:.2f} cm³"
+            )
+            if _V_shot_cm3 < _V_cav_cm3:
+                # Past V/P the volume-to-time map extrapolates at the last
+                # stage's rate — the fill time is then "if the machine kept
+                # going", not a fill this shot achieves. Say so rather than
+                # letting the number pass as a prediction.
+                st.warning(
+                    f"理論射出量 {_V_shot_cm3:.2f} cm³ がキャビティ体積 "
+                    f"{_V_cav_cm3:.2f} cm³ を下回っています。V/P 以降も最終段の"
+                    "射出率で射出し続けた前提の時間軸になっているので、"
+                    f"{_V_shot_cm3:.2f} cm³ を超えた分の充填時刻は外挿です。"
+                    "計量律速のショートショットは「ショートショット（計量制限）」"
+                    "で見てください。"
+                )
 
         def _download(label: str, path: Path, mime: str, key: str) -> None:
             with open(path, "rb") as _f:

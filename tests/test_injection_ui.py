@@ -240,11 +240,24 @@ def test_a_shot_that_covers_the_cavity_is_not_flagged():
     assert "理論射出量" in captions
 
 
+def test_the_default_clock_is_velocity_control():
+    """v0.42.2: the screw profile is the default input, so the clock follows.
+
+    Leaving the clock on "constant pressure" while the default injection
+    input is a set of positions and speeds means the screen takes the
+    machine's own injection time and hands back a different one.
+    """
+    at = _app()
+    assert at.radio(key="wall_model").value == "skin"
+    assert at.radio(key="skin_clock").value == "constant_rate"
+    captions = "\n".join(str(c.value) for c in at.caption)
+    assert "速度制御そのもの" not in captions
+
+
 def test_constant_pressure_with_a_screw_profile_says_the_clock_will_stretch():
     """Positions and speeds are velocity control; holding pressure is not."""
     at = _app()
-    assert at.radio(key="wall_model").value == "skin"
-    assert at.radio(key="skin_clock").value == "constant_pressure"
+    at.radio(key="skin_clock").set_value("constant_pressure").run()
     captions = "\n".join(str(c.value) for c in at.caption)
     assert "速度制御そのもの" in captions
     at.radio(key="skin_clock").set_value("constant_rate").run()
@@ -254,7 +267,8 @@ def test_constant_pressure_with_a_screw_profile_says_the_clock_will_stretch():
 
 def test_the_stretch_notice_is_absent_in_direct_rate_mode():
     at = _app()
-    at.radio(key="inj_mode").set_value("direct").run()
+    at.radio(key="inj_mode").set_value("direct")
+    at.radio(key="skin_clock").set_value("constant_pressure").run()
     captions = "\n".join(str(c.value) for c in at.caption)
     assert "速度制御そのもの" not in captions
 

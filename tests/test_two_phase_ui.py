@@ -139,8 +139,7 @@ def test_the_skin_layer_rides_the_injection_phase():
     at.checkbox(key="icm_on").set_value(True)
     at.checkbox(key="two_phase_on").set_value(True).run()
     assert "二相解析はスキップされる" not in _texts(at)
-    assert at.radio(key="skin_clock").value == "constant_pressure"
-    at.radio(key="skin_clock").set_value("constant_rate")
+    assert at.radio(key="skin_clock").value == "constant_rate"
     at.number_input(key="two_phase_shot_volume").set_value(4.5)
     at.button[0].click().run()
     assert not at.exception

@@ -2342,11 +2342,15 @@ with st.sidebar:
             skin_clock_mode = st.radio(
                 "スキン層の時計",
                 options=("constant_pressure", "constant_rate"),
-                index=0,
+                # v0.42.2: 速度制御が既定。実機条件（スクリュー位置と速度）が
+                # 既定の射出入力になった以上、時計だけ「機械が速度を保てない」
+                # 側に倒れていると、設定どおりの射出時間を入れた画面が設定
+                # どおりでない充填時間を返す。圧力一定は既存結果の再現用に残す。
+                index=1,
                 key="skin_clock",
                 format_func=lambda m: {
                     "constant_pressure": "圧力一定（従来）: 抵抗増で流量が細り T_fill が伸びる",
-                    "constant_rate": "速度制御: 射出時間 V/Q 固定、圧力が上がる",
+                    "constant_rate": "速度制御（既定）: 射出時間 V/Q 固定、圧力が上がる",
                 }[m],
                 help=(
                     "スキンで流路が痩せたとき機械がどう応えるか。速度制御で射出する"

@@ -10,6 +10,7 @@ import dataclasses
 import io
 import json
 import math
+import re
 import tempfile
 import zipfile
 from collections.abc import Callable
@@ -1696,6 +1697,44 @@ _FILM_GATES: dict[str, _FilmGate] = {
 }
 
 
+#: Internal field names of ``InjectionProfile`` mapped to the sidebar's own
+#: wording. ``validate()`` names ``stages[1].end_position_mm``; the widget
+#: above it is labelled ``第2段 速度切替位置``. Leaving the raw name on screen
+#: makes the user translate a 0-indexed English path into a 1-indexed Japanese
+#: label to work out which box to fix (@claude on PR #89).
+_STAGE_FIELD_JA = {
+    "end_position_mm": "速度切替位置",
+    "velocity_mms": "射出速度",
+}
+
+
+def _injection_error_ja(message: str) -> str:
+    """Render an ``InjectionProfile.validate()`` message in the sidebar's words.
+
+    Both halves need translating, not just the field path: leaving "must be
+    below" next to 第2段 produces a sentence that is half English and reads
+    as an internal error rather than as "you set these two boxes the wrong
+    way round".
+    """
+
+    def _stage(m: re.Match[str]) -> str:
+        field = _STAGE_FIELD_JA.get(m.group(2), m.group(2))
+        return f"第{int(m.group(1)) + 1}段の{field}"
+
+    out = re.sub(r"stages\[(\d+)\]\.(\w+)", _stage, message)
+    out = out.replace("metering_position_mm", "計量位置")
+    out = out.replace("screw_diameter_mm", "スクリュー径")
+    out = re.sub(
+        r"^(.*?) must be below (.*?)(?: --.*)?$",
+        r"\1 は \2 より小さくしてください",
+        out,
+    )
+    out = out.replace("must be a positive finite value", "は正の有限値である必要があります")
+    out = out.replace("must be finite and >= 0", "は 0 以上の有限値である必要があります")
+    out = out.replace("at least one injection stage is required", "射出段数は 1 以上必要です")
+    return out
+
+
 def _injection_rate_inputs(
     mode: str,
 ) -> tuple[InjectionProfile | None, float | None, str | None]:
@@ -1833,8 +1872,9 @@ def _injection_rate_inputs(
             None,
             None,
             (
-                f"射出条件が成立しません: {exc}。"
-                "速度切替位置は計量位置から V/P 位置へ向かって降順に並べてください。"
+                f"射出条件が成立しません: {_injection_error_ja(str(exc))}。"
+                "速度切替位置は計量位置から V/P 位置へ向かって降順に並べてください"
+                "（最終段は V/P 位置で終わります）。"
             ),
         )
 
@@ -3134,6 +3174,20 @@ if "mfs_result" in st.session_state:
                                 else ""
                             )
                         )
+                if md2.get("injection_extrapolated_past_vp"):
+                    # The sidebar's own extrapolation check compares the
+                    # stroke against the *final* cavity; neither the metered
+                    # shot nor the open-gap cavity is that number, so this
+                    # panel has to say it for itself (@claude on PR #89).
+                    st.warning(
+                        "この二相解析は V/P より先を外挿しています。理論射出量 "
+                        f"{md2.get('injection_profile_volume_cm3', 0.0):.2f} cm³ に対し、"
+                        f"計量 {md2['shot_volume_cm3']:.2f} cm³ ／ 開きキャビティ "
+                        f"{md2.get('cavity_volume_open_cm3', float('nan')):.2f} cm³ が"
+                        "それを超えているためで、射出時間は最終段の射出率で射出し続けた"
+                        "前提の値です。計量位置と V/P 位置を実機に合わせるか、"
+                        "計量体積を理論射出量以下にしてください。"
+                    )
                 tc1, tc2, tc3 = st.columns(3)
                 tc1.metric("計量体積 V_shot", f"{md2['shot_volume_cm3']:.2f} cm³")
                 tc2.metric(

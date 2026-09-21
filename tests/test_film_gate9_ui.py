@@ -6,9 +6,11 @@ the pocket end near the land and run at 8° to the well; the proposal starts
 it at t=15.736 and runs it at 3° to the same end point. Behind the ramp the
 pocket is therefore a nearly full-width bar at the ramp cap depth (2.5) —
 the depth-2.5 line t=12.11, which used to stop at the wall, now reaches the
-pocket ends. What the defaults have to carry is just that wall start (and
-the rework's well wall angle); the tests pin the bar itself in the built
-field, against the rework pocket built directly, not only the recorded spec.
+pocket ends. What the defaults have to carry is that wall start and the
+well wall angle — 60°, per the drawing's enlarged section (floor 18.1–24.9);
+the R3 obround on the plan detail is where that wall meets the 2.5 deep
+runner floor, not the well floor. The tests pin the bar itself in the built
+field, against the same pocket with the old wall, not only the recorded spec.
 """
 
 from __future__ import annotations
@@ -44,8 +46,8 @@ HAMOKO_RUNNER_0914_SPEC = {
         "t_range": [15.5, 27.5],
         "half_width": 4.5,
         "depth": 4.5,
-        "floor_t_range": [17.0, 26.0],
-        "wall_angle_deg": 71.6,
+        "floor_t_range": [18.1, 24.9],
+        "wall_angle_deg": 60.0,
     },
     "valve": {"t": 21.5, "w": 0.0, "orifice_diameter": 3.0},
 }

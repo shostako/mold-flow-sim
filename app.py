@@ -395,6 +395,12 @@ material_keys = list(db.keys())
 #                                t=4, a 3 mm × 2.4 deep groove along the outer
 #                                wall down to the land
 #                                (hamoko_gate_furiwake_edge_20260515)
+#   Film gate 9 (扇状/9月末試作)  the 2026/09/14 runner proposal: the rework
+#                                pocket with the outer wall start lowered
+#                                from the pocket end to t=15.736, so the back
+#                                of the pocket is a nearly full-width bar at
+#                                the ramp cap depth
+#                                (hamoko_gate_furiwake_runner_20260914)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -498,6 +504,27 @@ _FILM_GATE7_DEFAULTS = _ProfileGateDefaults(
     valve_t=None,
     well_wall_angle_deg=60.0,
     edge_channel=(3.0, 2.4, (4.0, 23.3)),
+)
+# Film gate 9 = the 2026/09/14 proposal「9月14日ランナ案」for the end-of-September
+# trial. Only the outer wall moves: the current line (3, 149) → (23.3, 4.5)
+# runs at 8° to the gate edge; the proposal (the drawing's phantom line) starts
+# at t=15.736 and runs at 3° to the same end point — the drawing's "5°" is the
+# angle between the two, "(15.736)" the new line at the pocket end. With it the
+# depth-2.5 line t=12.11, which used to stop at the wall, runs out to the ends:
+# behind the ramp the pocket is a nearly full-width bar 2.5 deep (3.6 mm long
+# at the ends, 11 mm at the centre), i.e. a transverse runner feeding the whole
+# film instead of a fan. Land, ramp, 肉盗み (exit 100) and the well read the
+# same as the 08/07 rework. The section view still draws the 07/03 well (60°
+# walls); the plan detail (floor 17–26 × 6, R3) is the rework's 71.6° and wins.
+_FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
+    gate_exit_width=298.0,
+    island_w_near=47.64,
+    island_w_far=9.9,
+    wall_t1=15.736,
+    wall_t2=23.28,
+    wall_w2=4.48,
+    valve_t=None,
+    well_wall_angle_deg=71.6,
 )
 
 
@@ -1693,6 +1720,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "film_gate_8_parametric",
         lambda: _t_gate_sidebar("f8", _FILM_GATE8_DEFAULTS),
         _t_gate_from_inputs,
+    ),
+    "Film gate 9 (扇状/9月末試作)": _FilmGate(
+        "f9",
+        "film_gate_9_parametric",
+        lambda: _profile_gate_sidebar("f9", True, _FILM_GATE9_DEFAULTS),
+        _profile_gate_from_inputs,
     ),
 }
 

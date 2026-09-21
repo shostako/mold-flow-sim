@@ -513,9 +513,12 @@ _FILM_GATE7_DEFAULTS = _ProfileGateDefaults(
 # depth-2.5 line t=12.11, which used to stop at the wall, runs out to the ends:
 # behind the ramp the pocket is a nearly full-width bar 2.5 deep (3.6 mm long
 # at the ends, 11 mm at the centre), i.e. a transverse runner feeding the whole
-# film instead of a fan. Land, ramp, 肉盗み (exit 100) and the well read the
-# same as the 08/07 rework. The section view still draws the 07/03 well (60°
-# walls); the plan detail (floor 17–26 × 6, R3) is the rework's 71.6° and wins.
+# film instead of a fan. Land, ramp and 肉盗み (exit 100) read the same as the
+# 08/07 rework. The well is the 07/03 one (60° walls, floor 18.1–24.9): the
+# enlarged section「9月14日ランナ断面（拡大図」draws exactly what a 60° cut of
+# the R4.5 obround gives (4.5 − 4.5/tan60° = 1.9 either side of t=20 / 23),
+# and the R3 obround on the plan detail is then not the floor but the edge
+# where that wall meets the depth-2.5 runner floor (4.5 − 2.5/tan60° = 3.06).
 _FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
     gate_exit_width=298.0,
     island_w_near=47.64,
@@ -524,7 +527,7 @@ _FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
     wall_t2=23.28,
     wall_w2=4.48,
     valve_t=None,
-    well_wall_angle_deg=71.6,
+    well_wall_angle_deg=60.0,
 )
 
 

@@ -17,6 +17,7 @@ from core import (
     LandSpec,
     MaterialDB,
     ProfilePlateConfig,
+    RampCutSpec,
     WeldSpec,
     build_profile_gate_geometry,
 )
@@ -1009,3 +1010,175 @@ def test_edge_channel_zero_cell_raster_is_rejected() -> None:
     spec = _minimal_spec(edge_channels=[_ec_dict(width=0.01, t_range=[20.0, 20.05])])
     with pytest.raises(ValueError, match="edge_channels\\[0\\].*zero cells"):
         build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+
+
+# -------------------------- ramp cut (ランプ奥の削り込み) --------------------------
+#
+# The minimal spec's ramp reaches its cap 2.4 at t = 2 + 2.0/tan10° = 13.34.
+# A line from (6, 100) to (13.34, 50) mills everything beyond it down to 2.4:
+# at the pocket end (w=100) the cut starts at t=6 where the ramp is only
+# 0.4 + 4·tan10° = 1.105, at w=50 it starts where the ramp is 2.4 already.
+# Coordinates: t = (pad + t_max) − y with t_max = 24, w = |x − (pad + 150)|.
+
+
+def _rc_dict(**overrides) -> dict:
+    rc = {"line": [[6.0, 100.0], [13.3, 50.0]], "depth": 2.4, "slope_angle_deg": 90.0}
+    rc.update(overrides)
+    return rc
+
+
+def _ramp_min(t: float) -> float:
+    return min(2.4, 0.4 + math.tan(math.radians(10.0)) * (t - 2.0))
+
+
+def _t_cut_min(w: float) -> float:
+    return 6.0 + (13.3 - 6.0) * (100.0 - w) / 50.0
+
+
+def _tw(geom):
+    yy, xx = _grid(geom)
+    return (5.0 + 24.0) - yy, np.abs(xx - (5.0 + 150.0))
+
+
+def test_ramp_cut_step_deepens_only_beyond_the_line_and_mirrors() -> None:
+    base = _minimal_spec()
+    spec = _minimal_spec(ramp_cut=_rc_dict())
+    g0 = build_profile_gate_geometry(base, _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    assert np.array_equal(g0.mask, g1.mask)  # a floor: silhouette untouched
+    assert np.all(g1.thickness_mm >= g0.thickness_mm)
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    t, wa = _tw(g1)
+    # every changed cell is beyond the line, inside its w-extent, past the land
+    assert np.all(t[diff] >= _t_cut_min(wa[diff]) - 1e-9)
+    assert wa[diff].min() >= 50.0 and wa[diff].max() <= 100.0
+    assert t[diff].min() > 2.0
+    # ... and every pocket cell beyond the line that was shallower is now 2.4
+    zone = g0.mask & (t > 2.0) & (t <= 24.0) & (wa >= 50.0) & (wa <= 100.0)
+    zone &= t >= _t_cut_min(wa)
+    assert np.allclose(g1.thickness_mm[zone], 2.4)
+    assert np.array_equal(diff, zone & (g0.thickness_mm < 2.4 - 1e-9))
+    nx = diff.shape[1]
+    assert diff[:, : nx // 2].sum() == diff[:, (nx + 1) // 2 :].sum() > 0
+
+
+def test_ramp_cut_leaves_the_centre_inside_the_line_end_alone() -> None:
+    """The line's last w is where the cut stops, not where it turns: a cell
+    just inside w=50 keeps its ramp depth even where a continued line would
+    have reached it."""
+    spec = _minimal_spec(ramp_cut=_rc_dict(line=[[6.0, 100.0], [10.0, 50.0]]))
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate())
+    g1 = build_profile_gate_geometry(spec, _plate())
+    t, wa = _tw(g1)
+    inside = g1.mask & (wa < 50.0) & (t > 2.0) & (t <= 24.0)
+    assert np.array_equal(g1.thickness_mm[inside], g0.thickness_mm[inside])
+    just_out = g1.mask & (wa > 50.0) & (wa < 51.0) & (t >= 10.0) & (t <= 13.0)
+    assert just_out.any() and np.allclose(g1.thickness_mm[just_out], 2.4)
+
+
+def test_ramp_cut_chamfer_profile_at_the_pocket_end() -> None:
+    """Along the end column (w=99.5, t_cut≈6.07) the depth is
+    max(ramp, 2.4 − (t_cut − t)·tan(slope)) cell for cell; with 90° it is
+    the bare step (ramp up to the line, 2.4 beyond)."""
+    for slope in (90.0, 45.0, 30.0):
+        spec = _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=slope))
+        g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.5)
+        t, wa = _tw(g)
+        col = g.mask & np.isclose(wa, 99.75) & (t > 2.0) & (t <= 24.0)
+        t_cut = _t_cut_min(99.75)
+        for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+            if slope >= 90.0:
+                want = 2.4 if tv >= t_cut else _ramp_min(tv)
+            else:
+                want = max(
+                    _ramp_min(tv), 2.4 - max(t_cut - tv, 0.0) * math.tan(math.radians(slope))
+                )
+            assert got == pytest.approx(want, abs=1e-9), (slope, tv)
+
+
+def test_ramp_cut_shallower_chamfer_removes_more_steel_monotonically() -> None:
+    vols = []
+    # the no-step angle at (6, 100) is atan(2.0/4.0) = 26.57°: stay above it
+    for slope in (90.0, 60.0, 45.0, 30.0):
+        spec = _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=slope))
+        vols.append(build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25).volume_cm3())
+    base = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25).volume_cm3()
+    assert base < vols[0] < vols[1] < vols[2] < vols[3]
+
+
+def test_ramp_cut_step_volume_matches_closed_form() -> None:
+    """With the bare step the removed steel is ∫∫ (2.4 − ramp(t)) over the
+    triangle between the line, the cap line t=13.34 and the end w=100 —
+    a plain 2D quadrature on a fine grid, independent of the raster."""
+    spec = _minimal_spec(ramp_cut=_rc_dict(line=[[6.0, 100.0], [13.34, 50.0]]))
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    dv = (g1.volume_cm3() - g0.volume_cm3()) * 1000.0
+    ws = np.linspace(50.0, 100.0, 2001)
+    ts = np.linspace(6.0, 13.34, 2001)
+    W, Tg = np.meshgrid(ws, ts, indexing="ij")
+    t_cut = 6.0 + (13.34 - 6.0) * (100.0 - W) / 50.0
+    dz = np.where(
+        Tg >= t_cut, np.maximum(2.4 - (0.4 + math.tan(math.radians(10.0)) * (Tg - 2.0)), 0.0), 0.0
+    )
+    expected = 2.0 * float(np.trapezoid(np.trapezoid(dz, ts, axis=1), ws))
+    assert dv == pytest.approx(expected, rel=0.03)
+
+
+def test_ramp_cut_json_roundtrip_and_default_omitted() -> None:
+    spec = _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=30.0))
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.ramp_cut == RampCutSpec(
+        line=((6.0, 100.0), (13.3, 50.0)), depth=2.4, slope_angle_deg=30.0
+    )
+    # slope omitted → the bare step
+    bare = _minimal_spec(ramp_cut={"line": [[6.0, 100.0], [13.3, 50.0]], "depth": 2.4})
+    assert bare.ramp_cut.slope_angle_deg == 90.0
+    assert "slope_angle_deg" in bare.to_dict()["ramp_cut"]
+    legacy = _minimal_spec()
+    assert legacy.ramp_cut is None
+    assert "ramp_cut" not in legacy.to_dict()
+    assert "ramp_cut" not in _demo_spec().to_dict()
+
+
+def test_ramp_cut_validation() -> None:
+    with pytest.raises(ValueError, match="increasing"):
+        _minimal_spec(ramp_cut=_rc_dict(line=[[13.3, 100.0], [6.0, 50.0]]))
+    with pytest.raises(ValueError, match="strictly decreasing"):
+        _minimal_spec(ramp_cut=_rc_dict(line=[[6.0, 50.0], [13.3, 100.0]]))
+    with pytest.raises(ValueError, match="w must be ≥ 0"):
+        _minimal_spec(ramp_cut=_rc_dict(line=[[6.0, 100.0], [13.3, -1.0]]))
+    with pytest.raises(ValueError, match="beyond the land"):
+        _minimal_spec(ramp_cut=_rc_dict(line=[[2.0, 100.0], [13.3, 50.0]]))
+    with pytest.raises(ValueError, match="positive"):
+        _minimal_spec(ramp_cut=_rc_dict(depth=0.0))
+    for bad in (0.0, 90.5, -5.0):
+        with pytest.raises(ValueError, match="slope_angle_deg"):
+            _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=bad))
+    # the chamfer must not reach the land: at (6, 100) the no-step angle is
+    # atan((2.4 − 0.4)/(6 − 2)) = 26.57°; 26.6 passes, 26.5 cuts the land
+    _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=26.6))
+    with pytest.raises(ValueError, match="too shallow"):
+        _minimal_spec(ramp_cut=_rc_dict(slope_angle_deg=26.5))
+    with pytest.raises(ValueError, match="unknown key"):
+        _minimal_spec(ramp_cut={**_rc_dict(), "bogus": 1})
+    with pytest.raises(ValueError, match="must be an object"):
+        _minimal_spec(ramp_cut=3.0)
+    # single-pocket form only: fans carry no ramp cut
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict({**fans, "ramp_cut": _rc_dict()})
+
+
+def test_ramp_cut_that_deepens_nothing_is_rejected() -> None:
+    """A line placed where the ramp is already at the cut depth records a
+    feature the geometry does not have — same false green as a zero-cell
+    edge channel, so the builder refuses it."""
+    spec = _minimal_spec(ramp_cut=_rc_dict(line=[[14.0, 100.0], [20.0, 50.0]], depth=2.4))
+    with pytest.raises(ValueError, match="ramp_cut.*deepens no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    # ... but the same line with a deeper cut is a real feature
+    deeper = _minimal_spec(ramp_cut=_rc_dict(line=[[14.0, 100.0], [20.0, 50.0]], depth=3.0))
+    build_profile_gate_geometry(deeper, _plate(), cell_size_mm=1.0)

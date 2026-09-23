@@ -58,6 +58,17 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    ``"inner"``. Unlike the runner they never extend the silhouette — they
    only deepen existing cavity cells, turning the rim into a
    low-resistance raceway (S ∝ h³).
+10. **Ramp cut** (optional, single-pocket form) — the back of the ramp
+    milled down to a flat ``depth`` beyond a straight ``line`` in the
+    (t, w) plane (ランプ奥の削り込み): ``t_cut(w)`` is the line read as t
+    over its own w-extent, ``d = max(d, depth)`` for ``t ≥ t_cut``, and
+    on the product side of the line a chamfer at ``slope_angle_deg``
+    (``d = max(d, depth − (t_cut − t)·tan(slope))``) replaces the step the
+    cut would otherwise leave where the ramp has not reached ``depth``
+    yet; 90° is the bare step. A floor like the edge channels: never
+    touches the land (``t ≤ land.length``) nor the silhouette, and stops
+    laterally at the line's ends — the pocket between the line's last w
+    and the valve axis is untouched (the 9/23 drawing's "120").
 
 Confidentiality note: this repository ships only the format definition,
 the builder, and a **fictional-dimension demo spec**
@@ -231,6 +242,30 @@ class EdgeChannelSpec:
     side: str = "outer"
 
 
+@dataclass(frozen=True)
+class RampCutSpec:
+    """Back of the ramp milled to a flat ``depth`` beyond a line (ランプ奥の削り込み).
+
+    ``line`` is ``((t1, w1), (t2, w2))`` with t increasing and w strictly
+    decreasing, read as ``t_cut(w)`` over ``w ∈ [w2, w1]``: the cut is the
+    pocket beyond it (``t ≥ t_cut``), ``d = max(d, depth)``. Where the ramp
+    is still shallower than ``depth`` at the line the cut would leave a
+    step; ``slope_angle_deg`` is the chamfer that replaces it, cut into the
+    product side (``t < t_cut``) at that angle to the PL until it meets the
+    ramp — ``d = max(d, depth − (t_cut − t)·tan(slope))``. 90° keeps the
+    bare step. The chamfer must not reach the land: at the line's start
+    (its smallest t) ``depth − (t1 − land.length)·tan(slope) ≤ land.depth``.
+
+    Laterally the feature is exactly the line's w-extent: cells with
+    ``w < w2`` (towards the valve axis) or ``w > w1`` are untouched, so the
+    line's last point is where the cut stops, not where it turns.
+    """
+
+    line: Line
+    depth: float
+    slope_angle_deg: float = 90.0
+
+
 # ---------------------------------------------------------------------------
 # from_dict helpers
 # ---------------------------------------------------------------------------
@@ -398,6 +433,8 @@ class GateProfileSpec:
     # Single-pocket form only: bands along the outer wall. Fans carry their
     # own ``SubGateSpec.edge_channels``.
     edge_channels: tuple[EdgeChannelSpec, ...] = ()
+    # Single-pocket form only: the back of the ramp milled flat beyond a line.
+    ramp_cut: RampCutSpec | None = None
 
     # ---- JSON I/O ----
 
@@ -421,6 +458,7 @@ class GateProfileSpec:
                 "sub_gates",
                 "runner",
                 "edge_channels",
+                "ramp_cut",
             },
             "",
         )
@@ -559,6 +597,20 @@ class GateProfileSpec:
                 ),
             )
 
+        ramp_cut: RampCutSpec | None = None
+        rc_d = _section(d, "ramp_cut", required=False)
+        if rc_d is not None:
+            _check_unknown(rc_d, {"line", "depth", "slope_angle_deg"}, "ramp_cut")
+            ramp_cut = RampCutSpec(
+                line=_line(rc_d, "line", "ramp_cut."),
+                depth=_num(rc_d, "depth", "ramp_cut."),
+                slope_angle_deg=(
+                    _num(rc_d, "slope_angle_deg", "ramp_cut.")
+                    if "slope_angle_deg" in rc_d
+                    else 90.0
+                ),
+            )
+
         valve_d = _section(d, "valve", required=True)
         _check_unknown(valve_d, {"t", "w", "orifice_diameter"}, "valve")
         valve = ValveSpec(
@@ -581,6 +633,7 @@ class GateProfileSpec:
             sub_gates=tuple(sub_gates),
             runner=runner,
             edge_channels=_edge_channels(d, ""),
+            ramp_cut=ramp_cut,
         )
         spec.validate()
         return spec
@@ -640,6 +693,12 @@ class GateProfileSpec:
             }
         if self.edge_channels:
             d["edge_channels"] = [_edge_channel_dict(ec) for ec in self.edge_channels]
+        if self.ramp_cut is not None:
+            d["ramp_cut"] = {
+                "line": [list(p) for p in self.ramp_cut.line],
+                "depth": self.ramp_cut.depth,
+                "slope_angle_deg": self.ramp_cut.slope_angle_deg,
+            }
         if self.island is not None:
             d["island"] = {
                 "angle_deg": self.island.angle_deg,
@@ -802,6 +861,45 @@ class GateProfileSpec:
             t_end=self.t_max(),
             t_end_label="t_max()",
         )
+        if self.ramp_cut is not None:
+            rc = self.ramp_cut
+            if self.outer_wall_line is None:
+                raise ValueError("ramp_cut needs the single-pocket form (outer_wall_line)")
+            (t1, w1), (t2, w2) = rc.line
+            if t2 <= t1 + _EPS:
+                raise ValueError(f"ramp_cut.line t must be increasing, got {t1} → {t2}")
+            if w2 >= w1 - _EPS:
+                raise ValueError(
+                    f"ramp_cut.line w must be strictly decreasing (the line is read as t "
+                    f"over w), got {w1} → {w2}"
+                )
+            if w2 < 0:
+                raise ValueError(f"ramp_cut.line w must be ≥ 0, got {w2}")
+            if t1 <= self.land.length + _EPS:
+                raise ValueError(
+                    f"ramp_cut.line must start beyond the land: t1 ({t1}) ≤ land.length "
+                    f"({self.land.length})"
+                )
+            if rc.depth <= 0:
+                raise ValueError(f"ramp_cut.depth must be positive, got {rc.depth}")
+            if not (0.0 < rc.slope_angle_deg <= 90.0):
+                raise ValueError(
+                    f"ramp_cut.slope_angle_deg must be in (0, 90], got {rc.slope_angle_deg}"
+                )
+            # The chamfer is deepest-reaching where the line is nearest the
+            # exit (t1). If it is still deeper than the land there, it would
+            # cut into the land -- the builder leaves the land alone, so the
+            # spec would describe a chamfer the geometry does not have.
+            if rc.slope_angle_deg < 90.0:
+                reach = rc.depth - (t1 - self.land.length) * math.tan(
+                    math.radians(rc.slope_angle_deg)
+                )
+                if reach > self.land.depth + _EPS:
+                    raise ValueError(
+                        f"ramp_cut.slope_angle_deg ({rc.slope_angle_deg}) is too shallow: the "
+                        f"chamfer is {reach:.3f} deep at the land end (land.depth "
+                        f"{self.land.depth}) — steepen it or move the line back"
+                    )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"
             if sg.tip_t <= self.land.length + _EPS:
@@ -1203,6 +1301,46 @@ def _apply_edge_channels(
     return d
 
 
+def _apply_ramp_cut(
+    rc: RampCutSpec,
+    *,
+    land_len: float,
+    in_pocket: np.ndarray,
+    d: np.ndarray,
+    t: np.ndarray,
+    wa: np.ndarray,
+    cell_size: float,
+) -> np.ndarray:
+    """Mill the back of the ramp flat beyond ``rc.line``; returns the new depth field.
+
+    ``t_cut(w)`` is the line inverted over its own w-extent (validated
+    strictly decreasing in w). Beyond it the floor is ``depth``; on the
+    product side the chamfer ``depth − (t_cut − t)·tan(slope)`` runs up
+    until the ramp is deeper anyway. Both are floors (``max``) restricted to
+    pocket cells past the land and to ``w ∈ [w2, w1]`` — the silhouette,
+    the land and the pocket inside the line's last w never change. A cut
+    that deepens no cell is rejected (the spec would carry a feature the
+    geometry lacks, same false-green class as a zero-cell edge channel).
+    """
+    (t1, w1), (t2, w2) = rc.line
+    t_cut = t1 + (t2 - t1) * (w1 - wa) / (w1 - w2)
+    run = np.maximum(t_cut - t, 0.0)
+    if rc.slope_angle_deg >= 90.0:
+        d_cut = np.where(run > 0.0, -np.inf, rc.depth)
+    else:
+        d_cut = rc.depth - run * math.tan(math.radians(rc.slope_angle_deg))
+    zone = in_pocket & (t > land_len) & (wa >= w2 - 1e-9) & (wa <= w1 + 1e-9)
+    d_new = np.where(zone, np.maximum(d, d_cut), d)
+    if not (d_new > d + 1e-9).any():
+        raise ValueError(
+            f"ramp_cut (line {rc.line}, depth {rc.depth}) deepens no cell at "
+            f"cell_size_mm={cell_size}: the pocket beyond the line is already that deep "
+            "or no cell centre falls in its w-extent. Move the line forward, deepen the "
+            "cut, or drop it."
+        )
+    return d_new
+
+
 def _polyline_distance(
     path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
 ) -> np.ndarray:
@@ -1358,6 +1496,16 @@ def build_profile_gate_geometry(
             cell_size=dx,
             label="edge_channels",
         )
+        if spec.ramp_cut is not None:
+            d_base = _apply_ramp_cut(
+                spec.ramp_cut,
+                land_len=land_len,
+                in_pocket=in_gate_base,
+                d=d_base,
+                t=t,
+                wa=wa,
+                cell_size=dx,
+            )
     else:
         # Sub-gate fans: outside every fan is steel at the PL. Each fan
         # carries the land + main ramp, overridden by its own island band.

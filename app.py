@@ -49,6 +49,7 @@ from core.injection_profile import InjectionProfile, InjectionStage
 from core.profile_gate import (
     EdgeChannelSpec,
     IslandSpec,
+    LandEndsSpec,
     LandSpec,
     MainRampSpec,
     RampCutSpec,
@@ -408,6 +409,11 @@ material_keys = list(db.keys())
 #                                end, untouched 120 in the centre), the step
 #                                replaced by a chamfer on the product side
 #                                (hamoko_gate_furiwake_stepcut_20260923)
+#   Film gate 11 (扇状/ランド両端肉厚可変) the 2026/09/23 candidate A: Film gate 9
+#                                with both ends of the land (|w| ≥ 100) milled
+#                                flat to 0.5; the ramp is untouched, so the
+#                                flat runs on to t=1.78 where the ramp reaches
+#                                0.5 (hamoko_gate_furiwake_cand_A_landends05_20260923)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -435,6 +441,9 @@ class _ProfileGateDefaults:
     # chamfer angle). None = the checkbox starts off. Film gate 10 is the
     # drawing that *is* the cut.
     ramp_cut: tuple[float, float, float] | None = None
+    # ランド両端の増厚: (untouched centre width, depth of the flat). None = the
+    # checkbox starts off. Film gate 11 is the drawing that *is* the cut.
+    land_ends: tuple[float, float] | None = None
 
 
 _FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
@@ -573,6 +582,20 @@ _FILM_GATE10_DEFAULTS = dataclasses.replace(
         ),
     ),
 )
+
+
+# Film gate 11 = the 2026/09/23 candidate A「ランド端部増厚」
+# (hamoko_gate_furiwake_cand_A_landends05_20260923): Film gate 9's pocket with
+# both ends of the land, 49 each (|w| ≥ 100, "200" untouched in the centre),
+# milled with a flat 0.5 below the PL. The ramp face is not touched, so the flat
+# runs on until the 10.95° ramp itself reaches 0.5 — t = 1 + 0.15/tan(10.95°)
+# = 1.78 ("1.78★") — and meets it without a step; the step at |w| = 100 is the
+# full 0.15 at the land and fades to 0 at t=1.78. Pocket volume 9,762 mm³ at
+# 0.1 mm (+20 on 9/14). The aim: in the compression phase the 0.35 land at the
+# ends freezes shut first, and the transverse runner's pressure never reaches
+# the product corners; 0.5 has (0.5/0.35)³ ≈ 2.9× the conductance and about
+# twice the freeze time. The depth of the flat is the design variable.
+_FILM_GATE11_DEFAULTS = dataclasses.replace(_FILM_GATE9_DEFAULTS, land_ends=(200.0, 0.5))
 
 
 # Narrowest fan tip the Film gate 4 sliders offer. It also sets how close the
@@ -1018,6 +1041,81 @@ def _ramp_cut_from_inputs(v: dict) -> RampCutSpec | None:
     )
 
 
+def _land_ends_inputs(
+    tag: str,
+    v: dict,
+    *,
+    symmetric: bool,
+    w_full: float,
+    default: tuple[float, float] | None,
+) -> None:
+    """The ランド両端の増厚 block of the single-pocket Film gates (fills ``v``).
+
+    Sets ``v["le_on"]`` and, when on, ``le_center_w / le_depth``. The cut is
+    a flat ``le_depth`` below the PL over the pocket outside the untouched
+    centre; the ramp is not touched, so the flat reaches as far as the ramp
+    is shallower than it — the caption reports that t and the step at the
+    edge of the centre. Labels are fixed: the label is part of the widget
+    key, and a label that tracks a bound would reset the value.
+    """
+    slider, _ = _tagged_widgets(tag)
+    st.markdown("**ランド両端の増厚**")
+    v["le_on"] = st.checkbox(
+        "ランド両端の増厚を有効化",
+        value=default is not None,
+        key=f"{tag}_le_on",
+        help=(
+            "中央の現状幅より外側のランド部を、PL から一定深さの平面でさらう。"
+            "ランプ面は触らないので、ランプがその深さに達する t まで平坦部（ランド）が広がる。"
+            "深さは d = max(既存, この値) の床で、外形は変えない。"
+        ),
+    )
+    if not v["le_on"]:
+        return
+    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
+    ramp_deg, cap = float(v["ramp_angle"]), float(v["ramp_cap"])
+    center_d, depth_d = default if default is not None else (200.0, land_depth + 0.15)
+    w_span = float(w_full * (2.0 if symmetric else 1.0))
+    w_word = "中央の現状幅（両側合計）" if symmetric else "現状幅（バルブ側端から）"
+    v["le_center_w"] = slider(
+        f"{w_word} [mm]",
+        0.0,
+        max(w_span - 1.0, 1.0),
+        float(min(center_d, max(w_span - 1.0, 1.0))),
+        step=1.0,
+        help=(
+            "この幅の内側はランドを現状のまま残す。外側（両端）が増厚の対象。"
+            if symmetric
+            else "バルブ側端からこの幅までは現状のまま。それより遠い側が増厚の対象。"
+        ),
+    )
+    lo = round(land_depth + 0.01, 2)
+    hi = max(lo + 0.01, round(cap, 2))
+    v["le_depth"] = slider(
+        "増厚後のランド深さ [mm] (> ランド深さ、≤ ランプ上限)",
+        lo,
+        hi,
+        float(min(max(depth_d, lo), hi)),
+        step=0.01,
+        help="PL からさらう平面の深さ（図面の 0.5）。ランド深さより深く、ランプ上限以下。",
+    )
+    depth = float(v["le_depth"])
+    t_flat = land_len + max(depth - land_depth, 0.0) / max(math.tan(math.radians(ramp_deg)), 1e-9)
+    ratio = (depth / land_depth) ** 3 if land_depth > 0 else float("inf")
+    st.caption(
+        f"平坦部はランド終端 t={land_len:.2f} から t={t_flat:.2f} まで広がり、そこでランプに段差なく合流する。"
+        f"現状幅の境の段は最大 {max(depth - land_depth, 0.0):.2f} mm（t={t_flat:.2f} で 0）。"
+        f"端のランドの流動コンダクタンスは現状の {ratio:.1f} 倍。"
+    )
+
+
+def _land_ends_from_inputs(v: dict) -> LandEndsSpec | None:
+    if not v.get("le_on"):
+        return None
+    w_from = float(v["le_center_w"]) / 2.0 if v["symmetric"] else float(v["le_center_w"])
+    return LandEndsSpec(w_from=w_from, depth=float(v["le_depth"]))
+
+
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
@@ -1070,6 +1168,8 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             value=float(max(2.5, v["land_depth"])),
             step=0.1,
         )
+
+        _land_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_ends)
 
         st.markdown("**肉盗み（浅い帯＝振り分け）**")
         v["island_on"] = st.checkbox(
@@ -1244,6 +1344,7 @@ def _profile_gate_from_inputs(
         well=well,
         edge_channels=_edge_channels_from_inputs(v, ("outer",)),
         ramp_cut=_ramp_cut_from_inputs(v),
+        land_ends=_land_ends_from_inputs(v),
     )
     return spec, _plate_from_inputs(v), float(v["cell_size"])
 
@@ -1887,6 +1988,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f10",
         "film_gate_10_parametric",
         lambda: _profile_gate_sidebar("f10", True, _FILM_GATE10_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 11 (扇状/ランド両端肉厚可変)": _FilmGate(
+        "f11",
+        "film_gate_11_parametric",
+        lambda: _profile_gate_sidebar("f11", True, _FILM_GATE11_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

@@ -14,6 +14,7 @@ from core import (
     EdgeChannelSpec,
     GateProfileSpec,
     HeleShawSolver,
+    LandEndsSpec,
     LandSpec,
     MaterialDB,
     ProfilePlateConfig,
@@ -1182,3 +1183,112 @@ def test_ramp_cut_that_deepens_nothing_is_rejected() -> None:
     # ... but the same line with a deeper cut is a real feature
     deeper = _minimal_spec(ramp_cut=_rc_dict(line=[[14.0, 100.0], [20.0, 50.0]], depth=3.0))
     build_profile_gate_geometry(deeper, _plate(), cell_size_mm=1.0)
+
+
+# ----------------------- land ends (ランド両端の増厚) ------------------
+# Minimal pocket: land 0.4 × 2, ramp 10°, straight wall at w=100. A flat 0.6
+# at w ≥ 60 runs from the exit to where the ramp reaches 0.6:
+# t = 2 + 0.2/tan10° = 3.134.
+
+_LE_T_FLAT = 2.0 + 0.2 / math.tan(math.radians(10.0))
+
+
+def test_land_ends_flatten_only_the_ends_up_to_where_the_ramp_catches_up() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(land_ends={"w_from": 60.0, "depth": 0.6})
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    assert np.array_equal(g0.mask, g1.mask)  # a floor: silhouette untouched
+    assert np.all(g1.thickness_mm >= g0.thickness_mm)
+    diff = g1.thickness_mm != g0.thickness_mm
+    t, wa = _tw(g1)
+    # exactly the pocket cells at w ≥ 60 that were shallower than 0.6 ...
+    zone = g0.mask & (t >= 0.0) & (wa >= 60.0) & (g0.thickness_mm < 0.6 - 1e-9)
+    assert zone.any() and np.array_equal(diff, zone)
+    assert np.allclose(g1.thickness_mm[diff], 0.6)
+    # ... which is the land and the ramp up to t_flat, never beyond
+    assert t[diff].max() <= _LE_T_FLAT and t[diff].min() < 0.25
+    # the centre keeps its land
+    centre_land = g1.mask & (t >= 0.0) & (t <= 2.0) & (wa < 60.0)
+    assert np.allclose(g1.thickness_mm[centre_land], 0.4)
+    # mirrored: both ends
+    nx = diff.shape[1]
+    assert diff[:, : nx // 2].sum() == diff[:, (nx + 1) // 2 :].sum() > 0
+
+
+def test_land_ends_column_is_max_of_ramp_and_the_flat() -> None:
+    spec = _minimal_spec(land_ends={"w_from": 60.0, "depth": 0.6})
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    col = g.mask & np.isclose(wa, 80.125) & (t >= 0.0)
+    assert col.sum() > 50
+    for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+        ramp = 0.4 if tv <= 2.0 else _ramp_min(tv)
+        assert got == pytest.approx(max(ramp, 0.6), abs=1e-9), tv
+
+
+def test_land_ends_volume_matches_closed_form() -> None:
+    """Per unit width the flat removes the land strip 0.2 × 2 plus the
+    triangle between the flat and the ramp, 0.2 × (t_flat − 2)/2; two ends
+    of 40 each."""
+    spec = _minimal_spec(land_ends={"w_from": 60.0, "depth": 0.6})
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    dv = (g1.volume_cm3() - g0.volume_cm3()) * 1000.0
+    expected = 2.0 * 40.0 * (0.2 * 2.0 + 0.2 * (_LE_T_FLAT - 2.0) / 2.0)
+    assert dv == pytest.approx(expected, rel=0.03)
+
+
+def test_land_ends_one_sided_is_the_far_end_only() -> None:
+    """One-sided: w is the offset from the valve-side edge, so only the far
+    end (w ≥ w_from) is milled."""
+    d = _minimal_spec_dict(symmetric=False, outer_wall_line=[[0.0, 200.0], [24.0, 200.0]])
+    g0 = build_profile_gate_geometry(GateProfileSpec.from_dict(d), _plate())
+    spec = GateProfileSpec.from_dict({**d, "land_ends": {"w_from": 150.0, "depth": 0.6}})
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    _iy, ix = np.indices(diff.shape)
+    w = (ix + 0.5) - (5.0 + 150.0 - 100.0)  # offset from the valve-side edge x=55
+    assert w[diff].min() >= 150.0 and w[diff].max() <= 200.0
+
+
+def test_land_ends_json_roundtrip_and_default_omitted() -> None:
+    spec = _minimal_spec(land_ends={"w_from": 60.0, "depth": 0.6})
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.land_ends == LandEndsSpec(w_from=60.0, depth=0.6)
+    legacy = _minimal_spec()
+    assert legacy.land_ends is None
+    assert "land_ends" not in legacy.to_dict()
+    assert "land_ends" not in _demo_spec().to_dict()
+
+
+def test_land_ends_validation() -> None:
+    le = {"w_from": 60.0, "depth": 0.6}
+    with pytest.raises(ValueError, match="deeper than land.depth"):
+        _minimal_spec(land_ends={**le, "depth": 0.4})
+    with pytest.raises(ValueError, match="cap_depth"):
+        _minimal_spec(land_ends={**le, "depth": 2.5})
+    _minimal_spec(land_ends={**le, "depth": 2.4})  # the cap itself is allowed
+    _minimal_spec(land_ends={**le, "w_from": 0.0})  # the whole land deeper
+    for bad in (-1.0, 100.0, 120.0):
+        with pytest.raises(ValueError, match="w_from"):
+            _minimal_spec(land_ends={**le, "w_from": bad})
+    with pytest.raises(ValueError, match="missing key"):
+        _minimal_spec(land_ends={"w_from": 60.0})
+    with pytest.raises(ValueError, match="unknown key"):
+        _minimal_spec(land_ends={**le, "bogus": 1})
+    with pytest.raises(ValueError, match="must be an object"):
+        _minimal_spec(land_ends=0.5)
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict({**fans, "land_ends": le})
+
+
+def test_land_ends_that_deepen_nothing_are_rejected() -> None:
+    """w_from past the last cell centre (99.5 at 1.0 mm) records a feature
+    the geometry lacks; a finer mesh puts a centre there and it is real."""
+    spec = _minimal_spec(land_ends={"w_from": 99.9, "depth": 0.6})
+    with pytest.raises(ValueError, match="land_ends.*deepens no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)

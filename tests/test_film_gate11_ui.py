@@ -212,3 +212,23 @@ def test_the_default_does_not_leak_into_film_gates_9_and_10():
     at.button[0].click().run()
     assert not at.exception
     assert _recorded_spec(at, FILM_GATE9_LABEL).get("land_ends") is None
+
+
+def test_with_the_cap_at_the_land_depth_the_block_is_disabled_not_broken():
+    """「ランプ上限深さ」may equal「ランド深さ」. Then no flat depth is both
+    deeper than the land and within the cap: the checkbox is disabled, the
+    run succeeds without land_ends, and nothing fails validation (Codex P2
+    on PR #93: the slider used to offer only values above the cap)."""
+    at = _film_gate11_app()
+    at.slider(key="f11_ランプ上限深さ [mm] (≥ ランド深さ)").set_value(0.35).run()
+    box = at.checkbox(key="f11_le_on")
+    assert box.disabled is True
+    assert not any(s.key == DEPTH_KEY for s in at.slider)
+    at.button[0].click().run()
+    assert not at.exception
+    assert not at.error
+    assert _recorded_spec(at).get("land_ends") is None
+    # raising the cap again brings the block back, still on by default
+    at.slider(key="f11_ランプ上限深さ [mm] (≥ ランド深さ)").set_value(2.5).run()
+    assert at.checkbox(key="f11_le_on").disabled is False
+    assert at.slider(key=DEPTH_KEY).value == pytest.approx(0.5)

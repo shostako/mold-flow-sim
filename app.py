@@ -1060,20 +1060,35 @@ def _land_ends_inputs(
     """
     slider, _ = _tagged_widgets(tag)
     st.markdown("**ランド両端の増厚**")
-    v["le_on"] = st.checkbox(
+    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
+    ramp_deg, cap = float(v["ramp_angle"]), float(v["ramp_cap"])
+    # The flat must be deeper than the land and no deeper than the cap. With
+    # the cap at the land depth (a setting the cap slider allows) there is no
+    # such depth: a slider there would offer only out-of-range values and
+    # every run would fail validation (Codex P2 on PR #93). Disable instead.
+    lo = round(land_depth + 0.01, 2)
+    hi = round(cap, 2)
+    room = hi > lo
+    checked = st.checkbox(
         "ランド両端の増厚を有効化",
         value=default is not None,
         key=f"{tag}_le_on",
+        disabled=not room,
         help=(
             "中央の現状幅より外側のランド部を、PL から一定深さの平面でさらう。"
             "ランプ面は触らないので、ランプがその深さに達する t まで平坦部（ランド）が広がる。"
             "深さは d = max(既存, この値) の床で、外形は変えない。"
         ),
     )
+    v["le_on"] = bool(checked) and room
+    if not room:
+        st.caption(
+            "ランプ上限深さがランド深さと同じなので、増厚できる深さが無い（増厚は無効）。"
+            "ランプ上限深さを上げると使える。"
+        )
+        return
     if not v["le_on"]:
         return
-    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
-    ramp_deg, cap = float(v["ramp_angle"]), float(v["ramp_cap"])
     center_d, depth_d = default if default is not None else (200.0, land_depth + 0.15)
     w_span = float(w_full * (2.0 if symmetric else 1.0))
     w_word = "中央の現状幅（両側合計）" if symmetric else "現状幅（バルブ側端から）"
@@ -1089,8 +1104,6 @@ def _land_ends_inputs(
             else "バルブ側端からこの幅までは現状のまま。それより遠い側が増厚の対象。"
         ),
     )
-    lo = round(land_depth + 0.01, 2)
-    hi = max(lo + 0.01, round(cap, 2))
     v["le_depth"] = slider(
         "増厚後のランド深さ [mm] (> ランド深さ、≤ ランプ上限)",
         lo,

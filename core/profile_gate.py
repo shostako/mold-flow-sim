@@ -266,6 +266,30 @@ class RampCutSpec:
     slope_angle_deg: float = 90.0
 
 
+@dataclass(frozen=True)
+class LandEndsSpec:
+    """Both ends of the land milled flat to a deeper plane (ランド両端の増厚).
+
+    Every pocket cell with ``w ≥ w_from`` gets ``d = max(d, depth)``: a flat
+    cut ``depth`` below the PL across the ends of the gate block. The ramp
+    is not touched, so the flat runs on past the land until the ramp itself
+    reaches ``depth`` (at ``t = land.length + (depth − land.depth)/tan(ramp)``)
+    and joins it there without a step — the land gets deeper *and* longer at
+    the ends, with a vertical step of ``depth − land.depth`` at ``w = w_from``
+    that fades to nothing where the ramp catches up. The centre
+    (``w < w_from``) keeps the original land.
+
+    ``w`` is the same width coordinate as everywhere else: ``|x − x_valve|``
+    when symmetric (so both ends), the offset from the valve-side edge when
+    one-sided (so only the far end). ``land.depth < depth ≤ main_ramp.cap_depth``
+    — at or below the land it removes nothing, beyond the cap it is no longer
+    a land.
+    """
+
+    w_from: float
+    depth: float
+
+
 # ---------------------------------------------------------------------------
 # from_dict helpers
 # ---------------------------------------------------------------------------
@@ -435,6 +459,8 @@ class GateProfileSpec:
     edge_channels: tuple[EdgeChannelSpec, ...] = ()
     # Single-pocket form only: the back of the ramp milled flat beyond a line.
     ramp_cut: RampCutSpec | None = None
+    # Single-pocket form only: the land ends (w ≥ w_from) milled to a deeper flat.
+    land_ends: LandEndsSpec | None = None
 
     # ---- JSON I/O ----
 
@@ -459,6 +485,7 @@ class GateProfileSpec:
                 "runner",
                 "edge_channels",
                 "ramp_cut",
+                "land_ends",
             },
             "",
         )
@@ -611,6 +638,15 @@ class GateProfileSpec:
                 ),
             )
 
+        land_ends: LandEndsSpec | None = None
+        le_d = _section(d, "land_ends", required=False)
+        if le_d is not None:
+            _check_unknown(le_d, {"w_from", "depth"}, "land_ends")
+            land_ends = LandEndsSpec(
+                w_from=_num(le_d, "w_from", "land_ends."),
+                depth=_num(le_d, "depth", "land_ends."),
+            )
+
         valve_d = _section(d, "valve", required=True)
         _check_unknown(valve_d, {"t", "w", "orifice_diameter"}, "valve")
         valve = ValveSpec(
@@ -634,6 +670,7 @@ class GateProfileSpec:
             runner=runner,
             edge_channels=_edge_channels(d, ""),
             ramp_cut=ramp_cut,
+            land_ends=land_ends,
         )
         spec.validate()
         return spec
@@ -698,6 +735,11 @@ class GateProfileSpec:
                 "line": [list(p) for p in self.ramp_cut.line],
                 "depth": self.ramp_cut.depth,
                 "slope_angle_deg": self.ramp_cut.slope_angle_deg,
+            }
+        if self.land_ends is not None:
+            d["land_ends"] = {
+                "w_from": self.land_ends.w_from,
+                "depth": self.land_ends.depth,
             }
         if self.island is not None:
             d["island"] = {
@@ -900,6 +942,26 @@ class GateProfileSpec:
                         f"chamfer is {reach:.3f} deep at the land end (land.depth "
                         f"{self.land.depth}) — steepen it or move the line back"
                     )
+        if self.land_ends is not None:
+            le = self.land_ends
+            if self.outer_wall_line is None:
+                raise ValueError("land_ends needs the single-pocket form (outer_wall_line)")
+            if le.depth <= self.land.depth + _EPS:
+                raise ValueError(
+                    f"land_ends.depth ({le.depth}) must be deeper than land.depth "
+                    f"({self.land.depth}) — at or above it nothing is removed"
+                )
+            if le.depth > self.main_ramp.cap_depth + _EPS:
+                raise ValueError(
+                    f"land_ends.depth ({le.depth}) must be ≤ main_ramp.cap_depth "
+                    f"({self.main_ramp.cap_depth}) — deeper than the cap it is no longer a land"
+                )
+            half = self.gate_exit_width / 2.0 if self.symmetric else self.gate_exit_width
+            if not (0.0 <= le.w_from < half - _EPS):
+                raise ValueError(
+                    f"land_ends.w_from ({le.w_from}) must be in [0, {half:g}) — the "
+                    "gate exit's " + ("half-width" if self.symmetric else "width")
+                )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"
             if sg.tip_t <= self.land.length + _EPS:
@@ -1341,6 +1403,32 @@ def _apply_ramp_cut(
     return d_new
 
 
+def _apply_land_ends(
+    le: LandEndsSpec,
+    *,
+    in_pocket: np.ndarray,
+    d: np.ndarray,
+    wa: np.ndarray,
+    cell_size: float,
+) -> np.ndarray:
+    """Mill the pocket at ``w ≥ le.w_from`` flat to ``le.depth``; returns the new depth field.
+
+    A floor (``max``) over the pocket, so the silhouette never changes and
+    the ramp beyond the point where it reaches ``depth`` is untouched. A cut
+    that deepens no cell is rejected (``w_from`` beyond the last cell centre
+    at this mesh): the spec would record a feature the geometry lacks.
+    """
+    zone = in_pocket & (wa >= le.w_from - 1e-9)
+    d_new = np.where(zone, np.maximum(d, le.depth), d)
+    if not (d_new > d + 1e-9).any():
+        raise ValueError(
+            f"land_ends (w_from {le.w_from}, depth {le.depth}) deepens no cell at "
+            f"cell_size_mm={cell_size}: no pocket cell centre lies at w ≥ w_from. "
+            "Lower w_from or refine the mesh."
+        )
+    return d_new
+
+
 def _polyline_distance(
     path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
 ) -> np.ndarray:
@@ -1505,6 +1593,10 @@ def build_profile_gate_geometry(
                 t=t,
                 wa=wa,
                 cell_size=dx,
+            )
+        if spec.land_ends is not None:
+            d_base = _apply_land_ends(
+                spec.land_ends, in_pocket=in_gate_base, d=d_base, wa=wa, cell_size=dx
             )
     else:
         # Sub-gate fans: outside every fan is steel at the PL. Each fan

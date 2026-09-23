@@ -51,6 +51,7 @@ from core.profile_gate import (
     IslandSpec,
     LandSpec,
     MainRampSpec,
+    RampCutSpec,
     RunnerSpec,
     SubGateSpec,
     SubIslandSpec,
@@ -401,6 +402,12 @@ material_keys = list(db.keys())
 #                                of the pocket is a nearly full-width bar at
 #                                the ramp cap depth
 #                                (hamoko_gate_furiwake_runner_20260914)
+#   Film gate 10 (扇状/肉厚調整 0923) the 2026/09/23 drawing: Film gate 9 with
+#                                the back of the ramp milled down to 2.5 beyond
+#                                a line parallel to the wall (t=7.451 at the
+#                                end, untouched 120 in the centre), the step
+#                                replaced by a chamfer on the product side
+#                                (hamoko_gate_furiwake_stepcut_20260923)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -424,6 +431,10 @@ class _ProfileGateDefaults:
     # checkbox starts off. Drawings that *are* the band (Film gate 6 / 7)
     # start with it on, at the drawing's numbers.
     edge_channel: tuple[float, float, tuple[float, float]] | None = None
+    # ランプ奥の削り込み: (line t at the pocket end, untouched centre width,
+    # chamfer angle). None = the checkbox starts off. Film gate 10 is the
+    # drawing that *is* the cut.
+    ramp_cut: tuple[float, float, float] | None = None
 
 
 _FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
@@ -528,6 +539,39 @@ _FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
     wall_w2=4.48,
     valve_t=None,
     well_wall_angle_deg=60.0,
+)
+
+
+def _ramp_cut_no_step_angle_deg(
+    *, depth: float, land_depth: float, t_end: float, land_len: float
+) -> float:
+    """Chamfer angle at which the cut's slope at the pocket end runs exactly
+    from the land end to the cut line — the steepest slope that leaves no
+    step at all and the shallowest that leaves the land alone."""
+    return math.degrees(math.atan((depth - land_depth) / max(t_end - land_len, 1e-9)))
+
+
+# Film gate 10 = the 2026/09/23 drawing「ランナブロック 肉厚調整ゲート（振り分け）」:
+# Film gate 9's pocket with the back of the ramp milled down to 2.5 (the red
+# area on the drawing). The cut's line is parallel to the 3° outer wall and
+# 8.285 nearer the exit — t=7.451 at the pocket end ("7.451") — and meets the
+# depth-2.5 line t=12.11 at w=60, so the central 120 ("120") is untouched.
+# Where the ramp has not reached 2.5 at that line the cut leaves a step
+# (0.9 mm at the end, 0 at w=60); the drawing's note「斜面角度徐変」asks for a
+# slope instead. The chamfer angle is the parameter, cut into the product side
+# of the line. The default is the angle whose slope at the end runs from the
+# land end to the line: no step anywhere, no cut into the land —
+# atan((2.5 − 0.35)/(7.451 − 1)) = 18.43°. 90° is the bare step as painted.
+_FILM_GATE10_RAMP_CUT_T_END = 7.451
+_FILM_GATE10_DEFAULTS = dataclasses.replace(
+    _FILM_GATE9_DEFAULTS,
+    ramp_cut=(
+        _FILM_GATE10_RAMP_CUT_T_END,
+        120.0,
+        _ramp_cut_no_step_angle_deg(
+            depth=2.5, land_depth=0.35, t_end=_FILM_GATE10_RAMP_CUT_T_END, land_len=1.0
+        ),
+    ),
 )
 
 
@@ -867,6 +911,113 @@ def _edge_channels_from_inputs(v: dict, sides: tuple[str, ...]) -> tuple[EdgeCha
 _EC_SIDES = {"外側": ("outer",), "内側": ("inner",), "両側": ("outer", "inner")}
 
 
+def _ramp_cut_inputs(
+    tag: str,
+    v: dict,
+    *,
+    symmetric: bool,
+    w_full: float,
+    default: tuple[float, float, float] | None,
+) -> None:
+    """The ランプ奥の削り込み block of the single-pocket Film gates (fills ``v``).
+
+    Sets ``v["rc_on"]`` and, when on, ``rc_t_end / rc_center_w / rc_depth /
+    rc_slope``. The cut line runs from (t_end, pocket end) to where the
+    ramp reaches its cap depth, at the edge of the untouched centre — the
+    way the 09/23 drawing dimensions it ("7.451", "120"). Its angle is
+    derived and shown. The chamfer angle is the design variable: the
+    caption reports the no-step angle for the current line so the user
+    knows where the step appears (above it) and where the chamfer would
+    bite the land (below it — ``validate()`` rejects that).
+    """
+    slider, number_input = _tagged_widgets(tag)
+    st.markdown("**ランプ奥の削り込み（段差線）**")
+    v["rc_on"] = st.checkbox(
+        "削り込みを有効化",
+        value=default is not None,
+        key=f"{tag}_rc_on",
+        help=(
+            "段差線より奥のランプを一定深さまで削る（ランプが深さに達する手前が対象）。"
+            "線の手前側（製品側）に傾斜角の斜面を付けてランプに合流させる。90° は段差そのまま。"
+            "肉厚を深くするだけで外形・ランドは変えない。"
+        ),
+    )
+    if not v["rc_on"]:
+        return
+    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
+    ramp_deg, cap = float(v["ramp_angle"]), float(v["ramp_cap"])
+    t_cap = land_len + (cap - land_depth) / max(math.tan(math.radians(ramp_deg)), 1e-9)
+    t_end_d, center_d, slope_d = default if default is not None else (t_cap - 4.0, 120.0, 90.0)
+    t_lo = round(land_len + 0.5, 1)
+    t_hi = max(t_lo + 0.1, math.floor((t_cap - 0.1) * 10.0) / 10.0)
+    v["rc_t_end"] = slider(
+        "段差線の位置 t（ポケット端）[mm] (< ランプ上限到達 t)",
+        float(t_lo),
+        float(t_hi),
+        float(min(max(t_end_d, t_lo), t_hi)),
+        step=0.1,
+        help=f"ランプが上限深さに達する t={t_cap:.2f}。線はそこ（無加工幅の端）へ向かう直線。",
+    )
+    w_word = "無加工幅（中央、両側合計）" if symmetric else "無加工幅（バルブ側端から）"
+    v["rc_center_w"] = slider(
+        f"{w_word} [mm]",
+        0.0,
+        float(w_full * (2.0 if symmetric else 1.0)),
+        float(min(center_d, w_full * (2.0 if symmetric else 1.0))),
+        step=1.0,
+        help="この幅の内側は削らない。線は無加工幅の端でランプ上限到達線に合流する。",
+    )
+    v["rc_depth"] = slider(
+        "削り込み深さ [mm]",
+        0.1,
+        10.0,
+        float(min(max(cap, 0.1), 10.0)),
+        step=0.1,
+        help="既定はランプ上限深さ（図面の 2.5）。深さは d = max(既存, この値) の床。",
+    )
+    t_end = float(v["rc_t_end"])
+    no_step = _ramp_cut_no_step_angle_deg(
+        depth=float(v["rc_depth"]), land_depth=land_depth, t_end=t_end, land_len=land_len
+    )
+    v["rc_slope"] = number_input(
+        "段差の傾斜角 [deg]（製品側に削る斜面、90 = 段差のまま）",
+        min_value=1.0,
+        max_value=90.0,
+        value=float(min(max(slope_d, 1.0), 90.0)),
+        step=0.05,
+        format="%.2f",
+        help="線の手前に、深さからこの角度で浅くなる斜面を切ってランプに合流させる。",
+    )
+    w2 = v["rc_center_w"] / 2.0 if symmetric else float(v["rc_center_w"])
+    line_deg = math.degrees(math.atan2(t_cap - t_end, max(w_full - w2, 1e-9)))
+    step_h = max(
+        0.0,
+        float(v["rc_depth"])
+        - min(cap, land_depth + math.tan(math.radians(ramp_deg)) * (t_end - land_len)),
+    )
+    st.caption(
+        f"段差線はゲート出口に対し {line_deg:.2f}°。線上の段差はポケット端で {step_h:.2f} mm（無加工幅の端で 0）。"
+        f"傾斜角 {no_step:.2f}° で端の斜面がランド終端から始まる（これ未満はランドを削るので不可、"
+        "これより急だと斜面は途中でランプに合流する）。"
+    )
+
+
+def _ramp_cut_from_inputs(v: dict) -> RampCutSpec | None:
+    if not v.get("rc_on"):
+        return None
+    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
+    t_cap = land_len + (float(v["ramp_cap"]) - land_depth) / max(
+        math.tan(math.radians(float(v["ramp_angle"]))), 1e-9
+    )
+    w_full = float(v["wall_w1"])
+    w2 = float(v["rc_center_w"]) / 2.0 if v["symmetric"] else float(v["rc_center_w"])
+    return RampCutSpec(
+        line=((float(v["rc_t_end"]), w_full), (float(t_cap), w2)),
+        depth=float(v["rc_depth"]),
+        slope_angle_deg=float(v["rc_slope"]),
+    )
+
+
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
@@ -1016,6 +1167,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             ramp_cap=float(v["ramp_cap"]),
             default=d.edge_channel,
         )
+        _ramp_cut_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.ramp_cut)
 
         _well_inputs(tag, v, symmetric=symmetric, wall_angle_deg=d.well_wall_angle_deg)
         if v["well_on"]:
@@ -1091,6 +1243,7 @@ def _profile_gate_from_inputs(
         island=island,
         well=well,
         edge_channels=_edge_channels_from_inputs(v, ("outer",)),
+        ramp_cut=_ramp_cut_from_inputs(v),
     )
     return spec, _plate_from_inputs(v), float(v["cell_size"])
 
@@ -1728,6 +1881,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f9",
         "film_gate_9_parametric",
         lambda: _profile_gate_sidebar("f9", True, _FILM_GATE9_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 10 (扇状/肉厚調整 0923)": _FilmGate(
+        "f10",
+        "film_gate_10_parametric",
+        lambda: _profile_gate_sidebar("f10", True, _FILM_GATE10_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

@@ -1288,6 +1288,10 @@ def _weld_inputs(tag: str, v: dict, *, w_word: str, default: tuple[float, float]
     mem = st.session_state.get(mem_key) or {"t0": t0_def, "t1": None, "w": None, "depth": depth_def}
     t0 = min(max(float(mem["t0"]), t_lo), t_hi - _WELD_MIN_LENGTH)
     t1 = t_hi if mem["t1"] is None else min(max(float(mem["t1"]), t0 + _WELD_MIN_LENGTH), t_hi)
+    # proposed values: passed as ``value`` and compared with what comes back,
+    # so a value that did not move is never written into the memory
+    w_value = w_isl if mem["w"] is None else min(max(float(mem["w"]), 0.5), w_isl)
+    depth_value = float(min(max(float(mem["depth"]), 0.0), v["land_depth"]))
     t_range = slider(
         "水平部の範囲 t [mm]（肉盗みの中）",
         min_value=t_lo,
@@ -1300,7 +1304,7 @@ def _weld_inputs(tag: str, v: dict, *, w_word: str, default: tuple[float, float]
         f"水平部の{w_word} [mm]（最大 = 肉盗みの全幅）",
         min_value=min(0.5, w_isl),
         max_value=w_isl,
-        value=w_isl if mem["w"] is None else min(max(float(mem["w"]), 0.5), w_isl),
+        value=w_value,
         step=0.1,
         help=(
             f"バルブ軸側からこの{w_word}までを肉盛りする（肉盗みの境界の外には出ない）。"
@@ -1311,7 +1315,7 @@ def _weld_inputs(tag: str, v: dict, *, w_word: str, default: tuple[float, float]
         "水平部の PL からの距離（残り流路厚）[mm] (≤ ランド深さ、0 = 空洞)",
         min_value=0.0,
         max_value=float(v["land_depth"]),
-        value=float(min(max(float(mem["depth"]), 0.0), v["land_depth"])),
+        value=depth_value,
         step=0.05,
     )
     full_w = w >= w_isl - 1e-9
@@ -1326,10 +1330,9 @@ def _weld_inputs(tag: str, v: dict, *, w_word: str, default: tuple[float, float]
         mem["t0"] = float(t_range[0])
     if float(t_range[1]) != t1:
         mem["t1"] = None if t_range[1] >= t_hi - 1e-9 else float(t_range[1])
-    proposed_w = w_isl if mem["w"] is None else min(max(float(mem["w"]), 0.5), w_isl)
-    if float(w) != proposed_w:
+    if float(w) != w_value:
         mem["w"] = None if full_w else float(w)
-    if float(depth) != float(min(max(float(mem["depth"]), 0.0), v["land_depth"])):
+    if float(depth) != depth_value:
         mem["depth"] = float(depth)
     st.session_state[mem_key] = mem
 

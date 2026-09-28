@@ -19,6 +19,7 @@ from core import (
     MaterialDB,
     ProfilePlateConfig,
     RampCutSpec,
+    RampEndsSpec,
     WeldSpec,
     build_profile_gate_geometry,
 )
@@ -1290,5 +1291,159 @@ def test_land_ends_that_deepen_nothing_are_rejected() -> None:
     the geometry lacks; a finer mesh puts a centre there and it is real."""
     spec = _minimal_spec(land_ends={"w_from": 99.9, "depth": 0.6})
     with pytest.raises(ValueError, match="land_ends.*deepens no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)
+
+
+# ----------------------- ramp ends (斜面角度徐変) ------------------
+# Minimal pocket: land 0.4 × 2, ramp 10° capped at 2.4, so the main ramp
+# reaches the cap at t_c0 = 2 + 2.0/tan10° = 13.343 across the whole exit.
+# Grading w ≥ 60 with t_end = 5: the cap line runs straight from (13.343, 60)
+# to (5, 100) and at every w the ramp is the straight section from the land
+# end (2, 0.4) to (t_cap(w), 2.4) — 10° at w = 60, atan(2/3) = 33.7° at the
+# pocket end. The oracle below is that ruled surface written out directly,
+# not the builder's code path.
+
+_RE = {"w_from": 60.0, "t_end": 5.0}
+_RE_T_C0 = 2.0 + 2.0 / math.tan(math.radians(10.0))
+
+
+def _t_cap_graded(w: float) -> float:
+    return _RE_T_C0 + (5.0 - _RE_T_C0) * (min(w, 100.0) - 60.0) / 40.0
+
+
+def _graded(t: float, w: float) -> float:
+    if t <= 2.0:
+        return 0.4
+    if w < 60.0:
+        return _ramp_min(t)
+    return min(2.4, 0.4 + 2.0 * (t - 2.0) / (_t_cap_graded(w) - 2.0))
+
+
+def test_ramp_ends_columns_are_the_ruled_surface() -> None:
+    spec = _minimal_spec(ramp_ends=_RE)
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    for w in (30.125, 60.125, 70.125, 85.125, 99.875):
+        col = g.mask & np.isclose(wa, w) & (t >= 0.0)
+        assert col.sum() > 50
+        for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+            assert got == pytest.approx(_graded(tv, w), abs=1e-9), (tv, w)
+
+
+def test_ramp_ends_leave_the_centre_the_land_and_the_outline_alone() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE), _plate(), cell_size_mm=0.25)
+    assert np.array_equal(g0.mask, g1.mask)
+    diff = g1.thickness_mm != g0.thickness_mm
+    t, wa = _tw(g1)
+    assert diff.any()
+    assert wa[diff].min() >= 60.0 and t[diff].min() > 2.0 and t[diff].max() < _RE_T_C0
+    # steeper ends only deepen: t_end is below the main cap line
+    assert np.all(g1.thickness_mm >= g0.thickness_mm)
+    # mirrored: both ends
+    nx = diff.shape[1]
+    assert diff[:, : nx // 2].sum() == diff[:, (nx + 1) // 2 :].sum() > 0
+
+
+def test_ramp_ends_start_without_a_step_and_steepen_towards_the_end() -> None:
+    """At w_from the graded ramp *is* the main ramp, and at any t on the
+    ramp the depth grows monotonically towards the pocket end."""
+    g = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE), _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    row = g.mask & np.isclose(t, 4.125) & (wa >= 50.0)
+    order = np.argsort(wa[row])
+    w_row, d_row = wa[row][order], g.thickness_mm[row][order]
+    assert np.all(np.diff(d_row[w_row >= 60.0]) >= -1e-12)
+    # first column past w_from differs from the main ramp by one column's worth
+    step = d_row[w_row >= 60.0][0] - _ramp_min(4.125)
+    per_col = (_graded(4.125, 99.875) - _ramp_min(4.125)) / (39.875 / 0.25)
+    assert 0.0 <= step <= 1.5 * per_col
+
+
+def test_ramp_ends_volume_matches_closed_form() -> None:
+    """Per unit width the graded ramp adds the triangle between the two
+    ramps, (cap − land)/2 · (t_c0 − t_cap(w)); t_cap is linear in w, so the
+    mean gap over the 40 of each end is (t_c0 − t_end)/2."""
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE), _plate(), cell_size_mm=0.25)
+    dv = (g1.volume_cm3() - g0.volume_cm3()) * 1000.0
+    expected = 2.0 * 40.0 * (2.0 / 2.0) * (_RE_T_C0 - 5.0) / 2.0
+    assert dv == pytest.approx(expected, rel=0.03)
+
+
+def test_ramp_ends_replace_the_ramp_so_a_later_cap_line_is_shallower() -> None:
+    """The graded ramp is not a floor: t_end beyond the main cap line makes
+    the ends shallower, which a max() would silently drop."""
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(ramp_ends={"w_from": 60.0, "t_end": 20.0})
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    assert np.any(g1.thickness_mm < g0.thickness_mm - 1e-6)
+    assert np.all(g1.thickness_mm <= g0.thickness_mm + 1e-12)
+
+
+def test_ramp_ends_sit_under_the_island() -> None:
+    """The island band keeps its own depth where it overlaps the grading."""
+    island = {"angle_deg": 2.0, "boundary_line": [[2.0, 80.0], [12.0, 70.0]], "end_dist": 12.0}
+    g0 = build_profile_gate_geometry(_minimal_spec(island=island), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(island=island, ramp_ends=_RE)
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g1)
+    w_bound = 80.0 - (t - 2.0)
+    in_island = g1.mask & (t > 2.0) & (t <= 12.0) & (wa <= w_bound)
+    assert (in_island & (wa >= 60.0)).any()
+    assert np.array_equal(g1.thickness_mm[in_island], g0.thickness_mm[in_island])
+
+
+def test_ramp_ends_one_sided_is_the_far_end_only() -> None:
+    d = _minimal_spec_dict(symmetric=False, outer_wall_line=[[0.0, 200.0], [24.0, 200.0]])
+    g0 = build_profile_gate_geometry(GateProfileSpec.from_dict(d), _plate())
+    spec = GateProfileSpec.from_dict({**d, "ramp_ends": {"w_from": 150.0, "t_end": 5.0}})
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g1.thickness_mm != g0.thickness_mm
+    assert diff.any()
+    _iy, ix = np.indices(diff.shape)
+    w = (ix + 0.5) - (5.0 + 150.0 - 100.0)  # offset from the valve-side edge x=55
+    assert w[diff].min() >= 150.0 and w[diff].max() <= 200.0
+
+
+def test_ramp_ends_json_roundtrip_and_default_omitted() -> None:
+    spec = _minimal_spec(ramp_ends=_RE)
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.ramp_ends == RampEndsSpec(w_from=60.0, t_end=5.0)
+    legacy = _minimal_spec()
+    assert legacy.ramp_ends is None
+    assert "ramp_ends" not in legacy.to_dict()
+    assert "ramp_ends" not in _demo_spec().to_dict()
+
+
+def test_ramp_ends_validation() -> None:
+    _minimal_spec(ramp_ends={**_RE, "w_from": 0.0})  # the whole exit graded
+    for bad in (-1.0, 100.0, 120.0):
+        with pytest.raises(ValueError, match="w_from"):
+            _minimal_spec(ramp_ends={**_RE, "w_from": bad})
+    for bad in (2.0, 1.0, -3.0):
+        with pytest.raises(ValueError, match="t_end"):
+            _minimal_spec(ramp_ends={**_RE, "t_end": bad})
+    with pytest.raises(ValueError, match="missing key"):
+        _minimal_spec(ramp_ends={"w_from": 60.0})
+    with pytest.raises(ValueError, match="unknown key"):
+        _minimal_spec(ramp_ends={**_RE, "bogus": 1})
+    with pytest.raises(ValueError, match="must be an object"):
+        _minimal_spec(ramp_ends=5.0)
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict({**fans, "ramp_ends": _RE})
+
+
+def test_ramp_ends_that_change_nothing_are_rejected() -> None:
+    """A cap line that stays on the main one, or a w_from past the last cell
+    centre (99.5 at 1.0 mm), records a feature the geometry lacks."""
+    on_the_line = _minimal_spec(ramp_ends={"w_from": 60.0, "t_end": _minimal_spec().ramp_cap_t()})
+    with pytest.raises(ValueError, match="ramp_ends.*changes no cell"):
+        build_profile_gate_geometry(on_the_line, _plate(), cell_size_mm=1.0)
+    spec = _minimal_spec(ramp_ends={"w_from": 99.9, "t_end": 5.0})
+    with pytest.raises(ValueError, match="ramp_ends.*changes no cell"):
         build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
     build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)

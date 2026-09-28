@@ -1447,3 +1447,16 @@ def test_ramp_ends_that_change_nothing_are_rejected() -> None:
     with pytest.raises(ValueError, match="ramp_ends.*changes no cell"):
         build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
     build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)
+
+
+def test_ramp_ends_erased_by_a_later_floor_are_rejected() -> None:
+    """land_ends at the cap depth over the same width floors every graded
+    cell to the cap: the finished geometry is the one without the grading,
+    so the spec would record a feature the geometry lacks (Codex P2 on
+    PR #94: the check used to look at the field before the overlays). A
+    shallower flat leaves the grading visible and builds."""
+    erased = _minimal_spec(ramp_ends=_RE, land_ends={"w_from": 60.0, "depth": 2.4})
+    with pytest.raises(ValueError, match="ramp_ends.*changes no cell"):
+        build_profile_gate_geometry(erased, _plate(), cell_size_mm=0.5)
+    visible = _minimal_spec(ramp_ends=_RE, land_ends={"w_from": 60.0, "depth": 0.6})
+    build_profile_gate_geometry(visible, _plate(), cell_size_mm=0.5)

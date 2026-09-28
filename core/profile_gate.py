@@ -1500,10 +1500,9 @@ def _grade_ramp_ends(
     t: np.ndarray,
     wa: np.ndarray,
     w_edge: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Replace the main ramp by the graded one at ``w ≥ w_from``.
+) -> np.ndarray:
+    """Replace the main ramp by the graded one at ``w ≥ w_from``; returns the new depth field.
 
-    Returns the new depth field and the mask of cells whose depth changed.
     ``t_cap(w)`` runs straight from the main cap line at ``w_from`` to
     ``t_end`` at ``w_edge`` (``w`` clamped to ``w_edge``: beyond it is steel
     anyway, and extrapolating would only bend the line further). Between the
@@ -1520,8 +1519,7 @@ def _grade_ramp_ends(
     run = np.maximum(t_cap - land_len, 1e-12)
     d_graded = np.minimum(land_depth + (cap - land_depth) * (t - land_len) / run, cap)
     zone = (wa >= re_.w_from - 1e-9) & (t > land_len)
-    d_new = np.where(zone, d_graded, d)
-    return d_new, zone & (np.abs(d_new - d) > 1e-9)
+    return np.where(zone, d_graded, d)
 
 
 def _polyline_distance(
@@ -1645,14 +1643,10 @@ def build_profile_gate_geometry(
         land_depth,
         np.minimum(land_depth + tan_ramp * (t - land_len), spec.main_ramp.cap_depth),
     )
-    ramp_ends_changed: np.ndarray | None = None
     if spec.ramp_ends is not None:
-        d_base, ramp_ends_changed = _grade_ramp_ends(
-            spec, d=d_base, t=t, wa=wa, w_edge=full_half_width
-        )
+        d_base = _grade_ramp_ends(spec, d=d_base, t=t, wa=wa, w_edge=full_half_width)
 
     # --- island override (sharp-cut approximation of the steep walls) ---
-    in_island = np.zeros(t.shape, dtype=bool)
     if spec.island is not None:
         isl = spec.island
         tan_isl = math.tan(math.radians(isl.angle_deg))
@@ -1698,21 +1692,6 @@ def build_profile_gate_geometry(
         if spec.land_ends is not None:
             d_base = _apply_land_ends(
                 spec.land_ends, in_pocket=in_gate_base, d=d_base, wa=wa, cell_size=dx
-            )
-        # A graded ramp that changes no pocket cell outside the island band is
-        # a feature the spec records and the geometry lacks (w_from beyond
-        # the last cell centre, or t_end on the main cap line): reject it the
-        # way a zero-cell edge channel or ramp cut is rejected.
-        if (
-            ramp_ends_changed is not None
-            and not (ramp_ends_changed & in_gate_base & ~in_island).any()
-        ):
-            re_ = spec.ramp_ends
-            raise ValueError(
-                f"ramp_ends (w_from {re_.w_from}, t_end {re_.t_end}) changes no cell at "
-                f"cell_size_mm={dx}: no pocket cell centre lies at w ≥ w_from on the ramp, "
-                "or t_end equals the main ramp's cap line. Lower w_from, move t_end, or "
-                "refine the mesh."
             )
     else:
         # Sub-gate fans: outside every fan is steel at the PL. Each fan
@@ -1899,4 +1878,42 @@ def build_profile_gate_geometry(
         for iy, ix in zip(valve_iys, valve_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
 
+    if spec.ramp_ends is not None:
+        _reject_ineffective_ramp_ends(spec, plate, cell_size_mm, geom)
     return geom
+
+
+def _reject_ineffective_ramp_ends(
+    spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float, geom: Geometry
+) -> None:
+    """Reject a graded ramp the finished geometry does not show.
+
+    It can vanish in several ways: no cell centre at ``w ≥ w_from``,
+    ``t_end`` on the main cap line, the island band covering the whole
+    zone, or a later floor erasing it (``land_ends`` at the cap depth over
+    the same width, an edge channel, a ramp cut). A check on the field right
+    after grading misses the overlays (Codex P2 on PR #94), so compare the
+    *finished* geometry with the same spec built without the grading. If
+    that build is rejected on its own (an overlay that deepens nothing on
+    the ungraded ramp), the grading is what made the overlay effective, so
+    it is not a no-op either.
+    """
+    try:
+        plain = build_profile_gate_geometry(
+            dataclasses.replace(spec, ramp_ends=None), plate, cell_size_mm
+        )
+    except ValueError:
+        return
+    # 1e-9: t_end on the main cap line reproduces the plane ramp only up to
+    # rounding, so an exact comparison would call that a change.
+    if np.array_equal(plain.mask, geom.mask) and np.allclose(
+        plain.thickness_mm, geom.thickness_mm, rtol=0.0, atol=1e-9
+    ):
+        re_ = spec.ramp_ends
+        raise ValueError(
+            f"ramp_ends (w_from {re_.w_from}, t_end {re_.t_end}) changes no cell at "
+            f"cell_size_mm={cell_size_mm}: the finished geometry is the same without it "
+            "(no pocket cell centre at w ≥ w_from on the ramp, t_end on the main cap "
+            "line, or an island / land_ends / ramp_cut / edge channel covering it). "
+            "Lower w_from, move t_end, or refine the mesh."
+        )

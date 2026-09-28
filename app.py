@@ -1252,6 +1252,98 @@ def _ramp_ends_from_inputs(v: dict) -> RampEndsSpec | None:
     return RampEndsSpec(w_from=w_from, t_end=float(v["re_t_end"]))
 
 
+_WELD_MIN_LENGTH = 0.5  # shortest dam the t-range defaults collapse to [mm]
+
+
+def _weld_inputs(tag: str, v: dict, *, w_word: str, default: tuple[float, float] | None) -> None:
+    """水平部（溶接ダム）: a dam built on top of the 肉盗み, sized on its own.
+
+    The 肉盗み is the base; the dam is a box (t range × width) clipped to it,
+    so its sliders are bounded by the 肉盗み's dimensions but setting them
+    never touches the 肉盗み. A slider whose bounds move is re-created by
+    Streamlit and would fall back to its ``value`` -- so the last dam is kept
+    in ``{tag}_weld_mem`` and re-applied (clamped) instead of the drawing
+    default. An end at the 肉盗み end and a width at the 肉盗み's full width are
+    remembered as "follow the 肉盗み" (None), not as numbers.
+    """
+    slider, _ = _tagged_widgets(tag)
+    v["weld_on"] = st.checkbox(
+        "水平部（溶接ダム）を有効化",
+        value=default is not None,
+        key=f"{tag}_weld_on",
+        help=(
+            "肉盗みを土台に、その上へ溶接で肉盛りして天面を PL と平行にした区間。"
+            "範囲 t と幅は肉盗みの中で独立に決められ、肉盗みの寸法は変わらない。"
+            "PL からの距離（残り流路厚）が 0 なら鋼材が PL に接して樹脂が入らない"
+            "＝完全な肉抜き空洞（穴）になる。"
+        ),
+    )
+    if not v["weld_on"]:
+        return
+    t_lo = float(v["land_length"])
+    t_hi = float(v["island_end"])
+    w_isl = float(max(v["island_w_near"], v["island_w_far"]))
+    t0_def, depth_def = default if default is not None else (7.0, 0.1)
+    mem_key = f"{tag}_weld_mem"
+    mem = st.session_state.get(mem_key) or {"t0": t0_def, "t1": None, "w": None, "depth": depth_def}
+    t0 = min(max(float(mem["t0"]), t_lo), t_hi - _WELD_MIN_LENGTH)
+    t1 = t_hi if mem["t1"] is None else min(max(float(mem["t1"]), t0 + _WELD_MIN_LENGTH), t_hi)
+    t_range = slider(
+        "水平部の範囲 t [mm]（肉盗みの中）",
+        min_value=t_lo,
+        max_value=t_hi,
+        value=(t0, t1),
+        step=0.1,
+        help="下限 = ランド長、上限 = 肉盗み終端。上端を肉盗み終端に置くと肉盗み終端に追従する。",
+    )
+    w = slider(
+        f"水平部の{w_word} [mm]（最大 = 肉盗みの全幅）",
+        min_value=min(0.5, w_isl),
+        max_value=w_isl,
+        value=w_isl if mem["w"] is None else min(max(float(mem["w"]), 0.5), w_isl),
+        step=0.1,
+        help=(
+            f"バルブ軸側からこの{w_word}までを肉盛りする（肉盗みの境界の外には出ない）。"
+            "最大にすると肉盗みの幅いっぱい（肉盗みの幅に追従）。"
+        ),
+    )
+    depth = slider(
+        "水平部の PL からの距離（残り流路厚）[mm] (≤ ランド深さ、0 = 空洞)",
+        min_value=0.0,
+        max_value=float(v["land_depth"]),
+        value=float(min(max(float(mem["depth"]), 0.0), v["land_depth"])),
+        step=0.05,
+    )
+    full_w = w >= w_isl - 1e-9
+    v["weld_t1"], v["weld_t2"] = float(t_range[0]), float(t_range[1])
+    v["weld_w_max"] = None if full_w else float(w)
+    v["weld_depth"] = float(depth)
+    # Only what the user actually moved goes into the memory: a value that
+    # merely came back clamped (the 肉盗み shrank under the dam) keeps the
+    # remembered one, so growing the 肉盗み again restores the dam as it was.
+    mem = dict(mem)
+    if float(t_range[0]) != t0:
+        mem["t0"] = float(t_range[0])
+    if float(t_range[1]) != t1:
+        mem["t1"] = None if t_range[1] >= t_hi - 1e-9 else float(t_range[1])
+    proposed_w = w_isl if mem["w"] is None else min(max(float(mem["w"]), 0.5), w_isl)
+    if float(w) != proposed_w:
+        mem["w"] = None if full_w else float(w)
+    if float(depth) != float(min(max(float(mem["depth"]), 0.0), v["land_depth"])):
+        mem["depth"] = float(depth)
+    st.session_state[mem_key] = mem
+
+
+def _weld_from_inputs(v: dict) -> WeldSpec | None:
+    if not v.get("weld_on"):
+        return None
+    return WeldSpec(
+        t_range=(float(v["weld_t1"]), float(v["weld_t2"])),
+        depth=float(v["weld_depth"]),
+        w_max=v["weld_w_max"],
+    )
+
+
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
@@ -1349,32 +1441,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
                 value=float(min(d.island_w_far, w_full)),
                 step=0.1,
             )
-            v["weld_on"] = st.checkbox(
-                "水平部（溶接ダム）を有効化",
-                value=d.weld is not None,
-                key=f"{tag}_weld_on",
-                help=(
-                    "肉盗みの下流側を溶接で肉盛りして天面を PL と平行にした区間。"
-                    "終端は肉盗み終端と同じ。PL からの距離（残り流路厚）が 0 なら "
-                    "鋼材が PL に接して樹脂が入らない＝完全な肉抜き空洞（穴）になる。"
-                ),
-            )
-            if v["weld_on"]:
-                weld_t0, weld_h = d.weld if d.weld is not None else (7.0, 0.1)
-                v["weld_t1"] = slider(
-                    "水平部開始 t [mm] (≥ ランド長、< 肉盗み終端)",
-                    min_value=float(v["land_length"]),
-                    max_value=float(v["island_end"] - 0.5),
-                    value=float(min(max(weld_t0, v["land_length"]), v["island_end"] - 0.5)),
-                    step=0.1,
-                )
-                v["weld_depth"] = slider(
-                    "水平部の PL からの距離（残り流路厚）[mm] (≤ ランド深さ、0 = 空洞)",
-                    min_value=0.0,
-                    max_value=float(v["land_depth"]),
-                    value=float(min(weld_h, v["land_depth"])),
-                    step=0.05,
-                )
+            _weld_inputs(tag, v, w_word=w_word, default=d.weld)
 
         st.markdown("**外壁線（ポケット外形）**")
         st.caption("出口側は t=外壁開始 までゲート出口の全幅、そこから終端へ直線で狭まる。")
@@ -1450,12 +1517,7 @@ def _profile_gate_from_inputs(
     well = _well_from_inputs(v)
     island = None
     if v["island_on"]:
-        weld = None
-        if v.get("weld_on"):
-            weld = WeldSpec(
-                t_range=(float(v["weld_t1"]), float(v["island_end"])),
-                depth=float(v["weld_depth"]),
-            )
+        weld = _weld_from_inputs(v)
         island = IslandSpec(
             angle_deg=float(v["island_angle"]),
             boundary_line=(

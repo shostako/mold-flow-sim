@@ -16,10 +16,13 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
    island angle and the island ends at ``end_dist``. The steep (~60°)
    island edge/end walls are approximated as sharp cuts — at the intended
    cell resolution (~1 mm) the horizontal wall extent is about one cell.
-   An optional ``weld`` sub-section models a **welded-in dam**: within
-   ``t_range`` the island depth is overridden by a constant ``depth``
-   (metal deposited on the pocket floor, so ``depth ≤ land.depth``). Its
-   entry/exit steps are sharp cuts like the island's own walls. A weld depth
+   An optional ``weld`` sub-section models a **welded-in dam** built on top
+   of the island: within ``t_range`` (and, with ``w_max``, only where
+   ``w ≤ w_max``) the island depth is overridden by a constant ``depth``
+   (metal deposited on the pocket floor, so ``depth ≤ land.depth``). The dam
+   never reaches outside the island -- its footprint is the island clipped
+   to that box. Its entry/exit steps are sharp cuts like the island's own
+   walls. A weld depth
   of 0 means the steel reaches the PL: those cells leave the cavity (a hole
   in the part), except where the well cuts through them.
 4. **Outer wall** — a straight line in the (t, w) plane beyond which the
@@ -117,15 +120,21 @@ class MainRampSpec:
 
 @dataclass(frozen=True)
 class WeldSpec:
-    """Welded-in dam inside the island.
+    """Welded-in dam built on top of the island.
 
     Weld metal deposited on the island floor over ``t_range``, leaving a
     constant channel thickness ``depth``. Since it fills the pocket it can
-    only make the channel shallower (``depth ≤ land.depth``).
+    only make the channel shallower (``depth ≤ land.depth``). ``w_max``
+    limits it across the width (same ``w`` as the island's boundary: the
+    half-width from the valve axis when symmetric, the width from the
+    valve-side edge otherwise); ``None`` = the island's full width. The dam's
+    footprint is always the island clipped to this box, so the island stays
+    the base and the dam is sized on its own.
     """
 
     t_range: tuple[float, float]
     depth: float
+    w_max: float | None = None
 
 
 @dataclass(frozen=True)
@@ -553,10 +562,15 @@ class GateProfileSpec:
             weld: WeldSpec | None = None
             weld_d = _section(isl_d, "weld", required=False)
             if weld_d is not None:
-                _check_unknown(weld_d, {"t_range", "depth"}, "island.weld")
+                _check_unknown(weld_d, {"t_range", "depth", "w_max"}, "island.weld")
                 weld = WeldSpec(
                     t_range=_pair(weld_d, "t_range", "island.weld."),
                     depth=_num(weld_d, "depth", "island.weld."),
+                    w_max=(
+                        _num(weld_d, "w_max", "island.weld.")
+                        if weld_d.get("w_max") is not None
+                        else None
+                    ),
                 )
             island = IslandSpec(
                 angle_deg=_num(isl_d, "angle_deg", "island."),
@@ -801,6 +815,8 @@ class GateProfileSpec:
                     "t_range": list(self.island.weld.t_range),
                     "depth": self.island.weld.depth,
                 }
+                if self.island.weld.w_max is not None:
+                    d["island"]["weld"]["w_max"] = self.island.weld.w_max
         if self.well is not None:
             d["well"] = {
                 "shape": self.well.shape,
@@ -1172,6 +1188,8 @@ class GateProfileSpec:
                         f"island.weld.depth ({isl.weld.depth}) must be ≤ land.depth "
                         f"({self.land.depth}); weld metal fills the pocket, it cannot deepen it"
                     )
+                if isl.weld.w_max is not None and isl.weld.w_max <= 0:
+                    raise ValueError(f"island.weld.w_max must be positive, got {isl.weld.w_max}")
 
         if self.well is not None:
             w = self.well
@@ -1656,6 +1674,12 @@ def build_profile_gate_geometry(
         if isl.weld is not None:
             wt_lo, wt_hi = isl.weld.t_range
             in_weld = in_island & (t >= wt_lo) & (t <= wt_hi)
+            if isl.weld.w_max is not None:
+                in_weld &= wa <= isl.weld.w_max
+            # checked against the pocket silhouette below: a dam that lands on
+            # no cavity cell would be recorded in the spec and absent from the
+            # geometry (the same false green as a sub-mesh runner)
+            d_before_weld = d_base
             d_base = np.where(in_weld, isl.weld.depth, d_base)
 
     # --- pocket silhouette: one outer wall, or the union of the fans ---
@@ -1666,8 +1690,15 @@ def build_profile_gate_geometry(
         # steel, not cavity (a zero-thickness cell in the mask would give
         # S = 0 and a singular system). The well is machined through it, so
         # cells the well still reaches stay cavity via ``in_well`` below.
-        if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
-            in_gate_base &= ~in_weld
+        if spec.island is not None and spec.island.weld is not None:
+            if not (in_gate_base & in_weld & (d_before_weld > spec.island.weld.depth + _EPS)).any():
+                raise ValueError(
+                    f"island.weld (t_range={spec.island.weld.t_range}, "
+                    f"w_max={spec.island.weld.w_max}) makes no cell shallower at "
+                    f"cell_size_mm={dx}: widen the dam or refine the mesh"
+                )
+            if spec.island.weld.depth <= 0:
+                in_gate_base &= ~in_weld
         d_base = _apply_edge_channels(
             spec.edge_channels,
             walls={"outer": (spec.outer_wall_line, full_half_width)},

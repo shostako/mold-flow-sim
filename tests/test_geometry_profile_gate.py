@@ -180,6 +180,16 @@ def test_validate_walk_sees_every_numeric_leaf() -> None:
             ),
             id="tuple-element",
         ),
+        pytest.param(
+            lambda s: dataclasses.replace(
+                s,
+                island=dataclasses.replace(
+                    s.island,
+                    weld=WeldSpec(t_range=(6.0, 14.0), depth=0.1, w_max=float("nan")),
+                ),
+            ),
+            id="optional-leaf",
+        ),
     ],
 )
 def test_direct_construction_rejects_non_finite(mutate) -> None:
@@ -585,6 +595,70 @@ def test_island_weld_validation() -> None:
     d["island"]["weld"] = 0.1
     with pytest.raises(ValueError, match="weld"):
         GateProfileSpec.from_dict(d)
+
+
+def _weld_changed_cells(spec: GateProfileSpec, cell: float):
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=cell)
+    base = build_profile_gate_geometry(_demo_spec(), _plate(), cell_size_mm=cell)
+    assert np.array_equal(g.mask, base.mask)
+    yy, xx = _grid(g)
+    t = 5.0 + spec.t_max() - yy
+    wa = np.abs(xx - (5.0 + 150.0))
+    changed = g.mask & (g.thickness_mm != base.thickness_mm)
+    return g, base, t, wa, changed
+
+
+def test_island_weld_w_max_limits_the_dam_to_a_box_on_the_island() -> None:
+    """肉盗み = the base, dam = t_range × (w ≤ w_max) clipped to it: only
+    island cells inside the box turn to the dam depth; the island beside
+    the dam keeps its own ramp (the island itself is not resized)."""
+    spec = _weld_spec(w_max=8.0)
+    g, base, t, wa, changed = _weld_changed_cells(spec, 0.5)
+    w_bound = 40.0 - 2.5 * (t - 2.0)  # island boundary [[2,40],[14,10]]
+    box = g.mask & (t >= 6.0) & (t <= 14.0) & (wa <= 8.0) & (wa <= w_bound) & (t > 2.0)
+    assert changed.any()
+    assert not (changed & ~box).any()
+    clear_of_well = box & (t < 12.0)
+    assert clear_of_well.any()
+    assert changed[clear_of_well].all()
+    np.testing.assert_allclose(g.thickness_mm[clear_of_well], 0.1, rtol=1e-12)
+    beside = g.mask & (t > 6.5) & (t < 11.5) & (wa > 8.5) & (wa < w_bound - 0.5)
+    assert beside.any()
+    np.testing.assert_array_equal(g.thickness_mm[beside], base.thickness_mm[beside])
+
+
+def test_island_weld_w_max_past_the_island_is_the_full_width_dam() -> None:
+    full = build_profile_gate_geometry(_weld_spec(), _plate(), cell_size_mm=0.5)
+    wide = build_profile_gate_geometry(_weld_spec(w_max=45.0), _plate(), cell_size_mm=0.5)
+    np.testing.assert_array_equal(full.mask, wide.mask)
+    np.testing.assert_array_equal(full.thickness_mm, wide.thickness_mm)
+
+
+def test_island_weld_w_max_roundtrip_and_omission() -> None:
+    assert "w_max" not in _weld_spec().to_dict()["island"]["weld"]
+    assert _weld_spec().island.weld.w_max is None
+    again = GateProfileSpec.from_json(_weld_spec(w_max=8.0).to_json())
+    assert again.island.weld.w_max == 8.0
+    assert again.island.weld.t_range == (6.0, 14.0)
+
+
+def test_island_weld_w_max_validation() -> None:
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="w_max"):
+            _weld_spec(w_max=bad)
+    d = _weld_spec().to_dict()
+    d["island"]["weld"]["w_max"] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        GateProfileSpec.from_dict(d)
+
+
+def test_island_weld_that_lands_on_no_cell_is_rejected() -> None:
+    """A dam narrower than the nearest cell centre (0.25 off the axis at
+    0.5 mm) would be recorded in the spec and absent from the geometry."""
+    with pytest.raises(ValueError, match="makes no cell shallower"):
+        build_profile_gate_geometry(_weld_spec(w_max=0.1), _plate(), cell_size_mm=0.5)
+    _g, _b, _t, wa, changed = _weld_changed_cells(_weld_spec(w_max=0.3), 0.5)
+    assert changed.any() and (wa[changed] <= 0.3).all()
 
 
 def test_outer_wall_excludes_cells() -> None:

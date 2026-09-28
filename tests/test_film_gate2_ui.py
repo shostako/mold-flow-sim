@@ -104,6 +104,7 @@ def test_default_sliders_reproduce_the_weld_spec(film_gate2_run):
     assert gw1 == pytest.approx(w1 + (w2 - w1) * (g1 - t1) / (t2 - t1), abs=0.01)
     assert got.island.weld.t_range == expected.island.weld.t_range
     assert got.island.weld.depth == expected.island.weld.depth
+    assert got.island.weld.w_max is None  # the 肉盗み's full width
     assert np.asarray(got.outer_wall_line) == pytest.approx(np.asarray(expected.outer_wall_line))
     assert got.well.t_range == expected.well.t_range
     assert got.well.half_width == expected.well.half_width
@@ -164,16 +165,78 @@ def test_dam_off_drops_the_weld_section():
     assert _recorded_spec(at)["island"].get("weld") is None  # asdict keeps the key as null
 
 
-def test_dam_bounds_follow_the_land_and_the_island_end():
+def test_dam_bounds_follow_the_island():
+    """The dam's sliders are bounded by the 肉盗み: t from the land to its end,
+    width up to its full half-width, depth up to the land."""
     at = _film_gate2_app()
-    start = _slider(at, "水平部開始")
-    assert start.min == pytest.approx(1.0)
-    assert start.max == pytest.approx(16.5)
+    rng = _slider(at, "水平部の範囲 t")
+    assert rng.min == pytest.approx(1.0) and rng.max == pytest.approx(17.0)
+    assert rng.value == pytest.approx((7.0, 17.0))
+    width = _slider(at, "水平部の半幅")
+    assert width.max == pytest.approx(47.64) and width.value == pytest.approx(47.64)
     depth = _slider(at, "水平部の PL からの距離")
     assert depth.min == 0.0 and depth.max == pytest.approx(0.35)
+    # an end at the 肉盗み end follows it
     _slider(at, "肉盗み終端").set_value(12.0).run()
-    assert _slider(at, "水平部開始").max == pytest.approx(11.5)
+    assert _slider(at, "水平部の範囲 t").max == pytest.approx(12.0)
     assert _recorded_spec_after_run(at)["island"]["weld"]["t_range"] == [7.0, 12.0]
+
+
+def _island_without_weld(rec: dict) -> dict:
+    return {k: v for k, v in rec["island"].items() if k != "weld"}
+
+
+def test_dam_is_sized_without_touching_the_island(film_gate2_run):
+    """肉盗み = the base, 水平部 = a box on top of it: moving the dam's own
+    sliders leaves the 肉盗み exactly as it was, and only the cells of the
+    肉盗み inside the box change -- to the dam's depth."""
+    base_rec = _recorded_spec(film_gate2_run)
+    at = _film_gate2_app()
+    _slider(at, "水平部の範囲 t").set_value((8.0, 12.0))
+    _slider(at, "水平部の半幅").set_value(20.0)
+    _slider(at, "水平部の PL からの距離").set_value(0.2).run()
+    rec = _recorded_spec_after_run(at)
+    assert _island_without_weld(rec) == _island_without_weld(base_rec)
+    assert rec["island"]["weld"] == {"t_range": [8.0, 12.0], "depth": 0.2, "w_max": 20.0}
+
+    geom = at.session_state["mfs_geom"]
+    no_dam = dict(rec, island=_island_without_weld(rec), name="x")
+    spec_no_dam = GateProfileSpec.from_dict(no_dam)
+    ref = build_profile_gate_geometry(spec_no_dam, PLATE, 1.0)
+    assert np.array_equal(geom.mask, ref.mask)
+    ny, nx = geom.mask.shape
+    iy, ix = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    t = PLATE.pad_mm + spec_no_dam.t_max() - (iy + 0.5)
+    wa = np.abs((ix + 0.5) - (PLATE.pad_mm + 150.0))
+    (t1, w1), (t2, w2) = spec_no_dam.island.boundary_line
+    w_bound = w1 + (w2 - w1) * (t - t1) / (t2 - t1)
+    box = geom.mask & (t >= 8.0) & (t <= 12.0) & (wa <= 20.0) & (wa <= w_bound)
+    changed = geom.mask & (geom.thickness_mm != ref.thickness_mm)
+    assert changed.any()
+    assert np.array_equal(changed, box)
+    np.testing.assert_allclose(geom.thickness_mm[box], 0.2)
+    # the 肉盗み beside the dam keeps its own depth
+    beside = geom.mask & (t > 8.5) & (t < 11.5) & (wa > 21.0) & (wa < w_bound - 1.0)
+    assert beside.any()
+    assert np.array_equal(geom.thickness_mm[beside], ref.thickness_mm[beside])
+
+
+def test_dam_survives_a_round_trip_of_the_island():
+    """Shrinking the 肉盗み under the dam clips it; growing the 肉盗み back
+    restores the dam as it was set (the clamp is not taken as an edit)."""
+    at = _film_gate2_app()
+    _slider(at, "水平部の範囲 t").set_value((8.0, 12.0))
+    _slider(at, "水平部の半幅").set_value(20.0).run()
+    _slider(at, "肉盗み終端").set_value(10.0)
+    _slider(at, "境界半幅（出口側").set_value(15.0).run()
+    assert _slider(at, "水平部の範囲 t").value == pytest.approx((8.0, 10.0))
+    assert _slider(at, "水平部の半幅").value == pytest.approx(15.0)
+    _slider(at, "肉盗み終端").set_value(17.0)
+    _slider(at, "境界半幅（出口側").set_value(47.64).run()
+    assert _slider(at, "水平部の範囲 t").value == pytest.approx((8.0, 12.0))
+    assert _slider(at, "水平部の半幅").value == pytest.approx(20.0)
+    weld = _recorded_spec_after_run(at)["island"]["weld"]
+    assert weld["t_range"] == [8.0, 12.0] and weld["w_max"] == 20.0
 
 
 def _recorded_spec_after_run(at: AppTest) -> dict:

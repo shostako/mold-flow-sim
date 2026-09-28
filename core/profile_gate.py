@@ -290,6 +290,37 @@ class LandEndsSpec:
     depth: float
 
 
+@dataclass(frozen=True)
+class RampEndsSpec:
+    """Ramp angle graded towards both ends of the gate block (斜面角度徐変).
+
+    The main ramp is a plane: it reaches ``cap_depth`` on the straight line
+    ``t = ramp_cap_t()`` across the whole exit. In the ends (``w ≥ w_from``)
+    that line bends: it runs straight from ``(ramp_cap_t(), w_from)`` to
+    ``(t_end, w_edge)``, ``w_edge`` = the gate exit's half-width (symmetric)
+    or width (one-sided), and the ramp there is the ruled surface from the
+    land end to that line —
+
+        t_cap(w) = ramp_cap_t() + (t_end − ramp_cap_t())·(w − w_from)/(w_edge − w_from)
+        d        = land.depth + (cap_depth − land.depth)·(t − land.length)/(t_cap(w) − land.length)
+
+    capped at ``cap_depth``. At every ``w`` the section is a straight ramp,
+    its angle ``atan((cap_depth − land.depth)/(t_cap(w) − land.length))``
+    changes continuously from the main angle at ``w_from`` to the end angle
+    at ``w_edge`` (steeper when ``t_end < ramp_cap_t()``), and the surface
+    meets the main ramp at ``w = w_from`` without a step. This is exactly
+    the bilinear patch the 2026/09/28 CAD model carries (the land-end line
+    and the cap line are its two straight edges).
+
+    The graded ramp replaces the main ramp (not a floor), so a ``t_end``
+    beyond ``ramp_cap_t()`` would make the ends shallower; the island band,
+    edge channels, ramp cut and land ends apply on top as usual.
+    """
+
+    w_from: float
+    t_end: float
+
+
 # ---------------------------------------------------------------------------
 # from_dict helpers
 # ---------------------------------------------------------------------------
@@ -461,6 +492,8 @@ class GateProfileSpec:
     ramp_cut: RampCutSpec | None = None
     # Single-pocket form only: the land ends (w ≥ w_from) milled to a deeper flat.
     land_ends: LandEndsSpec | None = None
+    # Single-pocket form only: the ramp angle graded towards the ends (w ≥ w_from).
+    ramp_ends: RampEndsSpec | None = None
 
     # ---- JSON I/O ----
 
@@ -486,6 +519,7 @@ class GateProfileSpec:
                 "edge_channels",
                 "ramp_cut",
                 "land_ends",
+                "ramp_ends",
             },
             "",
         )
@@ -647,6 +681,15 @@ class GateProfileSpec:
                 depth=_num(le_d, "depth", "land_ends."),
             )
 
+        ramp_ends: RampEndsSpec | None = None
+        re_d = _section(d, "ramp_ends", required=False)
+        if re_d is not None:
+            _check_unknown(re_d, {"w_from", "t_end"}, "ramp_ends")
+            ramp_ends = RampEndsSpec(
+                w_from=_num(re_d, "w_from", "ramp_ends."),
+                t_end=_num(re_d, "t_end", "ramp_ends."),
+            )
+
         valve_d = _section(d, "valve", required=True)
         _check_unknown(valve_d, {"t", "w", "orifice_diameter"}, "valve")
         valve = ValveSpec(
@@ -671,6 +714,7 @@ class GateProfileSpec:
             edge_channels=_edge_channels(d, ""),
             ramp_cut=ramp_cut,
             land_ends=land_ends,
+            ramp_ends=ramp_ends,
         )
         spec.validate()
         return spec
@@ -740,6 +784,11 @@ class GateProfileSpec:
             d["land_ends"] = {
                 "w_from": self.land_ends.w_from,
                 "depth": self.land_ends.depth,
+            }
+        if self.ramp_ends is not None:
+            d["ramp_ends"] = {
+                "w_from": self.ramp_ends.w_from,
+                "t_end": self.ramp_ends.t_end,
             }
         if self.island is not None:
             d["island"] = {
@@ -961,6 +1010,21 @@ class GateProfileSpec:
                 raise ValueError(
                     f"land_ends.w_from ({le.w_from}) must be in [0, {half:g}) — the "
                     "gate exit's " + ("half-width" if self.symmetric else "width")
+                )
+        if self.ramp_ends is not None:
+            re_ = self.ramp_ends
+            if self.outer_wall_line is None:
+                raise ValueError("ramp_ends needs the single-pocket form (outer_wall_line)")
+            half = self.gate_exit_width / 2.0 if self.symmetric else self.gate_exit_width
+            if not (0.0 <= re_.w_from < half - _EPS):
+                raise ValueError(
+                    f"ramp_ends.w_from ({re_.w_from}) must be in [0, {half:g}) — the "
+                    "gate exit's " + ("half-width" if self.symmetric else "width")
+                )
+            if re_.t_end <= self.land.length + _EPS:
+                raise ValueError(
+                    f"ramp_ends.t_end ({re_.t_end}) must be beyond the land "
+                    f"(land.length {self.land.length}) — the ramp needs a run to reach the cap"
                 )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"
@@ -1429,6 +1493,37 @@ def _apply_land_ends(
     return d_new
 
 
+def _grade_ramp_ends(
+    spec: GateProfileSpec,
+    *,
+    d: np.ndarray,
+    t: np.ndarray,
+    wa: np.ndarray,
+    w_edge: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace the main ramp by the graded one at ``w ≥ w_from``.
+
+    Returns the new depth field and the mask of cells whose depth changed.
+    ``t_cap(w)`` runs straight from the main cap line at ``w_from`` to
+    ``t_end`` at ``w_edge`` (``w`` clamped to ``w_edge``: beyond it is steel
+    anyway, and extrapolating would only bend the line further). Between the
+    land end and ``t_cap(w)`` the depth is the straight ramp between them;
+    beyond it, the cap. Land cells (``t ≤ land.length``) are untouched.
+    """
+    re_ = spec.ramp_ends
+    assert re_ is not None
+    land_len, land_depth = spec.land.length, spec.land.depth
+    cap = spec.main_ramp.cap_depth
+    t_c0 = spec.ramp_cap_t()
+    frac = (np.minimum(wa, w_edge) - re_.w_from) / max(w_edge - re_.w_from, 1e-12)
+    t_cap = t_c0 + (re_.t_end - t_c0) * frac
+    run = np.maximum(t_cap - land_len, 1e-12)
+    d_graded = np.minimum(land_depth + (cap - land_depth) * (t - land_len) / run, cap)
+    zone = (wa >= re_.w_from - 1e-9) & (t > land_len)
+    d_new = np.where(zone, d_graded, d)
+    return d_new, zone & (np.abs(d_new - d) > 1e-9)
+
+
 def _polyline_distance(
     path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
 ) -> np.ndarray:
@@ -1550,8 +1645,14 @@ def build_profile_gate_geometry(
         land_depth,
         np.minimum(land_depth + tan_ramp * (t - land_len), spec.main_ramp.cap_depth),
     )
+    ramp_ends_changed: np.ndarray | None = None
+    if spec.ramp_ends is not None:
+        d_base, ramp_ends_changed = _grade_ramp_ends(
+            spec, d=d_base, t=t, wa=wa, w_edge=full_half_width
+        )
 
     # --- island override (sharp-cut approximation of the steep walls) ---
+    in_island = np.zeros(t.shape, dtype=bool)
     if spec.island is not None:
         isl = spec.island
         tan_isl = math.tan(math.radians(isl.angle_deg))
@@ -1597,6 +1698,21 @@ def build_profile_gate_geometry(
         if spec.land_ends is not None:
             d_base = _apply_land_ends(
                 spec.land_ends, in_pocket=in_gate_base, d=d_base, wa=wa, cell_size=dx
+            )
+        # A graded ramp that changes no pocket cell outside the island band is
+        # a feature the spec records and the geometry lacks (w_from beyond
+        # the last cell centre, or t_end on the main cap line): reject it the
+        # way a zero-cell edge channel or ramp cut is rejected.
+        if (
+            ramp_ends_changed is not None
+            and not (ramp_ends_changed & in_gate_base & ~in_island).any()
+        ):
+            re_ = spec.ramp_ends
+            raise ValueError(
+                f"ramp_ends (w_from {re_.w_from}, t_end {re_.t_end}) changes no cell at "
+                f"cell_size_mm={dx}: no pocket cell centre lies at w ≥ w_from on the ramp, "
+                "or t_end equals the main ramp's cap line. Lower w_from, move t_end, or "
+                "refine the mesh."
             )
     else:
         # Sub-gate fans: outside every fan is steel at the PL. Each fan

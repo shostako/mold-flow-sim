@@ -53,6 +53,7 @@ from core.profile_gate import (
     LandSpec,
     MainRampSpec,
     RampCutSpec,
+    RampEndsSpec,
     RunnerSpec,
     SubGateSpec,
     SubIslandSpec,
@@ -414,6 +415,12 @@ material_keys = list(db.keys())
 #                                flat to 0.5; the ramp is untouched, so the
 #                                flat runs on to t=1.78 where the ramp reaches
 #                                0.5 (hamoko_gate_furiwake_cand_A_landends05_20260923)
+#   Film gate 12 (扇状/斜面角度徐変) the 2026/09/28 CAD model (Runner-block_3D_00.igs):
+#                                Film gate 9 with the ramp angle graded over
+#                                both ends (|w| ≥ 60) — the depth-2.5 line
+#                                bends from t=12 at w=60 to t=4 at the pocket
+#                                end, so the ramp steepens from 11.06° to
+#                                35.6° (hamoko_gate_furiwake_rampends_20260928)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -444,6 +451,14 @@ class _ProfileGateDefaults:
     # ランド両端の増厚: (untouched centre width, depth of the flat). None = the
     # checkbox starts off. Film gate 11 is the drawing that *is* the cut.
     land_ends: tuple[float, float] | None = None
+    # 斜面角度徐変: (centre width at the main angle, t where the ramp reaches
+    # its cap at the pocket end). None = the checkbox starts off. Film gate 12
+    # is the drawing that *is* the grading.
+    ramp_ends: tuple[float, float] | None = None
+    # Main ramp angle the sidebar starts from. Every drawing up to Film gate 11
+    # reads 10.95° (the 12.11 cap line of the PDFs); the 09/28 CAD model puts
+    # the cap line at t=12 exactly.
+    ramp_angle_deg: float = 10.95
 
 
 _FILM_GATE1_DEFAULTS = _ProfileGateDefaults(
@@ -596,6 +611,33 @@ _FILM_GATE10_DEFAULTS = dataclasses.replace(
 # the product corners; 0.5 has (0.5/0.35)³ ≈ 2.9× the conductance and about
 # twice the freeze time. The depth of the flat is the design variable.
 _FILM_GATE11_DEFAULTS = dataclasses.replace(_FILM_GATE9_DEFAULTS, land_ends=(200.0, 0.5))
+
+
+# Film gate 12 = the 2026/09/28 CAD model「Runner-block_3D_00.igs」
+# (hamoko_gate_furiwake_rampends_20260928, the resin side of the gate pocket as
+# a closed IGES surface model). Film gate 9's pocket with the ramp angle graded
+# over both ends: in |w| ≥ 60 the ramp face is a bilinear patch between the
+# land end (t=1, depth 0.35) and a cap line that runs straight from (12, 60) to
+# (4, 149) — 11.06° at w=60, atan(2.15/3) = 35.6° at the pocket end. The central
+# 120 keeps the plane ramp. Everything else is read off the CAD model at full
+# precision, which differs from the 9/14 PDF reading by < 0.11 mm: the cap line
+# is t=12 (not 12.11, so 11.06° instead of 10.95°), the 肉盗み boundary ends at
+# 9.9505 (9.9), the outer wall ends at (23.3097, 4.4893) on the same 3° line.
+# Rasterised against a vertical ray cast of the CAD model the pocket outline is
+# identical cell for cell at 0.5 and 0.25 mm; the only depth difference is a
+# 60° chamfer at the 肉盗み's far end (t=16.14–17) that the spec cuts square
+# (11 mm³ of 10,557). The valve (Φ3 at t=21.5) is not in the model and is
+# Film gate 9's.
+_FILM_GATE12_DEFAULTS = dataclasses.replace(
+    _FILM_GATE9_DEFAULTS,
+    island_w_near=47.644148,
+    island_w_far=9.95051,
+    wall_t1=15.736241,
+    wall_t2=23.309724,
+    wall_w2=4.489329,
+    ramp_ends=(120.0, 4.0),
+    ramp_angle_deg=math.degrees(math.atan(2.15 / 11.0)),
+)
 
 
 # Narrowest fan tip the Film gate 4 sliders offer. It also sets how close the
@@ -1129,6 +1171,87 @@ def _land_ends_from_inputs(v: dict) -> LandEndsSpec | None:
     return LandEndsSpec(w_from=w_from, depth=float(v["le_depth"]))
 
 
+def _ramp_ends_inputs(
+    tag: str,
+    v: dict,
+    *,
+    symmetric: bool,
+    w_full: float,
+    default: tuple[float, float] | None,
+) -> None:
+    """The 斜面角度徐変 block of the single-pocket Film gates (fills ``v``).
+
+    Sets ``v["re_on"]`` and, when on, ``re_center_w / re_t_end``. Outside the
+    centre the ramp's cap line bends from the main cap line to ``re_t_end`` at
+    the pocket end, and the ramp is the straight section from the land end to
+    it at every w — so the angle grades from the main angle to the end angle
+    the caption reports. The slider only offers ends *steeper* than the main
+    ramp (t below the main cap line): the spec takes either direction, but at
+    the main cap line itself the grading changes nothing and the build
+    rejects it. Labels are fixed (the label is part of the widget key).
+    """
+    slider, _ = _tagged_widgets(tag)
+    st.markdown("**斜面角度徐変（両端）**")
+    land_len, land_depth = float(v["land_length"]), float(v["land_depth"])
+    ramp_deg, cap = float(v["ramp_angle"]), float(v["ramp_cap"])
+    t_cap = land_len + (cap - land_depth) / max(math.tan(math.radians(ramp_deg)), 1e-9)
+    t_lo = round(land_len + 0.1, 1)
+    t_hi = math.floor((t_cap - 0.1) * 10.0) / 10.0
+    # No steeper end exists when the cap is at the land depth (no ramp at
+    # all) or the main ramp already runs out within 0.2 of the land.
+    room = cap > land_depth + 1e-9 and t_hi > t_lo
+    checked = st.checkbox(
+        "斜面角度徐変を有効化",
+        value=default is not None,
+        key=f"{tag}_re_on",
+        disabled=not room,
+        help=(
+            "中央の一定角の幅より外側で、ランプが上限深さに達する線をポケット端に向けて"
+            "ゲート出口側へ寄せる。各位置の断面はランド終端からその線までの直線斜面なので、"
+            "ランプ角が中央の角度から端の角度へ連続的に変わる（捩れた面）。外形は変えない。"
+        ),
+    )
+    v["re_on"] = bool(checked) and room
+    if not room:
+        st.caption("ランプが無い（上限深さ = ランド深さ）か短すぎるので、徐変は無効。")
+        return
+    if not v["re_on"]:
+        return
+    center_d, t_end_d = default if default is not None else (120.0, max(t_lo, t_cap / 2.0))
+    w_span = float(w_full * (2.0 if symmetric else 1.0))
+    w_word = "中央の一定角の幅（両側合計）" if symmetric else "一定角の幅（バルブ側端から）"
+    v["re_center_w"] = slider(
+        f"{w_word} [mm]",
+        0.0,
+        max(w_span - 1.0, 1.0),
+        float(min(center_d, max(w_span - 1.0, 1.0))),
+        step=1.0,
+        help="この幅の内側はメインランプ角のまま。外側（両端）で角度が徐々に変わる。",
+    )
+    v["re_t_end"] = slider(
+        "ポケット端でランプが上限深さに達する t [mm] (< メインランプの到達 t)",
+        float(t_lo),
+        float(t_hi),
+        float(min(max(t_end_d, t_lo), t_hi)),
+        step=0.1,
+        help=f"メインランプは t={t_cap:.2f} で上限深さに達する。端ではこの t で達する（図面の 4）。",
+    )
+    t_end = float(v["re_t_end"])
+    end_deg = math.degrees(math.atan((cap - land_depth) / max(t_end - land_len, 1e-9)))
+    grade = w_full - (v["re_center_w"] / 2.0 if symmetric else float(v["re_center_w"]))
+    st.caption(
+        f"ランプ角は {ramp_deg:.2f}°（一定角の幅の端）から {end_deg:.2f}°（ポケット端）へ、"
+        f"{grade:.1f} mm の区間で連続的に変わる。上限到達線は t={t_cap:.2f} → t={t_end:.2f}。"
+    )
+
+
+def _ramp_ends_from_inputs(v: dict) -> RampEndsSpec | None:
+    if not v.get("re_on"):
+        return None
+    w_from = float(v["re_center_w"]) / 2.0 if v["symmetric"] else float(v["re_center_w"])
+    return RampEndsSpec(w_from=w_from, t_end=float(v["re_t_end"]))
+
+
 def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) -> dict:
     """Draw the Film gate sidebar and return the raw slider values.
 
@@ -1169,7 +1292,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             "ランプ角 [deg]",
             min_value=1.0,
             max_value=45.0,
-            value=10.95,
+            value=float(d.ramp_angle_deg),
             step=0.05,
             format="%.2f",
             help="ランド終端から深さが tan(角)·(t − ランド長) で増える。",
@@ -1182,6 +1305,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             step=0.1,
         )
 
+        _ramp_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.ramp_ends)
         _land_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_ends)
 
         st.markdown("**肉盗み（浅い帯＝振り分け）**")
@@ -1358,6 +1482,7 @@ def _profile_gate_from_inputs(
         edge_channels=_edge_channels_from_inputs(v, ("outer",)),
         ramp_cut=_ramp_cut_from_inputs(v),
         land_ends=_land_ends_from_inputs(v),
+        ramp_ends=_ramp_ends_from_inputs(v),
     )
     return spec, _plate_from_inputs(v), float(v["cell_size"])
 
@@ -2007,6 +2132,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f11",
         "film_gate_11_parametric",
         lambda: _profile_gate_sidebar("f11", True, _FILM_GATE11_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 12 (扇状/斜面角度徐変)": _FilmGate(
+        "f12",
+        "film_gate_12_parametric",
+        lambda: _profile_gate_sidebar("f12", True, _FILM_GATE12_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

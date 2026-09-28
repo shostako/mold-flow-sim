@@ -42,6 +42,18 @@ Model (two linear solves, no time marching):
    ``HeleShawSolver.solve``: without clock inflation a dead pocket cannot
    speed up the seal that made it, so the largest consistent prefix is the
    reachable cavity itself.
+   With a ``MultilayerHeleShawSolver`` (v0.48.0), ``tau1`` is the layered
+   fixed point (tau <-> t_arr <-> T_k <-> eta_k) on the open gap, read on the
+   same machine clock: the volume-CDF map runs at the metered rate over the
+   whole open cavity and never inflates (``_fixed_point(...,
+   rate_controlled=True)``), so neither the main solve's ICM time scaling
+   (``compression_fraction``) nor its constant-pressure inflation enters.
+   The layer temperatures are a function of arrival time, not of exposure,
+   so there is no clock end to stop: cells past the shot hold no melt and
+   only shape ``tau1`` through their conductance. The layered model has no
+   seal time either -- the pool cells whose centre layer fell below the
+   solidification threshold are counted (``injection_center_solid_cells``)
+   but stay open for phase 2.
 2. **Compression phase** — solve ``tau2`` on the *final-thickness* cavity
    with Dirichlet (``tau = 0``) on **all** of ``Omega1`` (the melt pool acts
    as an equipotential source while the mold closes), then advance cells in
@@ -93,6 +105,7 @@ import numpy as np
 from scipy import ndimage as ndi
 
 from .geometry import Geometry
+from .multilayer_solver import MultilayerHeleShawSolver
 from .solver import MAX_DOMAIN_PASSES, HeleShawSolver, check_gate_reachability
 
 # Relative slack for volume comparisons. Tie groups are atomic, so the cut
@@ -170,17 +183,24 @@ def _group_end_progress(tau_vals: np.ndarray, volumes: np.ndarray, budget: float
 
 
 def solve_two_phase_short_shot(
-    solver: HeleShawSolver,
+    solver: HeleShawSolver | MultilayerHeleShawSolver,
     shot_volume_cm3: float,
 ) -> TwoPhaseShortShotResult:
-    """Run the two-phase model on a configured ``HeleShawSolver``.
+    """Run the two-phase model on a configured ``HeleShawSolver`` or
+    ``MultilayerHeleShawSolver``.
 
     The solver supplies the geometry, material, temperatures, rate and the
     compression settings (mode, factor / stroke, mask). ``shot_volume_cm3``
-    is the metered shot volume — the real machine number.
+    is the metered shot volume — the real machine number. A multilayer
+    solver drives the injection phase only (its fixed point on the machine
+    clock); everything else runs on the ``HeleShawSolver`` it holds.
     """
     if shot_volume_cm3 <= 0:
         raise ValueError("shot_volume_cm3 must be positive")
+    multilayer: MultilayerHeleShawSolver | None = None
+    if isinstance(solver, MultilayerHeleShawSolver):
+        multilayer = solver
+        solver = multilayer._base  # same geometry / material / rate / compression
     geom = solver.geometry
     if not geom.gates:
         raise ValueError("Geometry has no gates")
@@ -239,7 +259,8 @@ def solve_two_phase_short_shot(
     reachable = mask.copy()
     T_reach_total = T_open_total
     clock_end = T_inj
-    skin_meta: dict = {"skin_layer_enabled": skin_on}
+    skin_meta: dict = {"skin_layer_enabled": skin_on, "wall_model": "skin" if skin_on else "none"}
+    fp: dict | None = None
     if skin_on:
         # The skin fixed point read at the end of the metered injection.
         # ``_solve_domain`` runs the same exposure clock as the main solve,
@@ -284,6 +305,28 @@ def solve_two_phase_short_shot(
                 "injection_clock_end_s": clock_end,
             }
         )
+    elif multilayer is not None:
+        # The layered fixed point on the open gap, read on the machine clock:
+        # the volume-CDF map runs at the metered rate over the whole open
+        # cavity (``T_open_total``) and never inflates -- the same rate
+        # control the skin branch uses. Cells past the shot never hold melt;
+        # they only shape tau through their conductance, which carries the
+        # temperature of an injection that kept going (the arrival-time
+        # reading of the layer model has no exposure clock to stop).
+        fp = multilayer._fixed_point(h_open, gate_dirichlet, T_open_total, rate_controlled=True)
+        tau1 = fp["tau"]
+        skin_meta.update(
+            {
+                "wall_model": "multilayer",
+                "num_layers": int(multilayer.num_layers),
+                "layer_distribution": multilayer.layer_distribution,
+                "thermal_coupling": bool(multilayer.thermal_coupling),
+                "shear_heating_enabled": bool(multilayer.shear_heating_enabled),
+                "multilayer_iterations": int(fp["iters_done"]),
+                "multilayer_converged": bool(fp["converged"]),
+                "thermal_diffusivity_m2_s": float(multilayer.material.thermal_diffusivity_m2_s),
+            }
+        )
     else:
         S1 = solver._conductance_field(eta, h_open)
         tau1, _ = solver._solve_tau_field(S1, gate_dirichlet)
@@ -316,6 +359,12 @@ def solve_two_phase_short_shot(
         omega1[sel] = take
 
     injection_fill_time_s = np.where(omega1, t_arr1, np.nan)
+    if fp is not None and fp["short_shot_mask"] is not None:
+        # Diagnostic only: pool cells whose centre layer fell below the
+        # solidification threshold on the machine clock. The layer model has
+        # no seal time, so these cells are not taken out of phase 2 (the skin
+        # branch's ``injection_sealed_mask`` has no layered counterpart yet).
+        skin_meta["injection_center_solid_cells"] = int((fp["short_shot_mask"] & omega1).sum())
     injection_skin_mm: np.ndarray | None = None
     injection_sealed: np.ndarray | None = None
     if skin_on:

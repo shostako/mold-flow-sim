@@ -6,6 +6,41 @@
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 バージョン 0.1.0〜0.14.0 は**開発履歴から遡及的に付与**したもの（2026-08-07 時点で整理）。
 
+## [0.48.0] — 2026-09-29
+
+**二相ショートショットの射出相に層別モデルが乗る。層別を選んでも二相解析がスキップされなくなった。**
+
+### 追加
+
+- `solve_two_phase_short_shot` が `MultilayerHeleShawSolver` を受け付ける。射出相の τ は層別の固定点
+  （τ ↔ t_arr ↔ T_k ↔ η_k）を型開きギャップで解いたもので、時計は計量の速度制御: 体積CDF写像は開きキャビティ全体を
+  射出率（プロファイルがあればそれを通す）で満たす長さ `T_open_total` で、膨張しない。主解析の ICM 時間短縮
+  （`compression_fraction`）と圧力一定の膨張（`T_fill_inflation`）は射出相に効かない。スキン層の射出相と同じ定義。
+- `MultilayerHeleShawSolver._fixed_point(h_open, dirichlet, T_fill_baseline, *, rate_controlled=False)`:
+  `solve()` の固定点ループを切り出した内部メソッド。`rate_controlled=True` で時計を固定する。`solve()` の結果は
+  切り出し前とビット一致（`hamoko_gate_furiwake_rampends_20260928` の 7 層・剪断発熱 ON で τ・充填時間・層温度を照合）。
+- 二相の metadata に `wall_model`（`none` / `skin` / `multilayer`）。層別のときは `num_layers`、`layer_distribution`、
+  `thermal_coupling`、`shear_heating_enabled`、`multilayer_iterations`、`multilayer_converged` と、診断の
+  `injection_center_solid_cells`（射出終了時のプールで中央層が固化温度を下回ったセル数）。設定記録の
+  `two_phase_short_shot` にも `wall_model`。
+- UI: 層別のときも二相を実行し、結果ペインに層数と固定点の収束をキャプションで出す。中央層の固化セルがあれば警告。
+- テスト 5 件（`test_two_phase.py` 4 件、`test_two_phase_ui.py` の置き換え 1 件）: 1 層・熱連成なしで等温の二相と
+  プール・最終形が一致 / 射出相が `compression_fraction` に依らず到着時刻が `T_inj` 以内 / 遅い射出（2 s）で厚い
+  ランナーが開いた薄板より先に埋まり、速い射出（0.2 s）では等温の順番のまま / 体積の契約（部分ショットは計量以下、
+  キャビティ体積なら完全充填）/ UI で層別の二相が走り記録に残る。
+
+### 変更
+
+- `run_demo.py` の「二相は層別と併用不可」の `ValueError` を削除。
+
+### 制約（意図的）
+
+- 圧縮相は従来どおり等温（プールは等圧ソース、代表粘度 1 つで前進）。層の温度は圧縮での前進に効かない。
+- 層別には封止の時刻が無いので、スキン層の `injection_sealed_mask` に当たるものは出さない。中央層が固化温度を
+  下回ったセルも圧縮相では流路として扱い、数だけを診断に出す。
+- プールより先のセルは溶融が届かないが、τ には伝導度を通じて効く。その温度は「射出が続いたら」の到着時刻で読む
+  （層別の温度は到着時刻の関数で、スキン層のような露光の打ち切りが無い）。
+
 ## [0.47.0] — 2026-09-29
 
 **水平部（溶接ダム）を肉盗みから独立させた。肉盗みを土台に置いたまま、その上に乗せるダムの範囲と幅だけを決められる。**

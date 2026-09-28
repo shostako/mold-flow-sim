@@ -200,7 +200,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- スキンが出会う年齢 $t_c$ に役務が届いたセル＝**封止**（充填後に閉じた、赤マーク）。閉じた後に届くセルは**未充填**（充填時間なし）"
     )
 
-    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（選択式。二相モデルとは併用不可）")
+    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（選択式。二相モデルの射出相にも乗る）")
     st.markdown(
         "厚み方向を $N$ 層に離散化し、**各層に固有の温度・粘度・剪断速度** を持たせる。"
         "スキン層モデルが「壁面凍結フロント」しか扱わないのに対し、こちらは**コア内部の温度・粘度プロファイル**"
@@ -2794,8 +2794,8 @@ with st.sidebar:
                 "コア層 h_core=h-2s だけが流れる（露光時計、役務平均）。封止と未充填も検出。\n"
                 "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
                 "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
-                "既定はスキン層（二相ショートショットと併用可）。温度まで効かせるなら層別"
-                "（二相とは併用不可）。"
+                "既定はスキン層。温度まで効かせるなら層別。どちらも二相ショートショットの"
+                "射出相に乗る。"
             ),
         )
 
@@ -2805,7 +2805,7 @@ with st.sidebar:
         # 射出相に乗るようになったので、既定 ON の二相と両立する。『なし』は η が定数で
         # S ∝ h³ になり、材料も温度も充填順序に効かない（形状と Q だけで決まる）。
         # スキン層で効くのは材料の熱拡散率 α（s = c·√(αt)）で、T_melt / T_mold は
-        # 依然として効かない — 温度まで効かせるには層別（二相とは併用不可）。
+        # 依然として効かない — 温度まで効かせるには層別（v0.48.0 から二相の射出相にも乗る）。
         # 層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
         #   層数 N: 7 (壁勾配が急なので N=5 から増量)
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
@@ -3048,18 +3048,12 @@ with st.sidebar:
                 help=(
                     "計量を意図的に絞ったショートショットの最終形状を予測する。"
                     "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
-                    "溶融プールを前進、体積保存）の二相。壁面冷却モデルは『なし』か"
-                    "『スキン層』で実行（スキン層は射出相に乗る: 開いた薄板が射出中に"
-                    "痩せてゲート部が先に埋まる順番を出す）。『層別』とは併用不可。"
+                    "溶融プールを前進、体積保存）の二相。壁面冷却モデルは射出相に乗る:"
+                    "スキン層は開いた薄板が射出中に痩せてゲート部が先に埋まる順番を、"
+                    "層別は層ごとの温度・粘度で決まる順番を、どちらも計量 V/Q の時計で出す。"
+                    "圧縮相はどのモデルでも等温。"
                 ),
             )
-            if two_phase_on and wall_model == "multilayer":
-                # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
-                # 出ない」に見える。設定と同じ場所に常時出す。
-                st.warning(
-                    "壁面冷却モデルが『なし』または『スキン層』のときだけ実行される。"
-                    "現在の設定（層別）では二相解析はスキップされる。"
-                )
             if two_phase_on:
                 # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
                 # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
@@ -3276,27 +3270,20 @@ if do_run:
             st.error(f"解析できない形状: {exc}")
             st.stop()
 
-        # 二相ショートショット。HeleShawSolver 専用（等温、またはスキン層を
-        # 射出相に乗せる）— 層別ソルバーには射出相の時計が無い。
+        # 二相ショートショット。壁面冷却モデル（なし／スキン層／層別）は射出相に
+        # 乗る。層別は固定点を計量 V/Q の時計（膨張なし）で解き直す。
         two_phase_result = None
         two_phase_skip_reason: str | None = None
         if two_phase_on:
-            if multilayer_on:
-                two_phase_skip_reason = "壁面冷却モデルが『層別』に設定されている（併用不可）"
-                st.warning(
-                    "二相ショートショット解析は壁面冷却モデル『なし』または『スキン層』専用です。"
-                    "今回はスキップしました。"
-                )
-            else:
-                try:
-                    two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
-                except ValueError as e:
-                    # 例: 計量がゲート群の開ギャップ体積を下回る。メッセージは
-                    # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
-                    # 含まない。
-                    two_phase_result = None
-                    two_phase_skip_reason = str(e)
-                    st.warning(f"二相ショートショット解析をスキップしました: {e}")
+            try:
+                two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
+            except ValueError as e:
+                # 例: 計量がゲート群の開ギャップ体積を下回る。メッセージは
+                # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
+                # 含まない。
+                two_phase_result = None
+                two_phase_skip_reason = str(e)
+                st.warning(f"二相ショートショット解析をスキップしました: {e}")
 
         # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
         # ダウンロードした ZIP から設定を復元できない (画像から寸法を測って
@@ -3349,6 +3336,7 @@ if do_run:
                     "enabled": True,
                     "shot_volume_cm3": shot_volume_cm3,
                     "skin_layer": bool(skin_on),
+                    "wall_model": wall_model,
                 }
                 if two_phase_result is not None
                 else {"enabled": False}
@@ -3692,6 +3680,19 @@ if "mfs_result" in st.session_state:
                                 if _short > 1e-9
                                 else ""
                             )
+                        )
+                if md2.get("wall_model") == "multilayer":
+                    st.caption(
+                        f"層別 {md2.get('num_layers')} 層を射出相に乗せた結果（時計は計量 V/Q 固定、"
+                        f"固定点 {md2.get('multilayer_iterations')} 回"
+                        + ("で収束" if md2.get("multilayer_converged") else "、未収束")
+                        + "）。圧縮相は等温（層ごとの温度は圧縮での前進に効かない）。"
+                    )
+                    if md2.get("injection_center_solid_cells", 0) > 0:
+                        st.warning(
+                            f"射出終了時のプールに中央層が固化温度を下回ったセルが "
+                            f"{md2['injection_center_solid_cells']} ある。層別モデルは封止の"
+                            "時刻を持たないので、このセルも圧縮相では流路として扱っている。"
                         )
                 if md2.get("injection_extrapolated_past_vp"):
                     # The sidebar's own extrapolation check compares the

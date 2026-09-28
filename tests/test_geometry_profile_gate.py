@@ -655,10 +655,29 @@ def test_island_weld_w_max_validation() -> None:
 def test_island_weld_that_lands_on_no_cell_is_rejected() -> None:
     """A dam narrower than the nearest cell centre (0.25 off the axis at
     0.5 mm) would be recorded in the spec and absent from the geometry."""
-    with pytest.raises(ValueError, match="makes no cell shallower"):
+    with pytest.raises(ValueError, match="changes no cell"):
         build_profile_gate_geometry(_weld_spec(w_max=0.1), _plate(), cell_size_mm=0.5)
     _g, _b, _t, wa, changed = _weld_changed_cells(_weld_spec(w_max=0.3), 0.5)
     assert changed.any() and (wa[changed] <= 0.3).all()
+
+
+def test_island_weld_erased_by_the_well_is_rejected() -> None:
+    """A dam confined beneath the well is restored by the well's max: the
+    check must look at the finished geometry, not the field right after the
+    dam (Codex P2 on PR #95)."""
+    d = _weld_spec().to_dict()
+    d["well"].update(t_range=[8.0, 20.0], floor_t_range=[10.31, 17.69])
+    d["valve"]["t"] = 14.0
+    under_well = dict(
+        d, island=dict(d["island"], weld={"t_range": [10.0, 12.0], "depth": 0.1, "w_max": 2.0})
+    )
+    with pytest.raises(ValueError, match="changes no cell"):
+        build_profile_gate_geometry(
+            GateProfileSpec.from_dict(under_well), _plate(), cell_size_mm=0.5
+        )
+    # the same dam at full width reaches island cells beside the well: kept
+    beside = dict(d, island=dict(d["island"], weld={"t_range": [10.0, 12.0], "depth": 0.1}))
+    build_profile_gate_geometry(GateProfileSpec.from_dict(beside), _plate(), cell_size_mm=0.5)
 
 
 def test_outer_wall_excludes_cells() -> None:

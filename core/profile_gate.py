@@ -1676,10 +1676,6 @@ def build_profile_gate_geometry(
             in_weld = in_island & (t >= wt_lo) & (t <= wt_hi)
             if isl.weld.w_max is not None:
                 in_weld &= wa <= isl.weld.w_max
-            # checked against the pocket silhouette below: a dam that lands on
-            # no cavity cell would be recorded in the spec and absent from the
-            # geometry (the same false green as a sub-mesh runner)
-            d_before_weld = d_base
             d_base = np.where(in_weld, isl.weld.depth, d_base)
 
     # --- pocket silhouette: one outer wall, or the union of the fans ---
@@ -1690,15 +1686,8 @@ def build_profile_gate_geometry(
         # steel, not cavity (a zero-thickness cell in the mask would give
         # S = 0 and a singular system). The well is machined through it, so
         # cells the well still reaches stay cavity via ``in_well`` below.
-        if spec.island is not None and spec.island.weld is not None:
-            if not (in_gate_base & in_weld & (d_before_weld > spec.island.weld.depth + _EPS)).any():
-                raise ValueError(
-                    f"island.weld (t_range={spec.island.weld.t_range}, "
-                    f"w_max={spec.island.weld.w_max}) makes no cell shallower at "
-                    f"cell_size_mm={dx}: widen the dam or refine the mesh"
-                )
-            if spec.island.weld.depth <= 0:
-                in_gate_base &= ~in_weld
+        if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
+            in_gate_base &= ~in_weld
         d_base = _apply_edge_channels(
             spec.edge_channels,
             walls={"outer": (spec.outer_wall_line, full_half_width)},
@@ -1911,7 +1900,44 @@ def build_profile_gate_geometry(
 
     if spec.ramp_ends is not None:
         _reject_ineffective_ramp_ends(spec, plate, cell_size_mm, geom)
+    if spec.island is not None and spec.island.weld is not None:
+        _reject_ineffective_weld(spec, plate, cell_size_mm, geom)
     return geom
+
+
+def _reject_ineffective_weld(
+    spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float, geom: Geometry
+) -> None:
+    """Reject a dam the finished geometry does not show.
+
+    A dam narrower than the nearest cell centre, or one whose t range picks
+    no row, lands on no cell; a dam confined beneath the well is restored
+    by the well's ``max``; an edge channel or ramp cut can floor it away.
+    Either way the spec would record an ``island.weld`` the solver never
+    sees (the same false green as a sub-mesh runner). Checking the field
+    right after the dam is applied misses the overlays (Codex P2 on PR #95,
+    the lesson of #94), so compare the *finished* geometry with the same
+    spec built without the dam.
+    """
+    assert spec.island is not None and spec.island.weld is not None
+    try:
+        plain = build_profile_gate_geometry(
+            dataclasses.replace(spec, island=dataclasses.replace(spec.island, weld=None)),
+            plate,
+            cell_size_mm,
+        )
+    except ValueError:
+        return
+    if np.array_equal(plain.mask, geom.mask) and np.array_equal(
+        plain.thickness_mm, geom.thickness_mm
+    ):
+        wl = spec.island.weld
+        raise ValueError(
+            f"island.weld (t_range={wl.t_range}, w_max={wl.w_max}) changes no cell at "
+            f"cell_size_mm={cell_size_mm}: the finished geometry is the same without it "
+            "(no island cell centre inside the dam, or the well / an edge channel / a "
+            "ramp cut covering it). Widen the dam, move it, or refine the mesh."
+        )
 
 
 def _reject_ineffective_ramp_ends(

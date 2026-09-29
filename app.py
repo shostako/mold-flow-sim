@@ -1274,17 +1274,25 @@ def _ramp_ends_inputs(
         step=0.1,
         help=f"メインランプは t={t_cap:.2f} で上限深さに達する。端ではこの t で達する（図面の 4）。",
     )
-    v["re_depth_end"] = slider(
-        "ポケット端での上限深さ [mm] (≥ ランプ上限)",
-        float(round(cap, 2)),
-        10.0,
-        float(min(max(depth_end_d, round(cap, 2)), 10.0)),
-        step=0.05,
-        help=(
-            "端に向かって上限深さも深くする。一定角の幅の端でランプ上限、ポケット端でこの値になり、"
-            "その間は直線。到達線より奥の床（ランナー）も同じ深さになる。ランプ上限と同じなら深さは一定。"
-        ),
-    )
+    # The cap slider reaches 10.0 too; at that cap there is no deeper end to
+    # offer, and a slider with min == max is a StreamlitAPIException that
+    # takes the rest of the sidebar with it (Codex P2 on PR #97).
+    d_lo, d_hi = float(round(cap, 2)), 10.0
+    if d_hi > d_lo:
+        v["re_depth_end"] = slider(
+            "ポケット端での上限深さ [mm] (≥ ランプ上限)",
+            d_lo,
+            d_hi,
+            float(min(max(depth_end_d, d_lo), d_hi)),
+            step=0.05,
+            help=(
+                "端に向かって上限深さも深くする。一定角の幅の端でランプ上限、ポケット端でこの値になり、"
+                "その間は直線。到達線より奥の床（ランナー）も同じ深さになる。ランプ上限と同じなら深さは一定。"
+            ),
+        )
+    else:
+        v["re_depth_end"] = cap
+        st.caption("ランプ上限深さがスライダーの最大なので、端の上限深さは一定。")
     t_end = float(v["re_t_end"])
     d_end = float(v["re_depth_end"])
     end_deg = math.degrees(math.atan((d_end - land_depth) / max(t_end - land_len, 1e-9)))

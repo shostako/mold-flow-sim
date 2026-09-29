@@ -1754,3 +1754,17 @@ def test_corner_radius_that_cuts_no_cell_is_rejected() -> None:
     with pytest.raises(ValueError, match="cuts no cell"):
         build_profile_gate_geometry(_corner_spec(0.3), _plate(), cell_size_mm=1.0)
     build_profile_gate_geometry(_corner_spec(0.3), _plate(), cell_size_mm=0.05 * 2)
+
+
+def test_land_closed_line_that_cuts_the_product_off_is_rejected_at_build() -> None:
+    """A closure 0.2 short of the exit's half-width is a valid spec, but at
+    1.0 mm every land cell centre (w ≤ 99.5) is inside it and the product is
+    severed from the gate (Codex P2 on PR #97). The builder names the knob;
+    at 0.1 mm the opening has cell centres and the geometry is connected."""
+    spec = _minimal_spec(land={**_LAND_CLOSED, "closed_line": [[0.0, 99.8], [2.0, 99.8]]})
+    with pytest.raises(ValueError, match="closed_line leaves no open land cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    geom = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)
+    from scipy import ndimage as ndi
+
+    assert ndi.label(geom.mask)[1] == 1

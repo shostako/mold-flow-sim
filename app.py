@@ -421,6 +421,13 @@ material_keys = list(db.keys())
 #                                bends from t=12 at w=60 to t=4 at the pocket
 #                                end, so the ramp steepens from 11.06° to
 #                                35.6° (hamoko_gate_furiwake_rampends_20260928)
+#   Film gate 13 (扇状/斜面角度徐変2) the 2026/09/30 CAD model
+#                                (Runner-block_3D_kai01.igs): Film gate 12 with
+#                                the cap depth graded too (2.5 at w=60 → 3.5 at
+#                                the end, cap line to t=2.5), the centre of the
+#                                land closed (no resin enters the product
+#                                through |w| < 50) and the outer wall's corner
+#                                rounded R10 (hamoko_gate_furiwake_rampends2_20260930)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -452,9 +459,17 @@ class _ProfileGateDefaults:
     # checkbox starts off. Film gate 11 is the drawing that *is* the cut.
     land_ends: tuple[float, float] | None = None
     # 斜面角度徐変: (centre width at the main angle, t where the ramp reaches
-    # its cap at the pocket end). None = the checkbox starts off. Film gate 12
-    # is the drawing that *is* the grading.
-    ramp_ends: tuple[float, float] | None = None
+    # its cap at the pocket end[, cap depth at the pocket end]). None = the
+    # checkbox starts off. Film gate 12 is the drawing that *is* the grading;
+    # Film gate 13 grades the cap depth as well.
+    ramp_ends: tuple[float, float] | tuple[float, float, float] | None = None
+    # ランド中央の閉鎖: width closed at the exit (both sides together when
+    # symmetric, from the valve-side edge when one-sided). None = the checkbox
+    # starts off. Film gate 13 is the model that closes it.
+    land_closed: float | None = None
+    # R of the outer wall's corner (where the exit width turns into the wall
+    # line). 0 = sharp.
+    wall_corner_radius: float = 0.0
     # Main ramp angle the sidebar starts from. Every drawing up to Film gate 11
     # reads 10.95° (the 12.11 cap line of the PDFs); the 09/28 CAD model puts
     # the cap line at t=12 exactly.
@@ -637,6 +652,28 @@ _FILM_GATE12_DEFAULTS = dataclasses.replace(
     wall_w2=4.489329,
     ramp_ends=(120.0, 4.0),
     ramp_angle_deg=math.degrees(math.atan(2.15 / 11.0)),
+)
+
+
+# Film gate 13 = the 2026/09/30 CAD model「Runner-block_3D_kai01.igs」
+# (hamoko_gate_furiwake_rampends2_20260930). Film gate 12's pocket with three
+# changes, all read off the model's control points: (1) the cap depth grades
+# too — the end ramp is the bilinear patch (1, 60, 0.35)–(12, 60, 2.5) to
+# (1, 149, 0.35)–(2.5, 149, 3.5), and the floor behind it is ruled from 2.5 at
+# w=60 to 3.5 at w=149; (2) the centre of the land is steel at the PL — the
+# exit edge runs from w=50 at t=0 to w=47.644 (where the 肉盗み starts) at t=1,
+# so no resin enters the product through the central ~95–100 mm by design;
+# (3) the corner where the exit width meets the 3° outer wall is rounded R10
+# (tangent at t=6.2466 on the end wall). Rasterised against a vertical ray
+# cast of the model the outline is identical cell for cell at 0.25 mm (at
+# 0.5 mm one cell centre on the arc differs — the model's arc is a B-spline
+# fit); the only depth difference is again the 肉盗み's far-end chamfer
+# (11 mm³ of 11,776).
+_FILM_GATE13_DEFAULTS = dataclasses.replace(
+    _FILM_GATE12_DEFAULTS,
+    ramp_ends=(120.0, 2.5, 3.5),
+    land_closed=100.0,
+    wall_corner_radius=10.0,
 )
 
 
@@ -1217,7 +1254,8 @@ def _ramp_ends_inputs(
         return
     if not v["re_on"]:
         return
-    center_d, t_end_d = default if default is not None else (120.0, max(t_lo, t_cap / 2.0))
+    center_d, t_end_d = (default or (120.0, max(t_lo, t_cap / 2.0)))[:2]
+    depth_end_d = default[2] if default is not None and len(default) > 2 else cap
     w_span = float(w_full * (2.0 if symmetric else 1.0))
     w_word = "中央の一定角の幅（両側合計）" if symmetric else "一定角の幅（バルブ側端から）"
     v["re_center_w"] = slider(
@@ -1236,12 +1274,30 @@ def _ramp_ends_inputs(
         step=0.1,
         help=f"メインランプは t={t_cap:.2f} で上限深さに達する。端ではこの t で達する（図面の 4）。",
     )
+    v["re_depth_end"] = slider(
+        "ポケット端での上限深さ [mm] (≥ ランプ上限)",
+        float(round(cap, 2)),
+        10.0,
+        float(min(max(depth_end_d, round(cap, 2)), 10.0)),
+        step=0.05,
+        help=(
+            "端に向かって上限深さも深くする。一定角の幅の端でランプ上限、ポケット端でこの値になり、"
+            "その間は直線。到達線より奥の床（ランナー）も同じ深さになる。ランプ上限と同じなら深さは一定。"
+        ),
+    )
     t_end = float(v["re_t_end"])
-    end_deg = math.degrees(math.atan((cap - land_depth) / max(t_end - land_len, 1e-9)))
+    d_end = float(v["re_depth_end"])
+    end_deg = math.degrees(math.atan((d_end - land_depth) / max(t_end - land_len, 1e-9)))
     grade = w_full - (v["re_center_w"] / 2.0 if symmetric else float(v["re_center_w"]))
+    depth_note = (
+        f"上限深さも {cap:.2f} → {d_end:.2f} mm に深くなる（奥の床も同じ）。"
+        if d_end > cap + 1e-9
+        else ""
+    )
     st.caption(
         f"ランプ角は {ramp_deg:.2f}°（一定角の幅の端）から {end_deg:.2f}°（ポケット端）へ、"
         f"{grade:.1f} mm の区間で連続的に変わる。上限到達線は t={t_cap:.2f} → t={t_end:.2f}。"
+        + depth_note
     )
 
 
@@ -1249,7 +1305,58 @@ def _ramp_ends_from_inputs(v: dict) -> RampEndsSpec | None:
     if not v.get("re_on"):
         return None
     w_from = float(v["re_center_w"]) / 2.0 if v["symmetric"] else float(v["re_center_w"])
-    return RampEndsSpec(w_from=w_from, t_end=float(v["re_t_end"]))
+    # At the cap depth the grading of the depth is a no-op: record None so
+    # the spec stays the 09/28 form (bit-identical to Film gate 12).
+    d_end = float(v.get("re_depth_end", v["ramp_cap"]))
+    depth_end = d_end if d_end > float(v["ramp_cap"]) + 1e-9 else None
+    return RampEndsSpec(w_from=w_from, t_end=float(v["re_t_end"]), depth_end=depth_end)
+
+
+def _land_closed_inputs(
+    tag: str, v: dict, *, symmetric: bool, w_full: float, default: float | None
+) -> None:
+    """The ランド中央の閉鎖 block of the single-pocket Film gates (fills ``v``).
+
+    Sets ``v["lc_on"]`` and, when on, ``lc_width``: the stretch of the exit
+    left as steel at the PL through the land, so no resin enters the product
+    there. Its end at the land's far side is tied to the 肉盗み in the
+    assembly (``_land_closed_from_inputs``), the way the 2026/09/30 CAD model
+    chamfers it.
+    """
+    slider, _ = _tagged_widgets(tag)
+    st.markdown("**ランド中央の閉鎖**" if symmetric else "**ランドのバルブ側の閉鎖**")
+    v["lc_on"] = st.checkbox(
+        "ランドの閉鎖を有効化",
+        value=default is not None,
+        key=f"{tag}_lc_on",
+        help=(
+            "ランドの一部を鋼材で PL まで埋め、そこからは製品に樹脂が入らないようにする。"
+            "閉鎖の縁は出口（t=0）でこの幅、ランド終端（t=ランド長）で肉盗みの出口側の境界"
+            "（肉盗みの方が狭いとき）へ斜めに寄る。肉盗み OFF なら縁はまっすぐ。"
+        ),
+    )
+    if not v["lc_on"]:
+        return
+    w_span = float(w_full * (2.0 if symmetric else 1.0))
+    hi = max(w_span - 1.0, 1.0)
+    v["lc_width"] = slider(
+        ("閉鎖幅（中央、両側合計）" if symmetric else "閉鎖幅（バルブ側端から）") + " [mm]",
+        1.0,
+        hi,
+        float(min(default if default is not None else 100.0, hi)),
+        step=0.5,
+        help="出口（t=0）での閉鎖の幅。上限はゲート出口幅 − 1。",
+    )
+
+
+def _land_closed_from_inputs(v: dict) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    if not v.get("lc_on"):
+        return None
+    w0 = float(v["lc_width"]) / 2.0 if v["symmetric"] else float(v["lc_width"])
+    w1 = w0
+    if v.get("island_on") and float(v["island_w_near"]) < w0:
+        w1 = float(v["island_w_near"])
+    return ((0.0, w0), (float(v["land_length"]), w1))
 
 
 _WELD_MIN_LENGTH = 0.5  # shortest dam the t-range defaults collapse to [mm]
@@ -1400,6 +1507,9 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             step=0.1,
         )
 
+        _land_closed_inputs(
+            tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_closed
+        )
         _ramp_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.ramp_ends)
         _land_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_ends)
 
@@ -1464,6 +1574,17 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
             step=0.05,
         )
         v["wall_w1"] = float(w_full)
+        v["wall_corner_r"] = number_input(
+            "外壁の角 R [mm] (0 = 角のまま)",
+            min_value=0.0,
+            max_value=30.0,
+            value=float(d.wall_corner_radius),
+            step=0.5,
+            help=(
+                "ゲート出口の全幅から外壁線へ折れる角を、両方に接する円弧で丸める。"
+                "接点までの長さ R·tan(折れ角/2) が外壁開始 t と外壁線の長さに収まらないと組めない。"
+            ),
+        )
 
         _edge_channel_inputs(
             tag,
@@ -1535,7 +1656,11 @@ def _profile_gate_from_inputs(
         units="mm",
         symmetric=bool(v["symmetric"]),
         gate_exit_width=float(v["gate_exit_width"]),
-        land=LandSpec(depth=float(v["land_depth"]), length=t_land),
+        land=LandSpec(
+            depth=float(v["land_depth"]),
+            length=t_land,
+            closed_line=_land_closed_from_inputs(v),
+        ),
         main_ramp=MainRampSpec(angle_deg=float(v["ramp_angle"]), cap_depth=float(v["ramp_cap"])),
         outer_wall_line=(
             (float(v["wall_t1"]), float(v["wall_w1"])),
@@ -1544,6 +1669,9 @@ def _profile_gate_from_inputs(
         valve=ValveSpec(t=float(v["valve_t"]), w=0.0, orifice_diameter=float(v["valve_d"])),
         island=island,
         well=well,
+        outer_wall_corner_radius=(
+            float(v["wall_corner_r"]) if float(v.get("wall_corner_r", 0.0)) > 0 else None
+        ),
         edge_channels=_edge_channels_from_inputs(v, ("outer",)),
         ramp_cut=_ramp_cut_from_inputs(v),
         land_ends=_land_ends_from_inputs(v),
@@ -2203,6 +2331,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f12",
         "film_gate_12_parametric",
         lambda: _profile_gate_sidebar("f12", True, _FILM_GATE12_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 13 (扇状/斜面角度徐変2)": _FilmGate(
+        "f13",
+        "film_gate_13_parametric",
+        lambda: _profile_gate_sidebar("f13", True, _FILM_GATE13_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

@@ -1553,3 +1553,204 @@ def test_ramp_ends_erased_by_a_later_floor_are_rejected() -> None:
         build_profile_gate_geometry(erased, _plate(), cell_size_mm=0.5)
     visible = _minimal_spec(ramp_ends=_RE, land_ends={"w_from": 60.0, "depth": 0.6})
     build_profile_gate_geometry(visible, _plate(), cell_size_mm=0.5)
+
+
+# ----------------------- ramp_ends.depth_end (上限深さの徐変) ------------------
+# The 2026/09/30 CAD model grades the cap depth with the cap line: D(w) runs
+# straight from the cap (2.4 here) at w_from to depth_end at the exit's
+# half-width, the ramp rises from the land end to (t_cap(w), D(w)) and the
+# floor behind the cap line is D(w) up to the wall. Oracle written out here.
+
+_RE_D = {**_RE, "depth_end": 3.4}
+
+
+def _d_cap(w: float) -> float:
+    if w < 60.0:
+        return 2.4
+    return 2.4 + (3.4 - 2.4) * (min(w, 100.0) - 60.0) / 40.0
+
+
+def _graded_deep(t: float, w: float) -> float:
+    if t <= 2.0:
+        return 0.4
+    if w < 60.0:
+        return _ramp_min(t)
+    d_cap = _d_cap(w)
+    return min(d_cap, 0.4 + (d_cap - 0.4) * (t - 2.0) / (_t_cap_graded(w) - 2.0))
+
+
+def test_ramp_ends_depth_end_columns_are_the_ruled_surface_and_floor() -> None:
+    spec = _minimal_spec(ramp_ends=_RE_D)
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    for w in (30.125, 60.125, 70.125, 85.125, 99.875):
+        col = g.mask & np.isclose(wa, w) & (t >= 0.0)
+        assert col.sum() > 50
+        for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+            assert got == pytest.approx(_graded_deep(tv, w), abs=1e-9), (tv, w)
+    # the floor behind the cap line: at the far end of the block it is D(w)
+    back = g.mask & np.isclose(t, 23.875) & (wa >= 60.0)
+    assert np.allclose(g.thickness_mm[back], [_d_cap(w) for w in wa[back]], atol=1e-9)
+    assert g.thickness_mm[back].max() == pytest.approx(_d_cap(99.875), abs=1e-9)
+
+
+def test_ramp_ends_depth_end_only_deepens_the_ends_against_the_constant_cap() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE_D), _plate(), cell_size_mm=0.25)
+    assert np.array_equal(g0.mask, g1.mask)
+    assert np.all(g1.thickness_mm >= g0.thickness_mm)
+    diff = g1.thickness_mm != g0.thickness_mm
+    t, wa = _tw(g1)
+    assert wa[diff].min() >= 60.0 and t[diff].min() > 2.0
+
+
+def test_ramp_ends_depth_end_at_the_cap_is_the_constant_cap() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(ramp_ends=_RE), _plate(), cell_size_mm=0.5)
+    g1 = build_profile_gate_geometry(
+        _minimal_spec(ramp_ends={**_RE, "depth_end": 2.4}), _plate(), cell_size_mm=0.5
+    )
+    assert np.array_equal(g0.mask, g1.mask)
+    assert np.array_equal(g0.thickness_mm, g1.thickness_mm)
+
+
+def test_ramp_ends_depth_end_json_roundtrip_and_validation() -> None:
+    spec = _minimal_spec(ramp_ends=_RE_D)
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.ramp_ends == RampEndsSpec(w_from=60.0, t_end=5.0, depth_end=3.4)
+    assert "depth_end" not in _minimal_spec(ramp_ends=_RE).to_dict()["ramp_ends"]
+    for bad in (0.4, 0.2, -1.0):
+        with pytest.raises(ValueError, match="depth_end"):
+            _minimal_spec(ramp_ends={**_RE, "depth_end": bad})
+    with pytest.raises(ValueError, match="must be a number"):
+        _minimal_spec(ramp_ends={**_RE, "depth_end": "3"})
+
+
+# ----------------------- land.closed_line (ランド中央の閉鎖) ------------------
+# Within the land every cell with w < closed_line(t) is steel at the PL: no
+# resin enters the product through that stretch of the exit.
+
+_LAND_CLOSED = {"depth": 0.4, "length": 2.0, "closed_line": [[0.0, 30.0], [2.0, 25.0]]}
+
+
+def test_land_closed_line_removes_exactly_the_closed_land_cells() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    g1 = build_profile_gate_geometry(_minimal_spec(land=_LAND_CLOSED), _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g1)
+    removed = g0.mask & ~g1.mask
+    expected = g0.mask & (t >= 0.0) & (t <= 2.0) & (wa < 30.0 - 2.5 * t)
+    assert removed.any()
+    assert np.array_equal(removed, expected)
+    assert not (g1.mask & ~g0.mask).any()
+    kept = g1.mask
+    assert np.array_equal(g0.thickness_mm[kept], g1.thickness_mm[kept])
+    # mirrored about the valve axis, and the plate row next to it untouched
+    nx = removed.shape[1]
+    assert removed[:, : nx // 2].sum() == removed[:, (nx + 1) // 2 :].sum()
+    assert np.array_equal(g0.mask[t < 0.0], g1.mask[t < 0.0])
+
+
+def test_land_closed_line_product_fills_around_the_closure() -> None:
+    """The product in front of the closure is still reached — sideways from
+    the open ends of the exit — so the solve runs and fills it."""
+    spec = _minimal_spec(land=_LAND_CLOSED)
+    geom = build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    mat = MaterialDB().get("PP")
+    res = HeleShawSolver(geometry=geom, material=mat).solve(num_frames=2)
+    t, wa = _tw(geom)
+    front = geom.mask & np.isclose(t, -0.5) & (wa < 20.0)
+    assert front.any()
+    assert np.all(np.isfinite(res.fill_time_s[front]))
+
+
+def test_land_closed_line_json_roundtrip_and_validation() -> None:
+    spec = _minimal_spec(land=_LAND_CLOSED)
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.land == LandSpec(depth=0.4, length=2.0, closed_line=((0.0, 30.0), (2.0, 25.0)))
+    assert "closed_line" not in _minimal_spec().to_dict()["land"]
+    bad_lines = [
+        ([[2.0, 30.0], [0.0, 25.0]], "increasing"),
+        ([[-1.0, 30.0], [2.0, 25.0]], "≥ 0"),
+        ([[0.0, 0.0], [2.0, 25.0]], "positive"),
+        ([[0.0, 100.0], [2.0, 25.0]], "closes the whole exit"),
+        ([[0.0, 30.0], [1.0, 70.0]], "closes the whole exit"),  # 110 at the land end
+    ]
+    for line, msg in bad_lines:
+        with pytest.raises(ValueError, match=msg):
+            _minimal_spec(land={**_LAND_CLOSED, "closed_line": line})
+    with pytest.raises(ValueError, match="closed_line"):
+        _minimal_spec(land={**_LAND_CLOSED, "closed_line": "30"})
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict(
+            {**fans, "land": {**fans["land"], "closed_line": [[0, 5], [1, 5]]}}
+        )
+
+
+def test_land_closed_line_that_closes_no_cell_is_rejected() -> None:
+    spec = _minimal_spec(land={**_LAND_CLOSED, "closed_line": [[0.0, 0.2], [2.0, 0.2]]})
+    with pytest.raises(ValueError, match="closes no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+
+
+# ----------------------- outer_wall_corner_radius (外壁の角 R) ------------------
+# Wall (10, 100) → (24, 40): the exit-width stretch w = 100 turns by
+# θ = atan(60/14) onto it. A round of radius R is tangent to both, L =
+# R·tan(θ/2) from the corner, and cuts R²(tan(θ/2) − θ/2) off each side.
+
+_CORNER_WALL = [[10.0, 100.0], [24.0, 40.0]]
+_THETA = math.atan2(60.0, 14.0)
+
+
+def _corner_spec(r: float | None = 10.0, **overrides) -> GateProfileSpec:
+    extra = {} if r is None else {"outer_wall_corner_radius": r}
+    return _minimal_spec(outer_wall_line=_CORNER_WALL, **extra, **overrides)
+
+
+def test_corner_radius_cuts_the_closed_form_sliver_inside_the_tangent_points() -> None:
+    dx = 0.2
+    g0 = build_profile_gate_geometry(_corner_spec(None), _plate(), cell_size_mm=dx)
+    g1 = build_profile_gate_geometry(_corner_spec(10.0), _plate(), cell_size_mm=dx)
+    removed = g0.mask & ~g1.mask
+    assert not (g1.mask & ~g0.mask).any()
+    kept = g1.mask
+    assert np.array_equal(g0.thickness_mm[kept], g1.thickness_mm[kept])
+    per_side = 100.0 * (math.tan(_THETA / 2.0) - _THETA / 2.0)
+    assert removed.sum() * dx * dx == pytest.approx(2.0 * per_side, rel=0.05)
+    # every removed cell is outside the circle and between the tangent points
+    t, wa = _tw(g1)
+    tan_len = 10.0 * math.tan(_THETA / 2.0)
+    ct, cw = 10.0 - tan_len, 100.0 - 10.0
+    assert np.all(np.hypot(t[removed] - ct, wa[removed] - cw) > 10.0)
+    t2 = 10.0 + tan_len * 14.0 / math.hypot(14.0, 60.0)
+    assert t[removed].min() >= ct - 1e-9 and t[removed].max() <= t2 + 1e-9
+    nx = removed.shape[1]
+    assert removed[:, : nx // 2].sum() == removed[:, (nx + 1) // 2 :].sum() > 0
+
+
+def test_corner_radius_json_roundtrip_and_validation() -> None:
+    spec = _corner_spec(10.0)
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec and again.outer_wall_corner_radius == 10.0
+    assert "outer_wall_corner_radius" not in _corner_spec(None).to_dict()
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="positive"):
+            _corner_spec(bad)
+    # tangent length 13.3·tan(θ/2) = 10.5 > t1 = 10: the round would start before the exit
+    with pytest.raises(ValueError, match="too large"):
+        _corner_spec(13.3)
+    with pytest.raises(ValueError, match="must start at the exit"):
+        _minimal_spec(outer_wall_line=[[10.0, 90.0], [24.0, 40.0]], outer_wall_corner_radius=5.0)
+    with pytest.raises(ValueError, match="turns inward"):
+        _minimal_spec(outer_wall_line=[[0.0, 100.0], [24.0, 100.0]], outer_wall_corner_radius=5.0)
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict({**fans, "outer_wall_corner_radius": 5.0})
+
+
+def test_corner_radius_that_cuts_no_cell_is_rejected() -> None:
+    with pytest.raises(ValueError, match="cuts no cell"):
+        build_profile_gate_geometry(_corner_spec(0.3), _plate(), cell_size_mm=1.0)
+    build_profile_gate_geometry(_corner_spec(0.3), _plate(), cell_size_mm=0.05 * 2)

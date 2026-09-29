@@ -1315,8 +1315,11 @@ def _ramp_ends_from_inputs(v: dict) -> RampEndsSpec | None:
     w_from = float(v["re_center_w"]) / 2.0 if v["symmetric"] else float(v["re_center_w"])
     # At the cap depth the grading of the depth is a no-op: record None so
     # the spec stays the 09/28 form (bit-identical to Film gate 12).
+    # Compare against the slider's own floor (the cap rounded to its 0.01
+    # step): a cap off that grid would otherwise record a 0.00x mm grading
+    # with the slider at its minimum (@claude review on PR #97).
     d_end = float(v.get("re_depth_end", v["ramp_cap"]))
-    depth_end = d_end if d_end > float(v["ramp_cap"]) + 1e-9 else None
+    depth_end = d_end if d_end > round(float(v["ramp_cap"]), 2) + 1e-9 else None
     return RampEndsSpec(w_from=w_from, t_end=float(v["re_t_end"]), depth_end=depth_end)
 
 

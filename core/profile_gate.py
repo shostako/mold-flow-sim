@@ -347,7 +347,9 @@ class RampEndsSpec:
     2026/09/30 CAD model (Runner-block_3D_kai01.igs) carries the ramp from
     (1, 60, 0.35)–(12, 60, 2.5) to (1, 149, 0.35)–(2.5, 149, 3.5) and a floor
     ruled from 2.5 at w=60 to 3.5 at w=149. ``None`` = the cap depth
-    everywhere (the 09/28 model).
+    everywhere (the 09/28 model). Like ``t_end`` it takes either direction:
+    ``depth_end < cap_depth`` makes the ends shallower (the UI only offers
+    deeper); it only has to stay deeper than the land.
     """
 
     w_from: float
@@ -1144,11 +1146,15 @@ class GateProfileSpec:
                     "outer_wall_corner_radius needs a wall that turns inward (w decreasing)"
                 )
             tan_len, seg = _corner_tangent_length(self.outer_wall_line, r)
-            if tan_len > wt1 + _EPS or tan_len > seg + _EPS:
+            # The round starts on the exit-width stretch at t1 − L; before the
+            # land's end it would trim the land itself, which runs the full
+            # exit (@claude review on PR #97).
+            if wt1 - tan_len < self.land.length - _EPS or tan_len > seg + _EPS:
                 raise ValueError(
                     f"outer_wall_corner_radius ({r:g}) is too large: its tangent length "
-                    f"{tan_len:.3f} must fit before the wall start (t1 = {wt1:g}) and on the "
-                    f"wall line (length {seg:.3f})"
+                    f"{tan_len:.3f} must fit between the land end (t = {self.land.length:g}) "
+                    f"and the wall start (t1 = {wt1:g}), and on the wall line "
+                    f"(length {seg:.3f})"
                 )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"

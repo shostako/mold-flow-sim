@@ -1622,6 +1622,13 @@ def test_ramp_ends_depth_end_json_roundtrip_and_validation() -> None:
     for bad in (0.4, 0.2, -1.0):
         with pytest.raises(ValueError, match="depth_end"):
             _minimal_spec(ramp_ends={**_RE, "depth_end": bad})
+    # shallower than the cap is accepted, like a t_end beyond the cap line
+    g = build_profile_gate_geometry(
+        _minimal_spec(ramp_ends={**_RE, "depth_end": 1.4}), _plate(), cell_size_mm=0.5
+    )
+    t, wa = _tw(g)
+    back = g.mask & (t > 20.0) & (wa > 99.0)
+    assert g.thickness_mm[back].max() < 2.4
     with pytest.raises(ValueError, match="must be a number"):
         _minimal_spec(ramp_ends={**_RE, "depth_end": "3"})
 
@@ -1741,6 +1748,10 @@ def test_corner_radius_json_roundtrip_and_validation() -> None:
     # tangent length 13.3·tan(θ/2) = 10.5 > t1 = 10: the round would start before the exit
     with pytest.raises(ValueError, match="too large"):
         _corner_spec(13.3)
+    # 10.5·tan(θ/2) = 8.32 leaves t1 − L = 1.68 < land 2.0: it would trim the land
+    with pytest.raises(ValueError, match="too large"):
+        _corner_spec(10.5)
+    assert _corner_spec(10.0).outer_wall_corner_radius == 10.0  # t1 − L = 2.07, clear of it
     with pytest.raises(ValueError, match="must start at the exit"):
         _minimal_spec(outer_wall_line=[[10.0, 90.0], [24.0, 40.0]], outer_wall_corner_radius=5.0)
     with pytest.raises(ValueError, match="turns inward"):

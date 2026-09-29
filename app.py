@@ -2911,7 +2911,10 @@ with st.sidebar:
         inj_mode = st.radio(
             "射出率の指定",
             options=("machine", "direct"),
-            index=0,
+            # 既定は直接入力（589 cm³/s）。v0.42.0〜v0.49.0 は実機条件だった。
+            # 2026-09-30 ユーザー指定で戻した。実機条件の既定値（DEF_*）は
+            # そのまま残してあるので、ラジオを切り替えれば従来の画面になる。
+            index=1,
             key="inj_mode",
             format_func=lambda m: {
                 "machine": "実機条件から計算（スクリュー径・位置・速度）",
@@ -2926,7 +2929,7 @@ with st.sidebar:
         wall_model = st.radio(
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
-            index=1,
+            index=2,
             key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
@@ -2939,15 +2942,16 @@ with st.sidebar:
                 "コア層 h_core=h-2s だけが流れる（露光時計、役務平均）。封止と未充填も検出。\n"
                 "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
                 "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
-                "既定はスキン層。温度まで効かせるなら層別。どちらも二相ショートショットの"
-                "射出相に乗る。"
+                "既定は層別（N=7）。温度まで効くのは層別だけ。スキン層・層別とも二相"
+                "ショートショットの射出相に乗る。"
             ),
         )
 
         # default container (so downstream `solver = HeleShawSolver(...)` /
         # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-        # 既定モードは『スキン層』(index=1)。v0.37.0 でスキン層が二相ショートショットの
-        # 射出相に乗るようになったので、既定 ON の二相と両立する。『なし』は η が定数で
+        # 既定モードは『層別』(index=2、v0.50.0、2026-09-30 ユーザー指定)。v0.39.0〜
+        # v0.49.0 は『スキン層』(index=1)だった。層別は v0.48.0 から二相ショートショットの
+        # 射出相に乗るので、既定 ON の二相と両立する。『なし』は η が定数で
         # S ∝ h³ になり、材料も温度も充填順序に効かない（形状と Q だけで決まる）。
         # スキン層で効くのは材料の熱拡散率 α（s = c·√(αt)）で、T_melt / T_mold は
         # 依然として効かない — 温度まで効かせるには層別（v0.48.0 から二相の射出相にも乗る）。

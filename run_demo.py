@@ -86,11 +86,6 @@ def _solve_and_export(
         raise ValueError(
             "skin_layer and multilayer are mutually exclusive — choose one wall-cooling model"
         )
-    if two_phase_shot_volume_cm3 is not None and multilayer:
-        raise ValueError(
-            "two_phase_shot_volume_cm3 needs the HeleShawSolver (isothermal or "
-            "skin-layer) — the multilayer solver has no injection-phase clock for it"
-        )
     db = MaterialDB()
     if multilayer:
         solver = MultilayerHeleShawSolver(

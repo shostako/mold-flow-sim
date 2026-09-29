@@ -73,6 +73,7 @@ def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
         "enabled": True,
         "shot_volume_cm3": 4.5,
         "skin_layer": False,
+        "wall_model": "none",
     }
     with zipfile.ZipFile(io.BytesIO(at.session_state["mfs_zip_bytes"])) as zf:
         names = set(zf.namelist())
@@ -111,24 +112,31 @@ def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
     assert "二相ショートショット解析をスキップしました" in _texts(at)
 
 
-def test_the_multilayer_model_skips_two_phase_with_a_warning():
+def test_the_multilayer_model_rides_the_injection_phase():
+    """v0.48.0: the layered model no longer skips the two-phase run -- its
+    fixed point is re-solved on the metered V/Q clock for the injection
+    phase, and the wall model is recorded with the shot."""
     at = _app()
     at.radio(key="wall_model").set_value("multilayer")
+    at.checkbox(key="icm_on").set_value(True)
     at.checkbox(key="two_phase_on").set_value(True).run()
-    # The interference must be visible in the sidebar BEFORE any run — the
-    # run-time warning alone washes away on the next rerun and the toggle
-    # looks like it silently does nothing (the exact complaint that
-    # motivated this: the default wall model once was 層別, so out of the
-    # box the checkbox appeared dead).
-    assert "現在の設定（層別）では二相解析はスキップされる" in _texts(at)
+    assert "二相解析はスキップされる" not in _texts(at)
+    at.number_input(key="two_phase_shot_volume").set_value(4.5)
     at.button[0].click().run()
     assert not at.exception
-    assert at.session_state["mfs_two_phase_result"] is None
-    assert at.session_state["mfs_two_phase_path"] is None
-    assert "『なし』または『スキン層』専用" in _texts(at)
-    # the skip reason survives in session_state for the results pane
-    assert "併用不可" in at.session_state["mfs_two_phase_skip"]
-    assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {"enabled": False}
+    res = at.session_state["mfs_two_phase_result"]
+    assert res is not None
+    assert res.metadata["wall_model"] == "multilayer"
+    assert res.metadata["skin_layer_enabled"] is False
+    assert res.metadata["multilayer_iterations"] >= 1
+    assert at.session_state["mfs_two_phase_path"] is not None
+    assert at.session_state["mfs_two_phase_skip"] is None
+    assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {
+        "enabled": True,
+        "shot_volume_cm3": 4.5,
+        "skin_layer": False,
+        "wall_model": "multilayer",
+    }
 
 
 def test_the_skin_layer_rides_the_injection_phase():
@@ -155,6 +163,7 @@ def test_the_skin_layer_rides_the_injection_phase():
         "enabled": True,
         "shot_volume_cm3": 4.5,
         "skin_layer": True,
+        "wall_model": "skin",
     }
     assert settings["wall_cooling"]["model"] == "skin"
     assert settings["wall_cooling"]["skin_clock_mode"] == "constant_rate"

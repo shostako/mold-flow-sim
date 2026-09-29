@@ -7,6 +7,7 @@ import pytest
 
 from core.geometry import FilmGateConfig, Geometry, build_film_gate_geometry
 from core.materials import MaterialDB
+from core.multilayer_solver import MultilayerHeleShawSolver
 from core.solver import HeleShawSolver
 from core.two_phase import solve_two_phase_short_shot
 from core.visualizer import render_two_phase_map
@@ -405,6 +406,126 @@ def test_the_skin_is_read_at_the_end_of_the_metered_injection():
     # a shorter injection grows less skin at the same rate
     shorter = solve_two_phase_short_shot(_skin_solver(geom, c=c, Q=Q), 0.5 * V_shot)
     assert shorter.metadata["injection_skin_max_mm"] < res.metadata["injection_skin_max_mm"]
+
+
+# ---------------------------------------------------------------------------
+# layered model on the injection phase (v0.48.0)
+# ---------------------------------------------------------------------------
+
+
+def _ml_solver(
+    geom: Geometry,
+    *,
+    Q: float,
+    stroke: float | None = 0.5,
+    num_layers: int = 5,
+    thermal_coupling: bool = True,
+    compression_fraction: float = 0.6,
+) -> MultilayerHeleShawSolver:
+    return MultilayerHeleShawSolver(
+        geometry=geom,
+        material=PP,
+        melt_temperature_K=T_MELT,
+        mold_temperature_K=T_MOLD,
+        injection_volume_flow_cm3s=Q,
+        compression_molding=stroke is not None,
+        compression_factor=1.0,
+        compression_stroke_mm=stroke,
+        compression_fraction=compression_fraction,
+        num_layers=num_layers,
+        layer_distribution="wall_refined",
+        thermal_coupling=thermal_coupling,
+        max_iterations=12,
+    )
+
+
+def test_one_uncoupled_layer_is_the_isothermal_model():
+    """N=1 without thermal coupling is the classical Hele-Shaw conductance,
+    so the layered injection phase must reproduce the isothermal two-phase
+    run -- both the pool and the compression advance."""
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    iso = solve_two_phase_short_shot(_solver(geom), 0.5 * V_open)
+    ml = solve_two_phase_short_shot(
+        _ml_solver(geom, Q=10.0, num_layers=1, thermal_coupling=False), 0.5 * V_open
+    )
+    assert np.array_equal(iso.injection_mask, ml.injection_mask)
+    assert np.array_equal(iso.final_mask, ml.final_mask)
+    np.testing.assert_allclose(ml.tau1, iso.tau1, rtol=1e-12, equal_nan=True)
+    # The layer moment (h^3/2 * 1/6) and h^3/12 differ in the last bits, which
+    # can swap the order of mirror-image cells whose tau ties to 1e-15; each
+    # swap moves an arrival by exactly one cell's open-gap volume over Q.
+    one_cell_s = float(np.nanmax(geom.thickness_mm[geom.mask] + 0.5)) / 1000.0 / 10.0
+    np.testing.assert_allclose(
+        ml.injection_fill_time_s,
+        iso.injection_fill_time_s,
+        rtol=0,
+        atol=one_cell_s * (1 + 1e-9),
+        equal_nan=True,
+    )
+    assert ml.metadata["wall_model"] == "multilayer"
+    assert iso.metadata["wall_model"] == "none"
+    assert ml.metadata["skin_layer_enabled"] is False
+    assert ml.injection_skin_thickness_mm is None
+
+
+def test_the_layered_injection_runs_on_the_metered_clock():
+    """A metered shot is rate-controlled: the pool's arrival times run on
+    V/Q up to T_inj, and the main solve's ICM time scaling
+    (``compression_fraction``) -- which does move the ordinary layered
+    solve -- has no say in it."""
+    geom = _film_gate()
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    V_shot = 0.5 * V_open
+    Q = 10.0
+    a = _ml_solver(geom, Q=Q, compression_fraction=0.6)
+    b = _ml_solver(geom, Q=Q, compression_fraction=0.2)
+    ra, rb = a.solve(), b.solve()
+    assert not np.allclose(ra.tau, rb.tau, equal_nan=True)  # the knob is live there
+    ta = solve_two_phase_short_shot(a, V_shot)
+    tb = solve_two_phase_short_shot(b, V_shot)
+    np.testing.assert_array_equal(ta.tau1, tb.tau1)
+    assert np.array_equal(ta.injection_mask, tb.injection_mask)
+    assert ta.injection_time_s == pytest.approx(V_shot / Q)
+    t_pool = ta.injection_fill_time_s[ta.injection_mask]
+    assert np.isfinite(t_pool).all()
+    assert t_pool.max() <= ta.injection_time_s * (1 + 1e-9)
+    assert ta.metadata["multilayer_converged"] is True
+
+
+def test_the_layers_put_the_thick_runner_ahead_of_the_opened_thin_plate():
+    """The same reversal the skin model produces, now from the layer
+    temperatures: on a slow metered injection the opened 0.85 mm plate cools
+    through its thickness (sqrt(alpha * 2 s) ~ 0.45 mm, its half gap) and
+    its viscosity climbs, so the thick runner fills ahead of it. A fast
+    injection keeps the isothermal order -- the clock is what flips it."""
+    geom = _thick_branch_thin_plate()
+    runner_tip = (0, geom.nx - 1)
+    plate_end = (geom.ny - 1, 0)
+    V_shot = 0.125
+    iso = solve_two_phase_short_shot(_solver(geom, Q=V_shot / 2.0), V_shot)
+    slow = solve_two_phase_short_shot(_ml_solver(geom, Q=V_shot / 2.0, num_layers=7), V_shot)
+    fast = solve_two_phase_short_shot(_ml_solver(geom, Q=V_shot / 0.2, num_layers=7), V_shot)
+    assert iso.tau1[plate_end] < iso.tau1[runner_tip]
+    assert fast.tau1[plate_end] < fast.tau1[runner_tip]
+    assert slow.tau1[runner_tip] < slow.tau1[plate_end]
+    assert not iso.injection_mask[runner_tip]
+    assert not fast.injection_mask[runner_tip]
+    assert slow.injection_mask[runner_tip]
+
+
+def test_the_layered_shot_keeps_the_volume_contract():
+    geom = _film_gate()
+    solver = _ml_solver(geom, Q=10.0)
+    V_open = geom.volume_cm3() + 0.5 * geom.compression_area_mm2() / 1000.0
+    part = solve_two_phase_short_shot(solver, 0.5 * V_open)
+    assert (part.injection_mask <= part.final_mask).all()
+    assert part.metadata["achieved_volume_final_cm3"] <= 0.5 * V_open * (1 + 1e-12)
+    assert not part.metadata["final_complete"]
+    full = solve_two_phase_short_shot(solver, geom.volume_cm3())
+    assert full.metadata["final_complete"]
+    assert full.final_mask[geom.mask].all()
+    assert full.metadata["injection_center_solid_cells"] >= 0
 
 
 def _choked_strip() -> Geometry:

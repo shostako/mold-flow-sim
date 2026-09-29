@@ -108,6 +108,16 @@ class LandSpec:
 
     depth: float  # channel thickness [mm]
     length: float  # extent in t [mm]
+    # Part of the land left as steel at the PL (ランド中央の閉鎖): within the
+    # land (``t ≤ length``) every cell with ``w < closed_line(t)`` is not
+    # cavity, so no resin reaches the product through that stretch of the
+    # exit. The line is read as w over t (clamped before its first point,
+    # extrapolated after its second, like every boundary line here). With
+    # ``symmetric`` that is the centre ``|x − x_valve| < w``; one-sided it is
+    # the stretch next to the valve-side edge. The 2026/09/30 CAD model closes
+    # the centre with (0, 50) → (1, 47.644): a chamfer from the exit to where
+    # the 肉盗み starts. ``None`` = the land runs across the whole exit.
+    closed_line: Line | None = None
 
 
 @dataclass(frozen=True)
@@ -324,10 +334,25 @@ class RampEndsSpec:
     The graded ramp replaces the main ramp (not a floor), so a ``t_end``
     beyond ``ramp_cap_t()`` would make the ends shallower; the island band,
     edge channels, ramp cut and land ends apply on top as usual.
+
+    ``depth_end`` grades the cap depth too: ``D(w)`` runs straight from
+    ``cap_depth`` at ``w_from`` to ``depth_end`` at ``w_edge``, the ramp
+    rises to ``D(w)`` at ``t_cap(w)`` and the floor behind the cap line is
+    ``D(w)`` all the way to the outer wall —
+
+        D(w) = cap_depth + (depth_end − cap_depth)·(w − w_from)/(w_edge − w_from)
+        d    = land.depth + (D(w) − land.depth)·(t − land.length)/(t_cap(w) − land.length)
+
+    capped at ``D(w)``. It is still one bilinear patch per face: the
+    2026/09/30 CAD model (Runner-block_3D_kai01.igs) carries the ramp from
+    (1, 60, 0.35)–(12, 60, 2.5) to (1, 149, 0.35)–(2.5, 149, 3.5) and a floor
+    ruled from 2.5 at w=60 to 3.5 at w=149. ``None`` = the cap depth
+    everywhere (the 09/28 model).
     """
 
     w_from: float
     t_end: float
+    depth_end: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +528,13 @@ class GateProfileSpec:
     land_ends: LandEndsSpec | None = None
     # Single-pocket form only: the ramp angle graded towards the ends (w ≥ w_from).
     ramp_ends: RampEndsSpec | None = None
+    # Single-pocket form only: radius of the round at the outer wall's first
+    # point, where the exit-width stretch (w = the exit's half-width / width
+    # for t < t1) turns into the wall line. The arc is tangent to both and
+    # cuts the corner off the pocket; ``None`` = a sharp corner. The
+    # 2026/09/30 CAD model rounds it with R10 (tangent at t = 6.2466 on the
+    # end wall and at t = 16.23 on the 3° line).
+    outer_wall_corner_radius: float | None = None
 
     # ---- JSON I/O ----
 
@@ -529,6 +561,7 @@ class GateProfileSpec:
                 "ramp_cut",
                 "land_ends",
                 "ramp_ends",
+                "outer_wall_corner_radius",
             },
             "",
         )
@@ -543,9 +576,15 @@ class GateProfileSpec:
         gate_exit_width = _num(d, "gate_exit_width", "")
 
         land_d = _section(d, "land", required=True)
-        _check_unknown(land_d, {"depth", "length"}, "land")
+        _check_unknown(land_d, {"depth", "length", "closed_line"}, "land")
         land = LandSpec(
-            depth=_num(land_d, "depth", "land."), length=_num(land_d, "length", "land.")
+            depth=_num(land_d, "depth", "land."),
+            length=_num(land_d, "length", "land."),
+            closed_line=(
+                _line(land_d, "closed_line", "land.")
+                if land_d.get("closed_line") is not None
+                else None
+            ),
         )
 
         ramp_d = _section(d, "main_ramp", required=True)
@@ -698,10 +737,15 @@ class GateProfileSpec:
         ramp_ends: RampEndsSpec | None = None
         re_d = _section(d, "ramp_ends", required=False)
         if re_d is not None:
-            _check_unknown(re_d, {"w_from", "t_end"}, "ramp_ends")
+            _check_unknown(re_d, {"w_from", "t_end", "depth_end"}, "ramp_ends")
             ramp_ends = RampEndsSpec(
                 w_from=_num(re_d, "w_from", "ramp_ends."),
                 t_end=_num(re_d, "t_end", "ramp_ends."),
+                depth_end=(
+                    _num(re_d, "depth_end", "ramp_ends.")
+                    if re_d.get("depth_end") is not None
+                    else None
+                ),
             )
 
         valve_d = _section(d, "valve", required=True)
@@ -729,6 +773,11 @@ class GateProfileSpec:
             ramp_cut=ramp_cut,
             land_ends=land_ends,
             ramp_ends=ramp_ends,
+            outer_wall_corner_radius=(
+                _num(d, "outer_wall_corner_radius", "")
+                if d.get("outer_wall_corner_radius") is not None
+                else None
+            ),
         )
         spec.validate()
         return spec
@@ -758,8 +807,12 @@ class GateProfileSpec:
                 "orifice_diameter": self.valve.orifice_diameter,
             },
         }
+        if self.land.closed_line is not None:
+            d["land"]["closed_line"] = [list(p) for p in self.land.closed_line]
         if self.outer_wall_line is not None:
             d["outer_wall_line"] = [list(p) for p in self.outer_wall_line]
+        if self.outer_wall_corner_radius is not None:
+            d["outer_wall_corner_radius"] = self.outer_wall_corner_radius
         if self.sub_gates:
             d["sub_gates"] = []
             for sg in self.sub_gates:
@@ -804,6 +857,8 @@ class GateProfileSpec:
                 "w_from": self.ramp_ends.w_from,
                 "t_end": self.ramp_ends.t_end,
             }
+            if self.ramp_ends.depth_end is not None:
+                d["ramp_ends"]["depth_end"] = self.ramp_ends.depth_end
         if self.island is not None:
             d["island"] = {
                 "angle_deg": self.island.angle_deg,
@@ -1041,6 +1096,59 @@ class GateProfileSpec:
                 raise ValueError(
                     f"ramp_ends.t_end ({re_.t_end}) must be beyond the land "
                     f"(land.length {self.land.length}) — the ramp needs a run to reach the cap"
+                )
+            if re_.depth_end is not None and re_.depth_end <= self.land.depth + _EPS:
+                raise ValueError(
+                    f"ramp_ends.depth_end ({re_.depth_end}) must be deeper than land.depth "
+                    f"({self.land.depth}) — the ramp has to rise from the land to it"
+                )
+        if self.land.closed_line is not None:
+            if self.outer_wall_line is None:
+                raise ValueError("land.closed_line needs the single-pocket form (outer_wall_line)")
+            (ct1, cw1), (ct2, cw2) = self.land.closed_line
+            if ct2 <= ct1 + _EPS:
+                raise ValueError(f"land.closed_line t must be increasing, got {ct1} → {ct2}")
+            if ct1 < -_EPS:
+                raise ValueError(f"land.closed_line t must be ≥ 0, got {ct1}")
+            if cw1 <= 0 or cw2 <= 0:
+                raise ValueError(f"land.closed_line w must be positive, got {cw1}, {cw2}")
+            half = self.gate_exit_width / 2.0 if self.symmetric else self.gate_exit_width
+            # The line is straight between its points and clamped before the
+            # first, so over the land its extremes sit at t = 0, t1 or the land end.
+            probes = [t_ for t_ in (0.0, ct1, self.land.length) if t_ <= self.land.length]
+            reach = max(_line_w(self.land.closed_line, t_) if t_ >= ct1 else cw1 for t_ in probes)
+            if reach >= half - _EPS:
+                raise ValueError(
+                    f"land.closed_line reaches w = {reach:g} within the land — it must stay "
+                    f"inside the gate exit's {'half-width' if self.symmetric else 'width'} "
+                    f"({half:g}) or it closes the whole exit"
+                )
+        if self.outer_wall_corner_radius is not None:
+            r = self.outer_wall_corner_radius
+            if self.outer_wall_line is None:
+                raise ValueError(
+                    "outer_wall_corner_radius needs the single-pocket form (outer_wall_line)"
+                )
+            if r <= 0:
+                raise ValueError(f"outer_wall_corner_radius must be positive, got {r}")
+            half = self.gate_exit_width / 2.0 if self.symmetric else self.gate_exit_width
+            (wt1, ww1), (wt2, ww2) = self.outer_wall_line
+            if abs(ww1 - half) > 1e-3:
+                raise ValueError(
+                    f"outer_wall_corner_radius rounds the corner where the exit width meets "
+                    f"the wall: outer_wall_line must start at the exit's "
+                    f"{'half-width' if self.symmetric else 'width'} ({half:g}), got w = {ww1:g}"
+                )
+            if ww2 >= ww1 - _EPS:
+                raise ValueError(
+                    "outer_wall_corner_radius needs a wall that turns inward (w decreasing)"
+                )
+            tan_len, seg = _corner_tangent_length(self.outer_wall_line, r)
+            if tan_len > wt1 + _EPS or tan_len > seg + _EPS:
+                raise ValueError(
+                    f"outer_wall_corner_radius ({r:g}) is too large: its tangent length "
+                    f"{tan_len:.3f} must fit before the wall start (t1 = {wt1:g}) and on the "
+                    f"wall line (length {seg:.3f})"
                 )
         for i, sg in enumerate(self.sub_gates):
             p = f"sub_gates[{i}]"
@@ -1329,6 +1437,36 @@ def _validate_edge_channels(
                 )
 
 
+def _corner_tangent_length(line: Line, radius: float) -> tuple[float, float]:
+    """Tangent length ``R·tan(θ/2)`` of a round at the wall's first point, and
+    the wall segment's length. ``θ`` is the turn from the exit-width stretch
+    (direction +t) onto the wall line."""
+    (t1, w1), (t2, w2) = line
+    seg = math.hypot(t2 - t1, w2 - w1)
+    theta = math.acos(max(-1.0, min(1.0, (t2 - t1) / max(seg, 1e-12))))
+    return radius * math.tan(theta / 2.0), seg
+
+
+def _corner_round_cut(line: Line, radius: float, t: np.ndarray, wa: np.ndarray) -> np.ndarray:
+    """Cells the round at the wall's first point cuts off the pocket.
+
+    The arc is tangent to the exit-width stretch ``w = w1`` at
+    ``T1 = (t1 − L, w1)`` and to the wall line at ``T2 = V + L·u``; its centre
+    is ``R`` inside ``T1``. Inside the wedge ``T1–C–T2`` the pocket keeps what
+    is within ``R`` of the centre; the rest of the wedge is the corner.
+    """
+    (t1, w1), (t2, w2) = line
+    tan_len, seg = _corner_tangent_length(line, radius)
+    ut, uw = (t2 - t1) / seg, (w2 - w1) / seg
+    ct, cw = t1 - tan_len, w1 - radius
+    at, aw = 0.0, radius  # T1 − C
+    bt, bw = t1 + tan_len * ut - ct, w1 + tan_len * uw - cw  # T2 − C
+    qt, qw = t - ct, wa - cw
+    ab = at * bw - aw * bt
+    in_wedge = ((at * qw - aw * qt) * ab >= 0.0) & ((qt * bw - qw * bt) * ab >= 0.0)
+    return in_wedge & (np.hypot(qt, qw) > radius)
+
+
 def _line_w(line: Line, t: float) -> float:
     """Scalar evaluation of a (t, w) line at ``t`` (extrapolated, no clamp)."""
     (t1, w1), (t2, w2) = line
@@ -1534,8 +1672,11 @@ def _grade_ramp_ends(
     t_c0 = spec.ramp_cap_t()
     frac = (np.minimum(wa, w_edge) - re_.w_from) / max(w_edge - re_.w_from, 1e-12)
     t_cap = t_c0 + (re_.t_end - t_c0) * frac
+    # The cap depth grades with the cap line when depth_end is given; the
+    # floor behind the line is that depth too (the zone runs to the wall).
+    d_cap = cap if re_.depth_end is None else cap + (re_.depth_end - cap) * frac
     run = np.maximum(t_cap - land_len, 1e-12)
-    d_graded = np.minimum(land_depth + (cap - land_depth) * (t - land_len) / run, cap)
+    d_graded = np.minimum(land_depth + (d_cap - land_depth) * (t - land_len) / run, d_cap)
     zone = (wa >= re_.w_from - 1e-9) & (t > land_len)
     return np.where(zone, d_graded, d)
 
@@ -1688,6 +1829,31 @@ def build_profile_gate_geometry(
         # cells the well still reaches stay cavity via ``in_well`` below.
         if spec.island is not None and spec.island.weld is not None and spec.island.weld.depth <= 0:
             in_gate_base &= ~in_weld
+        # Both cuts below only take cells away. A cut that takes none is a
+        # spec the geometry does not show — the same silent no-op the edge
+        # channels and the ramp cut reject, so it is rejected here too.
+        if spec.outer_wall_corner_radius is not None:
+            cut = in_gate_base & _corner_round_cut(
+                spec.outer_wall_line, spec.outer_wall_corner_radius, t, wa
+            )
+            if not cut.any():
+                raise ValueError(
+                    f"outer_wall_corner_radius ({spec.outer_wall_corner_radius:g}) cuts no cell "
+                    f"at cell_size_mm={dx}: no cell centre lies in the rounded-off corner. "
+                    "Enlarge the radius, refine the mesh, or drop it."
+                )
+            in_gate_base &= ~cut
+        if spec.land.closed_line is not None:
+            w_closed = _line_eval(
+                spec.land.closed_line, t, before_value=spec.land.closed_line[0][1]
+            )
+            closed = in_gate_base & (t <= land_len) & (wa < w_closed)
+            if not closed.any():
+                raise ValueError(
+                    f"land.closed_line closes no cell at cell_size_mm={dx}: no land cell centre "
+                    "lies inside it. Widen it or refine the mesh."
+                )
+            in_gate_base &= ~closed
         d_base = _apply_edge_channels(
             spec.edge_channels,
             walls={"outer": (spec.outer_wall_line, full_half_width)},

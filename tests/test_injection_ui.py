@@ -1,10 +1,16 @@
 """AppTest wiring for the screw-side injection block in ``app.py``.
 
-The block replaces one number (a flat injection rate) with a machine
-condition, so the checks are: the default really is the machine condition and
-really reaches the solver, the direct-rate path still exists and still wins
-when chosen, the stage widgets appear only when asked for, and an impossible
-condition stops the run with a message instead of an exception.
+The block offers a machine condition next to the flat injection rate, so the
+checks are: the machine condition's defaults are the documented numbers and
+really reach the solver, the direct-rate path still wins when chosen, the
+stage widgets appear only when asked for, and an impossible condition stops
+the run with a message instead of an exception.
+
+Since v0.50.0 the page opens on the direct rate (589 cm³/s) and the layered
+wall model (user's call, 2026-09-30). ``_app()`` therefore switches to the
+machine condition and the skin wall model -- the setting every test below was
+written against (the skin clock radio only exists under the skin model);
+``_page_as_opened()`` is the untouched page.
 
 **The expected defaults live in one block below.** This file is shared with
 the sibling repos (mold-flow-fangate / -fangate2), which run the same machine
@@ -48,8 +54,17 @@ def _expected_switch(i: int) -> float:
     return DEF_SWITCHES[i] if i < len(DEF_SWITCHES) else _even_switch(i, DEF_STAGES)
 
 
-def _app(timeout: float = 240.0) -> AppTest:
+def _page_as_opened(timeout: float = 240.0) -> AppTest:
     at = AppTest.from_file(str(APP), default_timeout=timeout)
+    at.run()
+    return at
+
+
+def _app(timeout: float = 240.0) -> AppTest:
+    """The page on the machine condition with the skin wall model."""
+    at = _page_as_opened(timeout)
+    at.radio(key="inj_mode").set_value("machine")
+    at.radio(key="wall_model").set_value("skin")
     at.run()
     return at
 
@@ -73,7 +88,15 @@ def _errors(at: AppTest) -> str:
     return "\n".join(str(e.value) for e in at.error)
 
 
-def test_default_is_the_machine_condition_with_the_documented_numbers():
+def test_the_page_opens_on_the_direct_rate_589():
+    """v0.50.0: the direct rate is the opening input again (user's call)."""
+    at = _page_as_opened()
+    assert at.radio(key="inj_mode").value == "direct"
+    assert at.slider(key="inj_Q_direct").value == 589.0
+    assert not [n for n in at.number_input if n.key == "inj_screw_d"]
+
+
+def test_the_machine_condition_opens_with_the_documented_numbers():
     at = _app()
     assert at.radio(key="inj_mode").value == "machine"
     assert at.number_input(key="inj_screw_d").value == DEF_SCREW_D
@@ -307,11 +330,11 @@ def test_the_extrapolation_warning_reads_the_solver_flag():
 
 
 def test_the_default_clock_is_velocity_control():
-    """v0.42.2: the screw profile is the default input, so the clock follows.
+    """v0.42.2: the skin clock defaults to velocity control.
 
-    Leaving the clock on "constant pressure" while the default injection
-    input is a set of positions and speeds means the screen takes the
-    machine's own injection time and hands back a different one.
+    Leaving the clock on "constant pressure" while the injection input is a
+    set of positions and speeds means the screen takes the machine's own
+    injection time and hands back a different one.
     """
     at = _app()
     assert at.radio(key="wall_model").value == "skin"
@@ -336,7 +359,7 @@ def test_the_stretch_notice_is_absent_in_direct_rate_mode():
 
 
 def test_the_two_phase_panel_warns_when_the_shot_runs_past_vp():
-    """Two-phase ON *and* machine conditions ON — the default combination.
+    """Two-phase ON *and* machine conditions ON.
 
     Every other two-phase test here turns the panel off, so this pair had no
     coverage together (@claude on PR #89). Collapsing the stroke puts the

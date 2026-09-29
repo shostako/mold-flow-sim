@@ -24,15 +24,18 @@ def _texts(at: AppTest) -> str:
     return "\n".join(parts)
 
 
-def test_the_defaults_are_two_phase_on_with_icm_and_skin_wall_model():
-    """UI defaults (v0.39.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
-    model 'skin' -- the skin layer rides on the two-phase injection phase
-    since v0.37.0, and 'none' (constant eta, S ~ h^3) lets neither material
-    nor temperature touch the fill order."""
+def test_the_defaults_are_two_phase_on_with_icm_and_the_layered_wall_model():
+    """UI defaults (v0.50.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
+    model 'multilayer' (N=7) -- the layered model rides on the two-phase
+    injection phase since v0.48.0, and it is the only one that lets the melt
+    and mold temperatures touch the fill order. v0.39.0-v0.49.0 opened on
+    'skin'."""
     at = _app()
     assert at.checkbox(key="two_phase_on").value is True
     assert at.checkbox(key="icm_on").value is True
-    assert at.radio(key="wall_model").value == "skin"
+    assert at.radio(key="wall_model").value == "multilayer"
+    layers = [s for s in at.slider if str(s.label) == "層数 N"]
+    assert len(layers) == 1 and layers[0].value == 7
     stroke = [s for s in at.slider if str(s.label).startswith("圧縮ストローク")]
     assert len(stroke) == 1 and stroke[0].value == 0.50
 

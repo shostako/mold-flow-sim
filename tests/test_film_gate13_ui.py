@@ -239,3 +239,18 @@ def test_the_defaults_do_not_leak_into_film_gate_12():
     assert rec["land"].get("closed_line") is None
     assert rec.get("outer_wall_corner_radius") is None
     assert rec["ramp_ends"].get("depth_end") is None
+
+
+def test_with_the_cap_at_the_slider_maximum_the_depth_end_slider_is_not_drawn():
+    """Cap 10.0 leaves no deeper end: a slider with min == max would raise
+    and take the rest of the sidebar with it (Codex P2 on PR #97). The block
+    says so, the run goes on and the spec has no depth_end."""
+    at = _app()
+    at.slider(key="f13_ランプ上限深さ [mm] (≥ ランド深さ)").set_value(10.0).run()
+    assert not at.exception
+    assert not any(s.key == DEPTH_END_KEY for s in at.slider)
+    assert any("端の上限深さは一定" in str(c.value) for c in at.caption)
+    assert at.number_input(key=CORNER_KEY).value == 10.0  # the sidebar below still renders
+    at.button[0].click().run()
+    assert not at.exception
+    assert _recorded_spec(at)["ramp_ends"].get("depth_end") is None

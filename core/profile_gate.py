@@ -2064,6 +2064,23 @@ def build_profile_gate_geometry(
         for iy, ix in zip(valve_iys, valve_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
 
+    if spec.land.closed_line is not None:
+        # A closure narrower than the exit can still leave an opening thinner
+        # than a cell: every land cell centre then falls inside it and the
+        # product is cut off from the gate block. The spec is valid, so only
+        # the raster can tell (Codex P2 on PR #97) -- and it has to be told
+        # here, naming the knob, not by the solver's reachability check later.
+        from scipy import ndimage as ndi
+
+        labels, _n = ndi.label(mask)
+        fed = {int(labels[iy, ix]) for iy, ix in geom.gates}
+        plate_labels = set(np.unique(labels[in_plate & mask]).tolist()) - {0}
+        if not plate_labels <= fed:
+            raise ValueError(
+                f"land.closed_line leaves no open land cell at cell_size_mm={dx}: the "
+                "opening beside the closure is thinner than a cell and the product is cut "
+                "off from the gate. Narrow the closure or refine the mesh."
+            )
     if spec.ramp_ends is not None:
         _reject_ineffective_ramp_ends(spec, plate, cell_size_mm, geom)
     if spec.island is not None and spec.island.weld is not None:

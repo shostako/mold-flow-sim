@@ -470,11 +470,15 @@ class _ProfileGateDefaults:
     ramp_ends: tuple[float, float] | tuple[float, float, float] | None = None
     # ランド中央の閉鎖: width closed at the exit (both sides together when
     # symmetric, from the valve-side edge when one-sided). None = the checkbox
-    # starts off. Film gate 13 is the model that closes it. A pair (exit
-    # width, land-end width) also fixes the width at the land's far end
-    # instead of tying it to the 肉盗み -- Film gate 14 keeps the 13 chamfer
-    # with no 肉盗み to tie it to.
-    land_closed: float | tuple[float, float] | None = None
+    # starts off. Film gate 13 is the model that closes it.
+    land_closed: float | None = None
+    # With a t here the closure's sides are lines through the apex (w=0, t):
+    # the land-end width follows the exit width, w_end = w_exit·(1 − L/t),
+    # and so does the side angle. None = the land-end width is tied to the
+    # 肉盗み instead. Film gate 14 has no 肉盗み but keeps the kai01 chamfer,
+    # whose sides meet at t = 50/(50 − 47.644148) = 21.224 (0.28 short of the
+    # valve) -- the 肉盗み boundary line, extended.
+    land_closed_apex_t: float | None = None
     # The 肉盗み checkbox's starting state (Film gate 14 has none).
     island_on: bool = True
     # R of the outer wall's corner (where the exit width turns into the wall
@@ -701,7 +705,8 @@ _FILM_GATE13_DEFAULTS = dataclasses.replace(
 _FILM_GATE14_DEFAULTS = dataclasses.replace(
     _FILM_GATE13_DEFAULTS,
     island_on=False,
-    land_closed=(100.0, 95.288296),
+    land_closed=100.0,
+    land_closed_apex_t=50.0 / (50.0 - 47.644148),
     wall_corner_radius=0.0,
 )
 
@@ -1358,65 +1363,64 @@ def _land_closed_inputs(
     *,
     symmetric: bool,
     w_full: float,
-    default: float | tuple[float, float] | None,
+    default: float | None,
+    apex_t: float | None = None,
 ) -> None:
     """The ランド中央の閉鎖 block of the single-pocket Film gates (fills ``v``).
 
     Sets ``v["lc_on"]`` and, when on, ``lc_width``: the stretch of the exit
     left as steel at the PL through the land, so no resin enters the product
-    there. Its end at the land's far side is tied to the 肉盗み in the
-    assembly (``_land_closed_from_inputs``), the way the 2026/09/30 CAD model
-    chamfers it -- unless ``lc_end_on`` fixes that width on its own (a pair
-    default starts it on: Film gate 14 keeps the chamfer without a 肉盗み).
+    there. Seen from the PL the closure is a trapezoid (exit side long, land
+    end short). Its land-end width is derived in the assembly
+    (``_land_closed_from_inputs``): with ``apex_t`` the sides run through
+    (w=0, apex_t), so one slider moves both widths and the side angle
+    together; without, the land-end edge goes to the 肉盗み's boundary the way
+    the 2026/09/30 CAD model chamfers it.
     """
-    exit_default, end_default = default if isinstance(default, tuple) else (default, None)
     slider, _ = _tagged_widgets(tag)
     st.markdown("**ランド中央の閉鎖**" if symmetric else "**ランドのバルブ側の閉鎖**")
+    if apex_t is not None:
+        tie = f"斜辺は頂点（w=0、t={apex_t:.3f}）を通る直線で、ランド終端の幅と斜辺の角度は製品側の幅に連動する。"
+    else:
+        tie = "ランド終端（t=ランド長）で肉盗みの出口側の境界（肉盗みの方が狭いとき）へ斜めに寄る。肉盗み OFF なら縁はまっすぐ。"
     v["lc_on"] = st.checkbox(
         "ランドの閉鎖を有効化",
-        value=exit_default is not None,
+        value=default is not None,
         key=f"{tag}_lc_on",
-        help=(
-            "ランドの一部を鋼材で PL まで埋め、そこからは製品に樹脂が入らないようにする。"
-            "閉鎖の縁は出口（t=0）でこの幅、ランド終端（t=ランド長）で肉盗みの出口側の境界"
-            "（肉盗みの方が狭いとき）へ斜めに寄る。肉盗み OFF なら縁はまっすぐ。"
-        ),
+        help="ランドの一部を鋼材で PL まで埋め、そこからは製品に樹脂が入らないようにする。PL から見て台形。"
+        + tie,
     )
+    v["lc_apex_t"] = apex_t
     if not v["lc_on"]:
         return
     w_span = float(w_full * (2.0 if symmetric else 1.0))
     hi = max(w_span - 1.0, 1.0)
     v["lc_width"] = slider(
-        ("閉鎖幅（中央、両側合計）" if symmetric else "閉鎖幅（バルブ側端から）") + " [mm]",
+        ("閉鎖幅（製品側 t=0、両側合計）" if symmetric else "閉鎖幅（製品側 t=0、バルブ側端から）")
+        + " [mm]",
         1.0,
         hi,
-        float(min(exit_default if exit_default is not None else 100.0, hi)),
+        float(min(default if default is not None else 100.0, hi)),
         step=0.5,
-        help="出口（t=0）での閉鎖の幅。上限はゲート出口幅 − 1。",
+        help="出口（製品側、t=0）での閉鎖の幅。上限はゲート出口幅 − 1。" + tie,
     )
-    v["lc_end_on"] = st.checkbox(
-        "ランド終端側の閉鎖幅を指定する",
-        value=end_default is not None,
-        key=f"{tag}_lc_end_on",
-        help=(
-            "OFF: ランド終端（t=ランド長）の縁は肉盗みの出口側の境界に寄る（肉盗み OFF ならまっすぐ）。"
-            "ON: ランド終端での閉鎖幅をここで決める。"
-        ),
-    )
-    if v["lc_end_on"]:
-        v["lc_end_width"] = slider(
-            (
-                "ランド終端での閉鎖幅（両側合計）"
-                if symmetric
-                else "ランド終端での閉鎖幅（バルブ側端から）"
-            )
-            + " [mm]",
-            1.0,
-            hi,
-            float(min(end_default if end_default is not None else v["lc_width"], hi)),
-            step=0.1,
-            help="t=ランド長での閉鎖の幅。出口の幅からここへ直線で寄る。",
+    if apex_t is not None:
+        land_len = float(v["land_length"])
+        w_end = _land_closed_apex_width(float(v["lc_width"]), land_len, apex_t)
+        side = math.degrees(math.atan2(float(v["lc_width"]) / (2.0 if symmetric else 1.0), apex_t))
+        st.caption(
+            f"ランド終端（t={land_len:g}）の閉鎖幅 {w_end:.3f}、斜辺と流れ方向のなす角 {side:.1f}°"
+            f"（頂点 w=0、t={apex_t:.3f}）"
         )
+
+
+def _land_closed_apex_width(w_exit: float, land_len: float, apex_t: float) -> float:
+    """Land-end width of a closure whose sides meet at (w=0, apex_t).
+
+    Rounded to 1e-6 mm: the CAD numbers are given to that, and the product
+    ``50·(1 − 1/21.2237…)`` lands a few ulps off 47.644148 otherwise.
+    """
+    return round(w_exit * (1.0 - land_len / apex_t), 6)
 
 
 def _land_closed_from_inputs(v: dict) -> tuple[tuple[float, float], tuple[float, float]] | None:
@@ -1425,8 +1429,8 @@ def _land_closed_from_inputs(v: dict) -> tuple[tuple[float, float], tuple[float,
     half = 2.0 if v["symmetric"] else 1.0
     w0 = float(v["lc_width"]) / half
     w1 = w0
-    if v.get("lc_end_on"):
-        w1 = float(v["lc_end_width"]) / half
+    if v.get("lc_apex_t") is not None:
+        w1 = _land_closed_apex_width(w0, float(v["land_length"]), float(v["lc_apex_t"]))
     elif v.get("island_on") and float(v["island_w_near"]) < w0:
         w1 = float(v["island_w_near"])
     return ((0.0, w0), (float(v["land_length"]), w1))
@@ -1581,7 +1585,12 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         )
 
         _land_closed_inputs(
-            tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_closed
+            tag,
+            v,
+            symmetric=symmetric,
+            w_full=float(w_full),
+            default=d.land_closed,
+            apex_t=d.land_closed_apex_t,
         )
         _ramp_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.ramp_ends)
         _land_ends_inputs(tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_ends)

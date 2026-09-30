@@ -4,12 +4,16 @@ The 2026/09/30 CAD model ``Runner-block_3D_kai02.igs``
 (``hamoko_gate_furiwake_rampends3_20260930``): Film gate 13's pocket with the
 肉盗み and the corner R10 taken out. The land closure keeps the kai01 chamfer
 (w=50 at the exit → 47.644 at the land end) although the 肉盗み it was aligned
-with is gone, so the closure's land-end width is its own input here
-(``lc_end_on``) instead of being derived from the 肉盗み.
+with is gone. Seen from the PL it is a trapezoid whose sides are the 肉盗み's
+old boundary line: extended they meet on the valve axis at t = 21.224, so
+here the sides run through that apex and one slider (the exit width) moves
+the land-end width and the side angle with it.
 
 What the tests pin: the defaults reproduce the spec (bit-identical geometry),
-against Film gate 13 only the 肉盗み and the corner move, the land-end width
-option is what keeps the chamfer, and none of it leaks into Film gate 13.
+against Film gate 13 only the 肉盗み and the corner move, the exit-width
+slider moves the whole trapezoid about the apex (and so reaches the 1.0 mm
+mesh, which samples the land only at its far end), and none of it leaks into
+Film gate 13.
 """
 
 from __future__ import annotations
@@ -27,9 +31,8 @@ APP = Path(__file__).resolve().parent.parent / "app.py"
 FILM_GATE14_LABEL = "Film gate 14 (扇状/斜面角度徐変3)"
 FILM_GATE13_LABEL = "Film gate 13 (扇状/斜面角度徐変2)"
 
-CLOSED_KEY = "f14_閉鎖幅（中央、両側合計） [mm]"
-END_ON_KEY = "f14_lc_end_on"
-END_KEY = "f14_ランド終端での閉鎖幅（両側合計） [mm]"
+CLOSED_KEY = "f14_閉鎖幅（製品側 t=0、両側合計） [mm]"
+APEX_T = 50.0 / (50.0 - 47.644148)  # 21.224: the chamfer's sides, extended, on the valve axis
 CORNER_KEY = "f14_外壁の角 R [mm] (0 = 角のまま)"
 
 RAMP_DEG = math.degrees(math.atan(2.15 / 11.0))
@@ -181,23 +184,25 @@ def test_against_film_gate_13_only_the_island_and_the_corner_move(film_gate14_ru
     assert np.all(geom.thickness_mm[changed] > fg13.thickness_mm[changed])
 
 
-def test_the_land_end_width_option_is_what_keeps_the_chamfer():
-    """Off: with no 肉盗み the edge runs straight (w=50 at both ends). On with
-    60: the edge runs 50 → 30."""
+def test_the_exit_width_moves_the_trapezoid_about_the_apex():
+    """One slider: the land-end width follows w_end = w_exit·(1 − 1/21.224)
+    and the side angle with it. At the 1.0 mm mesh the land is only the row
+    t=1, so this is what makes the slider reach the mesh at all -- a fixed
+    land-end width left 30 / 50 / 100 identical cell for cell."""
     at = _app()
-    assert at.checkbox(key=END_ON_KEY).value is True
-    assert at.slider(key=END_KEY).value == pytest.approx(95.288296)
-    at.checkbox(key=END_ON_KEY).uncheck().run()
+    assert not any(c.key and "lc_end" in c.key for c in at.checkbox)
+    assert len([s for s in at.slider if s.key and "閉鎖幅" in s.key]) == 1
+    at.slider(key=CLOSED_KEY).set_value(60.0).run()
     rec = _recorded_spec_after_run(at)
-    assert rec["land"]["closed_line"] == [[0.0, 50.0], [1.0, 50.0]]
+    w_end = round(30.0 * (1.0 - 1.0 / APEX_T), 6)
+    assert w_end == pytest.approx(28.586489)
+    assert rec["land"]["closed_line"] == [[0.0, 30.0], [1.0, w_end]]
     geom = at.session_state["mfs_geom"]
     spec = GateProfileSpec.from_dict(rec)
-    assert _cell(geom, spec, 1.0, 48.5) is None and _cell(geom, spec, 1.0, 49.5) is None
-
-    at.checkbox(key=END_ON_KEY).check().run()
-    at.slider(key=END_KEY).set_value(60.0).run()
-    rec = _recorded_spec_after_run(at)
-    assert rec["land"]["closed_line"] == [[0.0, 50.0], [1.0, 30.0]]
+    # the row t=1 is steel below the edge 28.59 and land from 29.5 on
+    # (with the land-end width held at 47.644, 29.5 … 47.5 stayed steel)
+    assert _cell(geom, spec, 1.0, 28.5) is None
+    assert _cell(geom, spec, 1.0, 29.5) == pytest.approx(0.35)
 
 
 def test_the_defaults_do_not_leak_into_film_gate_13():
@@ -206,7 +211,7 @@ def test_the_defaults_do_not_leak_into_film_gate_13():
     assert at.number_input(key=CORNER_KEY).value == 0.0
     at.radio(key="geom_source").set_value(FILM_GATE13_LABEL).run()
     assert at.checkbox(key="f13_island_on").value is True
-    assert at.checkbox(key="f13_lc_end_on").value is False
+    assert not any(c.key and "lc_end" in c.key for c in at.checkbox)
     assert at.number_input(key="f13_外壁の角 R [mm] (0 = 角のまま)").value == 10.0
     rec = _recorded_spec_after_run(at, FILM_GATE13_LABEL)
     # Film gate 13's chamfer is still the one derived from its 肉盗み

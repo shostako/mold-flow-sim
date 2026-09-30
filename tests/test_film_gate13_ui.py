@@ -33,7 +33,7 @@ FILM_GATE13_LABEL = "Film gate 13 (扇状/斜面角度徐変2)"
 FILM_GATE12_LABEL = "Film gate 12 (扇状/斜面角度徐変)"
 
 DEPTH_END_KEY = "f13_ポケット端での上限深さ [mm] (≥ ランプ上限)"
-CLOSED_KEY = "f13_閉鎖幅（中央、両側合計） [mm]"
+CLOSED_KEY = "f13_閉鎖幅（製品側 t=0、両側合計） [mm]"
 CORNER_KEY = "f13_外壁の角 R [mm] (0 = 角のまま)"
 
 RAMP_DEG = math.degrees(math.atan(2.15 / 11.0))

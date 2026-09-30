@@ -214,7 +214,7 @@ def test_the_defaults_do_not_leak_into_film_gate_13():
     assert not any(c.key and "lc_end" in c.key for c in at.checkbox)
     assert at.number_input(key="f13_外壁の角 R [mm] (0 = 角のまま)").value == 10.0
     rec = _recorded_spec_after_run(at, FILM_GATE13_LABEL)
-    # Film gate 13's chamfer is still the one derived from its 肉盗み
+    # Film gate 13 shares the apex (from 9 on): exit 100 gives the kai01 chamfer
     assert rec["land"]["closed_line"] == [[0.0, 50.0], [1.0, 47.644148]]
     assert rec["outer_wall_corner_radius"] == 10.0
     assert rec["island"] is not None

@@ -211,18 +211,19 @@ def test_each_block_switches_off_to_its_film_gate_12_form():
     assert np.array_equal(geom.thickness_mm[geom.mask], ref.thickness_mm[ref.mask])
 
 
-def test_the_closure_width_slider_moves_the_exit_edge():
-    """Width 60 closes |w| < 30 at the exit; the 肉盗み (47.6) is wider, so
-    the edge runs straight."""
+def test_the_closure_width_slider_moves_the_trapezoid_about_the_apex():
+    """Width 60 closes |w| < 30 at the exit; the sides run through the apex
+    t = 21.224 that Film gate 9 on share, so the land end is 28.586489 -- not
+    30 (straight, the rule before v0.53.0) nor the 肉盗み's 47.644."""
     at = _app()
     at.slider(key=CLOSED_KEY).set_value(60.0).run()
     at.button[0].click().run()
     assert not at.exception
     spec = GateProfileSpec.from_dict(_recorded_spec(at))
-    assert spec.land.closed_line == ((0.0, 30.0), (1.0, 30.0))
+    assert spec.land.closed_line == ((0.0, 30.0), (1.0, 28.586489))
     geom = at.session_state["mfs_geom"]
-    assert _cell(geom, spec, 1.0, 29.5) is None
-    assert _cell(geom, spec, 1.0, 30.5) == pytest.approx(0.35)
+    assert _cell(geom, spec, 1.0, 28.5) is None
+    assert _cell(geom, spec, 1.0, 29.5) == pytest.approx(0.35)
 
 
 def test_the_defaults_do_not_leak_into_film_gate_12():

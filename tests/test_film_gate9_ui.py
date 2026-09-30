@@ -214,3 +214,53 @@ def test_the_wall_start_does_not_leak_into_film_gate_6():
     got = GateProfileSpec.from_dict({**_recorded_spec(at, FILM_GATE6_LABEL), "name": "x"})
     assert np.asarray(got.outer_wall_line[0]) == pytest.approx((5.0, 149.0))
     assert len(got.edge_channels) == 1
+
+
+APEX_T = 50.0 / (50.0 - 47.644148)  # 21.224: the kai01 chamfer's sides on the valve axis
+
+
+@pytest.mark.parametrize(
+    ("label", "tag"),
+    [
+        (FILM_GATE9_LABEL, "f9"),
+        ("Film gate 12 (扇状/斜面角度徐変)", "f12"),
+    ],
+)
+def test_the_land_closure_is_a_trapezoid_about_the_shared_apex(label, tag):
+    """From Film gate 9 on the 肉盗み boundary, extended, meets the valve axis
+    at t ≈ 21.2 (21.197 from the PDF reading, 21.224 from the CAD values),
+    so the closure's sides run through the CAD apex and one slider moves both
+    bases: exit 60 → land end 28.586489. Before v0.53.0 the 肉盗み (47.64)
+    was wider than 30 and the edge ran straight 30 → 30."""
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    at.radio(key="geom_source").set_value(label).run()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.checkbox(key=f"{tag}_lc_on").set_value(True).run()
+    at.slider(key=f"{tag}_閉鎖幅（製品側 t=0、両側合計） [mm]").set_value(60.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at, label)
+    w_end = round(30.0 * (1.0 - 1.0 / APEX_T), 6)
+    assert w_end == pytest.approx(28.586489)
+    assert rec["land"]["closed_line"] == [[0.0, 30.0], [1.0, w_end]]
+    geom = at.session_state["mfs_geom"]
+    spec = GateProfileSpec.from_dict(rec)
+    assert _cell(geom, spec, 1.0, 28.5) is None
+    assert _cell(geom, spec, 1.0, 29.5) == pytest.approx(0.35)
+
+
+def test_film_gate_1_keeps_the_closure_tied_to_its_islands():
+    """Film gate 1–8 come from other drawings and keep the old rule: the land
+    end follows the 肉盗み when it is narrower, else the edge runs straight."""
+    at = AppTest.from_file(str(APP), default_timeout=240.0)
+    at.run()
+    at.radio(key="wall_model").set_value("none")
+    at.checkbox(key="two_phase_on").set_value(False)
+    at.checkbox(key="f1_lc_on").set_value(True).run()
+    at.slider(key="f1_閉鎖幅（製品側 t=0、両側合計） [mm]").set_value(60.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    rec = _recorded_spec(at, "Film gate 1 (扇状/肉盗み1)")
+    assert rec["land"]["closed_line"] == [[0.0, 30.0], [1.0, 30.0]]

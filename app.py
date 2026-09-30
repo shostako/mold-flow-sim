@@ -475,9 +475,9 @@ class _ProfileGateDefaults:
     # With a t here the closure's sides are lines through the apex (w=0, t):
     # the land-end width follows the exit width, w_end = w_exit·(1 − L/t),
     # and so does the side angle. None = the land-end width is tied to the
-    # 肉盗み instead. Film gate 14 has no 肉盗み but keeps the kai01 chamfer,
-    # whose sides meet at t = 50/(50 − 47.644148) = 21.224 (0.28 short of the
-    # valve) -- the 肉盗み boundary line, extended.
+    # 肉盗み instead (Film gate 1–8). Film gate 9 on share the kai01 chamfer's
+    # apex t = 50/(50 − 47.644148) = 21.224 (0.28 short of the valve) -- the
+    # 肉盗み boundary line, extended.
     land_closed_apex_t: float | None = None
     # The 肉盗み checkbox's starting state (Film gate 14 has none).
     island_on: bool = True
@@ -583,6 +583,15 @@ _FILM_GATE7_DEFAULTS = _ProfileGateDefaults(
 # the R4.5 obround gives (4.5 − 4.5/tan60° = 1.9 either side of t=20 / 23),
 # and the R3 obround on the plan detail is then not the floor but the edge
 # where that wall meets the depth-2.5 runner floor (4.5 − 2.5/tan60° = 3.06).
+#
+# The land closure (off by default here, on in 13 / 14) is a trapezoid whose
+# sides meet on the valve axis. From Film gate 9 on the 肉盗み boundary is one
+# straight line from w=50 at t=0 through (1, 47.64) to (17, 9.9); extended it
+# reaches w=0 at t=21.197 (PDF reading) / 21.224 (the CAD values 47.644148 →
+# 9.95051 of Film gate 12 on) -- the same line to reading precision, and the
+# kai01 / kai02 chamfer 50 → 47.644148 lies on it. So 9–14 all share the apex
+# at the CAD value and one slider (the exit width) moves both bases.
+_KAI_CLOSURE_APEX_T = 50.0 / (50.0 - 47.644148)  # 21.224, 0.28 short of the valve
 _FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
     gate_exit_width=298.0,
     island_w_near=47.64,
@@ -592,6 +601,7 @@ _FILM_GATE9_DEFAULTS = _ProfileGateDefaults(
     wall_w2=4.48,
     valve_t=None,
     well_wall_angle_deg=60.0,
+    land_closed_apex_t=_KAI_CLOSURE_APEX_T,
 )
 
 
@@ -698,15 +708,13 @@ _FILM_GATE13_DEFAULTS = dataclasses.replace(
 # outer wall square. Everything else is face-for-face the kai01 model — the
 # graded ends (2.5 → 3.5), the outer wall line, the well, and the land closure
 # that still runs from w=50 at the exit to w=47.644 at the land end although
-# the 肉盗み it was aligned with is gone; so the closure's land-end width is
-# fixed here rather than derived. Rasterised against a vertical ray cast of the
+# the 肉盗み it was aligned with is gone -- the closure's sides through the
+# apex t=21.224 shared by Film gate 9 on (see there). Rasterised against a vertical ray cast of the
 # model the pocket is identical cell for cell at 0.5 and 0.25 mm (depth
 # |Δ| ≤ 0.019, the B-spline fits), 12,704 mm³.
 _FILM_GATE14_DEFAULTS = dataclasses.replace(
     _FILM_GATE13_DEFAULTS,
     island_on=False,
-    land_closed=100.0,
-    land_closed_apex_t=50.0 / (50.0 - 47.644148),
     wall_corner_radius=0.0,
 )
 

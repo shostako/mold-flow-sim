@@ -428,6 +428,11 @@ material_keys = list(db.keys())
 #                                land closed (no resin enters the product
 #                                through |w| < 50) and the outer wall's corner
 #                                rounded R10 (hamoko_gate_furiwake_rampends2_20260930)
+#   Film gate 14 (扇状/斜面角度徐変3) the 2026/09/30 CAD model
+#                                (Runner-block_3D_kai02.igs): Film gate 13 without
+#                                the 肉盗み and the corner R; the land closure
+#                                keeps its 50 → 47.644 chamfer
+#                                (hamoko_gate_furiwake_rampends3_20260930)
 # The derived quantities (島 boundary t-endpoints, outer-wall start width,
 # well floor) are tied to the major dimensions the way those drawings tie
 # them.
@@ -465,8 +470,13 @@ class _ProfileGateDefaults:
     ramp_ends: tuple[float, float] | tuple[float, float, float] | None = None
     # ランド中央の閉鎖: width closed at the exit (both sides together when
     # symmetric, from the valve-side edge when one-sided). None = the checkbox
-    # starts off. Film gate 13 is the model that closes it.
-    land_closed: float | None = None
+    # starts off. Film gate 13 is the model that closes it. A pair (exit
+    # width, land-end width) also fixes the width at the land's far end
+    # instead of tying it to the 肉盗み -- Film gate 14 keeps the 13 chamfer
+    # with no 肉盗み to tie it to.
+    land_closed: float | tuple[float, float] | None = None
+    # The 肉盗み checkbox's starting state (Film gate 14 has none).
+    island_on: bool = True
     # R of the outer wall's corner (where the exit width turns into the wall
     # line). 0 = sharp.
     wall_corner_radius: float = 0.0
@@ -674,6 +684,25 @@ _FILM_GATE13_DEFAULTS = dataclasses.replace(
     ramp_ends=(120.0, 2.5, 3.5),
     land_closed=100.0,
     wall_corner_radius=10.0,
+)
+
+
+# Film gate 14 = the 2026/09/30 CAD model「Runner-block_3D_kai02.igs」
+# (hamoko_gate_furiwake_rampends3_20260930). Film gate 13's pocket with the
+# 肉盗み and the corner R10 taken out: the centre |w| ≤ 60 is one plane ramp
+# (11.06°, t=1→12) and the 2.5 floor behind it, and the end wall meets the 3°
+# outer wall square. Everything else is face-for-face the kai01 model — the
+# graded ends (2.5 → 3.5), the outer wall line, the well, and the land closure
+# that still runs from w=50 at the exit to w=47.644 at the land end although
+# the 肉盗み it was aligned with is gone; so the closure's land-end width is
+# fixed here rather than derived. Rasterised against a vertical ray cast of the
+# model the pocket is identical cell for cell at 0.5 and 0.25 mm (depth
+# |Δ| ≤ 0.019, the B-spline fits), 12,704 mm³.
+_FILM_GATE14_DEFAULTS = dataclasses.replace(
+    _FILM_GATE13_DEFAULTS,
+    island_on=False,
+    land_closed=(100.0, 95.288296),
+    wall_corner_radius=0.0,
 )
 
 
@@ -1324,7 +1353,12 @@ def _ramp_ends_from_inputs(v: dict) -> RampEndsSpec | None:
 
 
 def _land_closed_inputs(
-    tag: str, v: dict, *, symmetric: bool, w_full: float, default: float | None
+    tag: str,
+    v: dict,
+    *,
+    symmetric: bool,
+    w_full: float,
+    default: float | tuple[float, float] | None,
 ) -> None:
     """The ランド中央の閉鎖 block of the single-pocket Film gates (fills ``v``).
 
@@ -1332,13 +1366,15 @@ def _land_closed_inputs(
     left as steel at the PL through the land, so no resin enters the product
     there. Its end at the land's far side is tied to the 肉盗み in the
     assembly (``_land_closed_from_inputs``), the way the 2026/09/30 CAD model
-    chamfers it.
+    chamfers it -- unless ``lc_end_on`` fixes that width on its own (a pair
+    default starts it on: Film gate 14 keeps the chamfer without a 肉盗み).
     """
+    exit_default, end_default = default if isinstance(default, tuple) else (default, None)
     slider, _ = _tagged_widgets(tag)
     st.markdown("**ランド中央の閉鎖**" if symmetric else "**ランドのバルブ側の閉鎖**")
     v["lc_on"] = st.checkbox(
         "ランドの閉鎖を有効化",
-        value=default is not None,
+        value=exit_default is not None,
         key=f"{tag}_lc_on",
         help=(
             "ランドの一部を鋼材で PL まで埋め、そこからは製品に樹脂が入らないようにする。"
@@ -1354,18 +1390,44 @@ def _land_closed_inputs(
         ("閉鎖幅（中央、両側合計）" if symmetric else "閉鎖幅（バルブ側端から）") + " [mm]",
         1.0,
         hi,
-        float(min(default if default is not None else 100.0, hi)),
+        float(min(exit_default if exit_default is not None else 100.0, hi)),
         step=0.5,
         help="出口（t=0）での閉鎖の幅。上限はゲート出口幅 − 1。",
     )
+    v["lc_end_on"] = st.checkbox(
+        "ランド終端側の閉鎖幅を指定する",
+        value=end_default is not None,
+        key=f"{tag}_lc_end_on",
+        help=(
+            "OFF: ランド終端（t=ランド長）の縁は肉盗みの出口側の境界に寄る（肉盗み OFF ならまっすぐ）。"
+            "ON: ランド終端での閉鎖幅をここで決める。"
+        ),
+    )
+    if v["lc_end_on"]:
+        v["lc_end_width"] = slider(
+            (
+                "ランド終端での閉鎖幅（両側合計）"
+                if symmetric
+                else "ランド終端での閉鎖幅（バルブ側端から）"
+            )
+            + " [mm]",
+            1.0,
+            hi,
+            float(min(end_default if end_default is not None else v["lc_width"], hi)),
+            step=0.1,
+            help="t=ランド長での閉鎖の幅。出口の幅からここへ直線で寄る。",
+        )
 
 
 def _land_closed_from_inputs(v: dict) -> tuple[tuple[float, float], tuple[float, float]] | None:
     if not v.get("lc_on"):
         return None
-    w0 = float(v["lc_width"]) / 2.0 if v["symmetric"] else float(v["lc_width"])
+    half = 2.0 if v["symmetric"] else 1.0
+    w0 = float(v["lc_width"]) / half
     w1 = w0
-    if v.get("island_on") and float(v["island_w_near"]) < w0:
+    if v.get("lc_end_on"):
+        w1 = float(v["lc_end_width"]) / half
+    elif v.get("island_on") and float(v["island_w_near"]) < w0:
         w1 = float(v["island_w_near"])
     return ((0.0, w0), (float(v["land_length"]), w1))
 
@@ -1527,7 +1589,7 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         st.markdown("**肉盗み（浅い帯＝振り分け）**")
         v["island_on"] = st.checkbox(
             "肉盗みを有効化",
-            value=True,
+            value=bool(d.island_on),
             key=f"{tag}_island_on",
             help=(
                 "バルブ側の帯だけランプ角を緩くして流路を絞り、樹脂を遠方へ振り分ける。"
@@ -2348,6 +2410,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f13",
         "film_gate_13_parametric",
         lambda: _profile_gate_sidebar("f13", True, _FILM_GATE13_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 14 (扇状/斜面角度徐変3)": _FilmGate(
+        "f14",
+        "film_gate_14_parametric",
+        lambda: _profile_gate_sidebar("f14", True, _FILM_GATE14_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

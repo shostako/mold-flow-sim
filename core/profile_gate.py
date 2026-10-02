@@ -9,6 +9,10 @@ gate exit / product edge [mm], ``w`` = width-direction position [mm],
 ``d`` = channel thickness = pocket depth [mm]):
 
 1. **Land** — ``t ∈ [0, land.length]``, full gate width, ``d = land.depth``.
+   With ``land.profile`` (single-pocket form) the land is longer towards
+   ``w = 0`` (ランド長可変, a coat-hanger land): it ends at
+   ``L(w) = length + (center_length − length)·(1 − w/w_edge)^power`` and the
+   ramp (graded ends included) starts there, shifted along t unchanged.
 2. **Main ramp** — ``d = land.depth + tan(angle)·(t − land.length)``,
    capped at ``cap_depth`` (flat beyond the cap point).
 3. **Island** (optional) — a shallow central band bounded by a straight
@@ -103,6 +107,37 @@ _EPS = 1e-6
 
 
 @dataclass(frozen=True)
+class LandProfileSpec:
+    """Land length varied across the exit (ランド長可変, a coat-hanger land).
+
+    The land (``d = land.depth``) ends at
+
+        L(w) = land.length + (center_length − land.length)·(1 − w/w_edge)^power
+
+    instead of at ``land.length``: ``center_length`` at ``w = 0`` (the valve
+    axis when symmetric, the valve-side edge when one-sided) and
+    ``land.length`` at ``w_edge`` (the exit's half-width / width). Everything
+    the land feeds -- the main ramp, its cap, the graded ends (``ramp_ends``)
+    -- is shifted along t by ``L(w) − land.length`` and keeps its shape, so
+    each section is still "land, then ramp at the main angle". The
+    silhouette, the closure (``closed_line``, read on the original land) and
+    the overlays (island, edge channels, ramp cut, land ends, well) are not
+    shifted.
+
+    Why: the transverse runner behind the ramp costs the ends a pressure
+    drop ∝ (w_edge² − (w_edge − w)²)/2 that the centre does not pay; the
+    land's resistance per unit width is ∝ L/h³ and dominates the ramp's (the
+    thinnest part of the path takes almost all of it), so a land longer by
+    ∝ (1 − w/w_edge)² at the centre balances the two -- the coat-hanger
+    manifold of an extrusion die, with the hanger in the land. ``power`` 2
+    is that parabola.
+    """
+
+    center_length: float
+    power: float = 2.0
+
+
+@dataclass(frozen=True)
 class LandSpec:
     """Gate land: constant-depth strip attaching the block to the plate."""
 
@@ -118,6 +153,9 @@ class LandSpec:
     # the centre with (0, 50) → (1, 47.644): a chamfer from the exit to where
     # the 肉盗み starts. ``None`` = the land runs across the whole exit.
     closed_line: Line | None = None
+    # Land length varied across the exit (see LandProfileSpec). ``None`` =
+    # the land ends at ``length`` everywhere.
+    profile: LandProfileSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -578,7 +616,15 @@ class GateProfileSpec:
         gate_exit_width = _num(d, "gate_exit_width", "")
 
         land_d = _section(d, "land", required=True)
-        _check_unknown(land_d, {"depth", "length", "closed_line"}, "land")
+        _check_unknown(land_d, {"depth", "length", "closed_line", "profile"}, "land")
+        land_profile: LandProfileSpec | None = None
+        lp_d = _section(land_d, "profile", required=False)
+        if lp_d is not None:
+            _check_unknown(lp_d, {"center_length", "power"}, "land.profile")
+            land_profile = LandProfileSpec(
+                center_length=_num(lp_d, "center_length", "land.profile."),
+                power=_num(lp_d, "power", "land.profile.") if "power" in lp_d else 2.0,
+            )
         land = LandSpec(
             depth=_num(land_d, "depth", "land."),
             length=_num(land_d, "length", "land."),
@@ -587,6 +633,7 @@ class GateProfileSpec:
                 if land_d.get("closed_line") is not None
                 else None
             ),
+            profile=land_profile,
         )
 
         ramp_d = _section(d, "main_ramp", required=True)
@@ -811,6 +858,11 @@ class GateProfileSpec:
         }
         if self.land.closed_line is not None:
             d["land"]["closed_line"] = [list(p) for p in self.land.closed_line]
+        if self.land.profile is not None:
+            d["land"]["profile"] = {
+                "center_length": self.land.profile.center_length,
+                "power": self.land.profile.power,
+            }
         if self.outer_wall_line is not None:
             d["outer_wall_line"] = [list(p) for p in self.outer_wall_line]
         if self.outer_wall_corner_radius is not None:
@@ -1104,6 +1156,17 @@ class GateProfileSpec:
                     f"ramp_ends.depth_end ({re_.depth_end}) must be deeper than land.depth "
                     f"({self.land.depth}) — the ramp has to rise from the land to it"
                 )
+        if self.land.profile is not None:
+            lp = self.land.profile
+            if self.outer_wall_line is None:
+                raise ValueError("land.profile needs the single-pocket form (outer_wall_line)")
+            if lp.center_length <= self.land.length + _EPS:
+                raise ValueError(
+                    f"land.profile.center_length ({lp.center_length}) must be longer than "
+                    f"land.length ({self.land.length}) — land.length is the length at the edge"
+                )
+            if lp.power <= 0:
+                raise ValueError(f"land.profile.power must be positive, got {lp.power}")
         if self.land.closed_line is not None:
             if self.outer_wall_line is None:
                 raise ValueError("land.closed_line needs the single-pocket form (outer_wall_line)")
@@ -1687,6 +1750,14 @@ def _grade_ramp_ends(
     return np.where(zone, d_graded, d)
 
 
+def _land_profile_extra(spec: GateProfileSpec, wa: np.ndarray, w_edge: float) -> np.ndarray:
+    """``L(w) − land.length`` of :class:`LandProfileSpec` (0 beyond ``w_edge``)."""
+    lp = spec.land.profile
+    assert lp is not None
+    frac = np.clip(1.0 - np.maximum(wa, 0.0) / max(w_edge, 1e-12), 0.0, 1.0)
+    return (lp.center_length - spec.land.length) * frac**lp.power
+
+
 def _polyline_distance(
     path: tuple[tuple[float, float], ...], t: np.ndarray, w: np.ndarray
 ) -> np.ndarray:
@@ -1803,13 +1874,16 @@ def build_profile_gate_geometry(
     land_depth = spec.land.depth
     land_len = spec.land.length
     tan_ramp = math.tan(math.radians(spec.main_ramp.angle_deg))
+    # With a land profile the land and everything it feeds are read at
+    # t − (L(w) − land.length): the ramp starts where the longer land ends.
+    t_ramp = t if spec.land.profile is None else t - _land_profile_extra(spec, wa, full_half_width)
     d_base = np.where(
-        t <= land_len,
+        t_ramp <= land_len,
         land_depth,
-        np.minimum(land_depth + tan_ramp * (t - land_len), spec.main_ramp.cap_depth),
+        np.minimum(land_depth + tan_ramp * (t_ramp - land_len), spec.main_ramp.cap_depth),
     )
     if spec.ramp_ends is not None:
-        d_base = _grade_ramp_ends(spec, d=d_base, t=t, wa=wa, w_edge=full_half_width)
+        d_base = _grade_ramp_ends(spec, d=d_base, t=t_ramp, wa=wa, w_edge=full_half_width)
 
     # --- island override (sharp-cut approximation of the steep walls) ---
     if spec.island is not None:
@@ -2089,6 +2163,8 @@ def build_profile_gate_geometry(
             )
     if spec.ramp_ends is not None:
         _reject_ineffective_ramp_ends(spec, plate, cell_size_mm, geom)
+    if spec.land.profile is not None:
+        _reject_ineffective_land_profile(spec, plate, cell_size_mm, geom)
     if spec.island is not None and spec.island.weld is not None:
         _reject_ineffective_weld(spec, plate, cell_size_mm, geom)
     return geom
@@ -2126,6 +2202,36 @@ def _reject_ineffective_weld(
             f"cell_size_mm={cell_size_mm}: the finished geometry is the same without it "
             "(no island cell centre inside the dam, or the well / an edge channel / a "
             "ramp cut covering it). Widen the dam, move it, or refine the mesh."
+        )
+
+
+def _reject_ineffective_land_profile(
+    spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float, geom: Geometry
+) -> None:
+    """Reject a land profile the finished geometry does not show.
+
+    The longer land only lowers ramp cells; an island, edge channel, ramp
+    cut or land-ends floor over the whole stretch it touches (or a mesh too
+    coarse to put a cell centre there) leaves the geometry as it was. Same
+    check as the graded ramp: compare with the spec built without it.
+    """
+    try:
+        plain = build_profile_gate_geometry(
+            dataclasses.replace(spec, land=dataclasses.replace(spec.land, profile=None)),
+            plate,
+            cell_size_mm,
+        )
+    except ValueError:
+        return
+    if np.array_equal(plain.mask, geom.mask) and np.allclose(
+        plain.thickness_mm, geom.thickness_mm, rtol=0.0, atol=1e-9
+    ):
+        lp = spec.land.profile
+        raise ValueError(
+            f"land.profile (center_length {lp.center_length}, power {lp.power}) changes no "
+            f"cell at cell_size_mm={cell_size_mm}: the finished geometry is the same without "
+            "it (no ramp cell centre where the land grows, or an overlay covering it). "
+            "Lengthen it or refine the mesh."
         )
 
 

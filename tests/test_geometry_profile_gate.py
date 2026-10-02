@@ -1524,6 +1524,34 @@ def test_land_profile_hidden_by_an_overlay_is_rejected() -> None:
         build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
 
 
+def test_land_profile_and_graded_ends_hidden_together_are_rejected() -> None:
+    """Both features under the same flat island: removing either leaves the
+    finished geometry as it was. Each no-op check rebuilds without its own
+    feature; that rebuild must not run the other's check, or each takes the
+    other's rejection for "my feature made a difference" and both pass
+    (Codex P2 on PR #102)."""
+    island = {"angle_deg": 0.0, "boundary_line": [[2.0, 100.0], [20.0, 100.0]], "end_dist": 20.0}
+    spec = _minimal_spec(
+        island=island,
+        ramp_ends={"w_from": 60.0, "t_end": 5.0},
+        land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}},
+    )
+    with pytest.raises(ValueError, match="changes no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
+    # each alone under the island is rejected too, and without the island both are real
+    with pytest.raises(ValueError, match="ramp_ends.*changes no cell"):
+        build_profile_gate_geometry(
+            _minimal_spec(island=island, ramp_ends={"w_from": 60.0, "t_end": 5.0}), _plate()
+        )
+    build_profile_gate_geometry(
+        _minimal_spec(
+            ramp_ends={"w_from": 60.0, "t_end": 5.0},
+            land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}},
+        ),
+        _plate(),
+    )
+
+
 # ----------------------- ramp ends (斜面角度徐変) ------------------
 # Minimal pocket: land 0.4 × 2, ramp 10° capped at 2.4, so the main ramp
 # reaches the cap at t_c0 = 2 + 2.0/tan10° = 13.343 across the whole exit.

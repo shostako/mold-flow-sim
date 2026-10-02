@@ -1802,6 +1802,30 @@ def build_profile_gate_geometry(
     the plate's bottom row. The valve orifice becomes the Dirichlet gate
     cells; the plate body alone forms the compression mask.
     """
+    return _build_profile_gate_geometry(spec, plate, cell_size_mm, check_effective=True)
+
+
+def _counterfactual(spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float):
+    """The spec built for comparison only: no post-build no-op checks.
+
+    The no-op checks (graded ends, land profile, weld) each rebuild the spec
+    without their own feature and compare. If that rebuild ran the *other*
+    checks, two features hidden by the same overlay would each see the
+    other's rejection, take it for "my feature made a difference" and pass
+    -- the finished geometry would then carry two features it does not show
+    (Codex P2 on PR #102). The rebuild is a measurement, not a spec the user
+    asked for, so it skips them.
+    """
+    return _build_profile_gate_geometry(spec, plate, cell_size_mm, check_effective=False)
+
+
+def _build_profile_gate_geometry(
+    spec: GateProfileSpec,
+    plate: ProfilePlateConfig,
+    cell_size_mm: float,
+    *,
+    check_effective: bool,
+) -> Geometry:
     spec.validate()
     plate.validate()
     if cell_size_mm <= 0:
@@ -2161,11 +2185,11 @@ def build_profile_gate_geometry(
                 "opening beside the closure is thinner than a cell and the product is cut "
                 "off from the gate. Narrow the closure or refine the mesh."
             )
-    if spec.ramp_ends is not None:
+    if check_effective and spec.ramp_ends is not None:
         _reject_ineffective_ramp_ends(spec, plate, cell_size_mm, geom)
-    if spec.land.profile is not None:
+    if check_effective and spec.land.profile is not None:
         _reject_ineffective_land_profile(spec, plate, cell_size_mm, geom)
-    if spec.island is not None and spec.island.weld is not None:
+    if check_effective and spec.island is not None and spec.island.weld is not None:
         _reject_ineffective_weld(spec, plate, cell_size_mm, geom)
     return geom
 
@@ -2186,7 +2210,7 @@ def _reject_ineffective_weld(
     """
     assert spec.island is not None and spec.island.weld is not None
     try:
-        plain = build_profile_gate_geometry(
+        plain = _counterfactual(
             dataclasses.replace(spec, island=dataclasses.replace(spec.island, weld=None)),
             plate,
             cell_size_mm,
@@ -2216,7 +2240,7 @@ def _reject_ineffective_land_profile(
     check as the graded ramp: compare with the spec built without it.
     """
     try:
-        plain = build_profile_gate_geometry(
+        plain = _counterfactual(
             dataclasses.replace(spec, land=dataclasses.replace(spec.land, profile=None)),
             plate,
             cell_size_mm,
@@ -2251,9 +2275,7 @@ def _reject_ineffective_ramp_ends(
     it is not a no-op either.
     """
     try:
-        plain = build_profile_gate_geometry(
-            dataclasses.replace(spec, ramp_ends=None), plate, cell_size_mm
-        )
+        plain = _counterfactual(dataclasses.replace(spec, ramp_ends=None), plate, cell_size_mm)
     except ValueError:
         return
     # 1e-9: t_end on the main cap line reproduces the plane ramp only up to

@@ -15,6 +15,7 @@ from core import (
     GateProfileSpec,
     HeleShawSolver,
     LandEndsSpec,
+    LandProfileSpec,
     LandSpec,
     MaterialDB,
     ProfilePlateConfig,
@@ -1386,6 +1387,141 @@ def test_land_ends_that_deepen_nothing_are_rejected() -> None:
     with pytest.raises(ValueError, match="land_ends.*deepens no cell"):
         build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
     build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.1)
+
+
+# ----------------------- land profile (ランド長可変) ------------------
+# Minimal pocket: land 0.4 × 2, ramp 10° capped at 2.4, wall at w=100. With
+# center_length 6 / power 2 the land ends at L(w) = 2 + 4·(1 − w/100)² and the
+# ramp starts there, unchanged: d(t, w) = ramp(t − (L(w) − 2)).
+
+
+def _lp_L(w: float, center: float = 6.0, power: float = 2.0) -> float:
+    return 2.0 + (center - 2.0) * max(1.0 - w / 100.0, 0.0) ** power
+
+
+def test_land_profile_column_is_the_shifted_ramp() -> None:
+    spec = _minimal_spec(land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}})
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    for w in (0.125, 20.125, 50.125, 80.125, 99.875):
+        col = g.mask & np.isclose(wa, w) & (t >= 0.0) & (t <= 24.0)
+        assert col.sum() > 80
+        L = _lp_L(w)
+        for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+            want = 0.4 if tv <= L else _ramp_min(tv - (L - 2.0))
+            assert got == pytest.approx(want, abs=1e-9), (w, tv)
+
+
+def test_land_profile_only_makes_the_ramp_shallower_and_mirrors() -> None:
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}})
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    assert np.array_equal(g0.mask, g1.mask)  # silhouette untouched
+    assert np.all(g1.thickness_mm <= g0.thickness_mm + 1e-12)
+    diff = g1.thickness_mm < g0.thickness_mm - 1e-12
+    t, wa = _tw(g1)
+    assert t[diff].min() > 2.0  # the original land is untouched
+    assert np.allclose(g1.thickness_mm[g1.mask & (t >= 0) & (t <= 2.0)], 0.4)
+    nx = diff.shape[1]
+    assert diff[:, : nx // 2].sum() == diff[:, (nx + 1) // 2 :].sum() > 0
+    # the plate is not part of it
+    assert np.array_equal(g0.thickness_mm[t < 0], g1.thickness_mm[t < 0])
+
+
+def test_land_profile_volume_matches_closed_form() -> None:
+    """Shifting a ramp that rises by (cap − land) by Δ removes Δ·(cap − land)
+    per unit width; Δ(w) = 4·(1 − w/100)² integrates to 4·100/3 per side."""
+    g0 = build_profile_gate_geometry(_minimal_spec(), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}})
+    g1 = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    dv = (g0.volume_cm3() - g1.volume_cm3()) * 1000.0
+    assert dv == pytest.approx(2.0 * 2.0 * 4.0 * 100.0 / 3.0, rel=0.02)
+    lin = _minimal_spec(
+        land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0, "power": 1.0}}
+    )
+    g2 = build_profile_gate_geometry(lin, _plate(), cell_size_mm=0.25)
+    dv2 = (g0.volume_cm3() - g2.volume_cm3()) * 1000.0
+    assert dv2 == pytest.approx(2.0 * 2.0 * 4.0 * 100.0 / 2.0, rel=0.02)
+
+
+def test_land_profile_shifts_the_graded_ends_too() -> None:
+    """With ramp_ends the graded section moves with the land: at every w the
+    column is the graded column read at t − (L(w) − land.length)."""
+    re_ = {"w_from": 60.0, "t_end": 5.0}
+    plain = build_profile_gate_geometry(_minimal_spec(ramp_ends=re_), _plate(), cell_size_mm=0.25)
+    spec = _minimal_spec(
+        ramp_ends=re_, land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}}
+    )
+    g = build_profile_gate_geometry(spec, _plate(), cell_size_mm=0.25)
+    t, wa = _tw(g)
+    for w in (70.125, 90.125):
+        shift = _lp_L(w) - 2.0
+        col = g.mask & np.isclose(wa, w) & (t >= 0.0)
+        c0 = plain.mask & np.isclose(wa, w) & (t >= 0.0)
+        t_c0 = 2.0 + 2.0 / math.tan(math.radians(10.0))
+        t_cap = t_c0 + (5.0 - t_c0) * (w - 60.0) / 40.0
+        for tv, got in zip(t[col], g.thickness_mm[col], strict=True):
+            tr = tv - shift
+            want = 0.4 if tr <= 2.0 else min(0.4 + 2.0 * (tr - 2.0) / (t_cap - 2.0), 2.4)
+            assert got == pytest.approx(want, abs=1e-9), (w, tv)
+        assert c0.sum() == col.sum()
+
+
+def test_land_profile_one_sided_is_longest_at_the_valve_side_edge() -> None:
+    d = _minimal_spec_dict(symmetric=False, outer_wall_line=[[0.0, 200.0], [24.0, 200.0]])
+    g0 = build_profile_gate_geometry(GateProfileSpec.from_dict(d), _plate())
+    spec = GateProfileSpec.from_dict(
+        {**d, "land": {"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}}}
+    )
+    g1 = build_profile_gate_geometry(spec, _plate())
+    diff = g0.thickness_mm - g1.thickness_mm
+    _iy, ix = np.indices(diff.shape)
+    w = (ix + 0.5) - (5.0 + 150.0 - 100.0)  # offset from the valve-side edge x=55
+    removed = [diff[(w >= a) & (w < a + 20)].sum() for a in (0, 50, 100, 150)]
+    assert removed[0] > removed[1] > removed[2] > removed[3] >= 0
+
+
+def test_land_profile_json_roundtrip_and_default_omitted() -> None:
+    spec = _minimal_spec(
+        land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0, "power": 1.5}}
+    )
+    again = GateProfileSpec.from_json(spec.to_json())
+    assert again == spec
+    assert again.land.profile == LandProfileSpec(center_length=6.0, power=1.5)
+    dflt = _minimal_spec(land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}})
+    assert dflt.land.profile.power == 2.0
+    assert "profile" not in _minimal_spec().to_dict()["land"]
+    assert "profile" not in _demo_spec().to_dict()["land"]
+
+
+def test_land_profile_validation() -> None:
+    land = {"depth": 0.4, "length": 2.0}
+    with pytest.raises(ValueError, match="center_length.*longer than"):
+        _minimal_spec(land={**land, "profile": {"center_length": 2.0}})
+    with pytest.raises(ValueError, match="power must be positive"):
+        _minimal_spec(land={**land, "profile": {"center_length": 6.0, "power": 0.0}})
+    with pytest.raises(ValueError, match="missing key"):
+        _minimal_spec(land={**land, "profile": {"power": 2.0}})
+    with pytest.raises(ValueError, match="unknown key"):
+        _minimal_spec(land={**land, "profile": {"center_length": 6.0, "bogus": 1}})
+    with pytest.raises(ValueError, match="finite"):
+        _minimal_spec(land={**land, "profile": {"center_length": float("nan")}})
+    fans = GateProfileSpec.from_json_file(DEMO_JSON.with_name("demo_twin_fan_gate.json")).to_dict()
+    fans["land"] = {**fans["land"], "profile": {"center_length": 6.0}}
+    with pytest.raises(ValueError, match="single-pocket"):
+        GateProfileSpec.from_dict(fans)
+
+
+def test_land_profile_hidden_by_an_overlay_is_rejected() -> None:
+    """A flat island over the whole stretch the land grows into leaves the
+    finished geometry unchanged: the spec would record a feature the solver
+    never sees, so the builder refuses it (same check as the graded ends)."""
+    island = {"angle_deg": 0.0, "boundary_line": [[2.0, 100.0], [20.0, 100.0]], "end_dist": 20.0}
+    spec = _minimal_spec(
+        island=island, land={"depth": 0.4, "length": 2.0, "profile": {"center_length": 6.0}}
+    )
+    with pytest.raises(ValueError, match="land.profile.*changes no cell"):
+        build_profile_gate_geometry(spec, _plate(), cell_size_mm=1.0)
 
 
 # ----------------------- ramp ends (斜面角度徐変) ------------------

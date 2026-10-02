@@ -50,6 +50,7 @@ from core.profile_gate import (
     EdgeChannelSpec,
     IslandSpec,
     LandEndsSpec,
+    LandProfileSpec,
     LandSpec,
     MainRampSpec,
     RampCutSpec,
@@ -479,6 +480,9 @@ class _ProfileGateDefaults:
     # apex t = 50/(50 − 47.644148) = 21.224 (0.28 short of the valve) -- the
     # 肉盗み boundary line, extended.
     land_closed_apex_t: float | None = None
+    # ランド長可変: (land length at the centre, power of the profile). None =
+    # the checkbox starts off. Film gate 15 is the proposal that *is* it.
+    land_profile: tuple[float, float] | None = None
     # The 肉盗み checkbox's starting state (Film gate 14 has none).
     island_on: bool = True
     # R of the outer wall's corner (where the exit width turns into the wall
@@ -716,6 +720,27 @@ _FILM_GATE14_DEFAULTS = dataclasses.replace(
     _FILM_GATE13_DEFAULTS,
     island_on=False,
     wall_corner_radius=0.0,
+)
+
+
+# Film gate 15 = the 2026/10/02 proposal A3「ランド長可変」(a coat-hanger land,
+# hamoko_gate_furiwake_landhanger_center5_20261002, drawn by Monday; no CAD
+# model). The kai02 frame of Film gate 14 -- outer wall, well, valve, the
+# 11.06° ramp to 2.5 -- with the grading, the closure and the 肉盗み taken out,
+# and the land 0.35 deep but longer towards the centre: L(w) = 1 + 4·(1 − |w|/149)²,
+# 5 at the centre, 1 at the ends, the ramp shifted to start where it ends.
+# Why: the 2.5 runner behind the ramp costs the ends ~q·149²/(2·h³·width) of
+# pressure the centre does not pay, more than the whole land + ramp (the 0.35
+# land carries about half of the path's resistance, everything deeper than
+# ~0.8 almost none). A parabola of extra land at the centre balances it -- the
+# coat hanger of an extrusion die, with the hanger in the land. On the
+# isothermal model (the one the 9/24 short shot matched) the injection-end
+# front is flat to 1–2 mm; with wall cooling the optimum moves to 6.
+_FILM_GATE15_DEFAULTS = dataclasses.replace(
+    _FILM_GATE14_DEFAULTS,
+    ramp_ends=None,
+    land_closed=None,
+    land_profile=(5.0, 2.0),
 )
 
 
@@ -1243,6 +1268,74 @@ def _land_ends_inputs(
     )
 
 
+def _land_profile_inputs(
+    tag: str,
+    v: dict,
+    *,
+    symmetric: bool,
+    w_full: float,
+    default: tuple[float, float] | None,
+) -> None:
+    """The ランド長可変 block of the single-pocket Film gates (fills ``v``).
+
+    Sets ``v["lp_on"]`` and, when on, ``lp_center / lp_power``. The land stays
+    as deep as it is; it gets longer towards w = 0 (the valve axis, or the
+    valve-side edge when one-sided) and the ramp starts where it ends.
+    """
+    slider, number_input = _tagged_widgets(tag)
+    land_len = float(v["land_length"])
+    checked = st.checkbox(
+        "ランド長を幅方向に変える（中央を長く）"
+        if symmetric
+        else "ランド長を幅方向に変える（バルブ側を長く）",
+        value=default is not None,
+        key=f"{tag}_lp_on",
+        help=(
+            "ランドの深さはそのまま、長さを中央で長く、端へ向けて短くする（端は上のランド長さ）。"
+            "ランプ（徐変も含む）はランドが終わる所から同じ形で始まる。"
+            "横ランナーを端まで走る分の流れにくさを、中央のランドで釣り合わせる（コートハンガー）。"
+        ),
+    )
+    v["lp_on"] = bool(checked)
+    if not v["lp_on"]:
+        return
+    center_d, power_d = default if default is not None else (land_len + 4.0, 2.0)
+    lo = round(land_len + 0.1, 1)
+    v["lp_center"] = slider(
+        ("中央" if symmetric else "バルブ側端") + "のランド長 [mm] (> ランド長さ)",
+        lo,
+        20.0,
+        float(min(max(center_d, lo), 20.0)),
+        step=0.1,
+        help="w=0 でのランド長。端（ゲート出口の端）では上の「ランド長さ」になる。",
+    )
+    v["lp_power"] = number_input(
+        "ランド長の形の指数（2 = 放物線）",
+        min_value=0.5,
+        max_value=4.0,
+        value=float(power_d),
+        step=0.5,
+        format="%.1f",
+        help=(
+            "L(w) = ランド長さ + (中央 − ランド長さ)·(1 − w/端)^指数。"
+            "2（放物線）が横ランナーの圧損を打ち消す形。1 は直線、大きいほど中央に寄る。"
+        ),
+    )
+    extra = float(v["lp_center"]) - land_len
+    pw = float(v["lp_power"])
+    pts = [0.0, w_full / 3.0, 2.0 * w_full / 3.0, w_full]
+    reads = "、".join(f"w={w:.0f}: {land_len + extra * (1.0 - w / w_full) ** pw:.2f}" for w in pts)
+    st.caption(
+        f"ランド長 {reads} mm（w は{'バルブ軸からの半幅' if symmetric else 'バルブ側端から'}）。"
+    )
+
+
+def _land_profile_from_inputs(v: dict) -> LandProfileSpec | None:
+    if not v.get("lp_on"):
+        return None
+    return LandProfileSpec(center_length=float(v["lp_center"]), power=float(v["lp_power"]))
+
+
 def _land_ends_from_inputs(v: dict) -> LandEndsSpec | None:
     if not v.get("le_on"):
         return None
@@ -1573,6 +1666,9 @@ def _profile_gate_sidebar(tag: str, symmetric: bool, d: _ProfileGateDefaults) ->
         st.markdown("**ランド（出口）**")
         v["land_depth"] = slider("ランド深さ [mm]", 0.1, 2.0, 0.35, step=0.05)
         v["land_length"] = slider("ランド長さ [mm]", 0.5, 5.0, 1.0, step=0.1)
+        _land_profile_inputs(
+            tag, v, symmetric=symmetric, w_full=float(w_full), default=d.land_profile
+        )
 
         st.markdown("**メインランプ**")
         v["ramp_angle"] = number_input(
@@ -1750,6 +1846,7 @@ def _profile_gate_from_inputs(
             depth=float(v["land_depth"]),
             length=t_land,
             closed_line=_land_closed_from_inputs(v),
+            profile=_land_profile_from_inputs(v),
         ),
         main_ramp=MainRampSpec(angle_deg=float(v["ramp_angle"]), cap_depth=float(v["ramp_cap"])),
         outer_wall_line=(
@@ -2433,6 +2530,12 @@ _FILM_GATES: dict[str, _FilmGate] = {
         "f14",
         "film_gate_14_parametric",
         lambda: _profile_gate_sidebar("f14", True, _FILM_GATE14_DEFAULTS),
+        _profile_gate_from_inputs,
+    ),
+    "Film gate 15 (扇状/ランド長可変)": _FilmGate(
+        "f15",
+        "film_gate_15_parametric",
+        lambda: _profile_gate_sidebar("f15", True, _FILM_GATE15_DEFAULTS),
         _profile_gate_from_inputs,
     ),
 }

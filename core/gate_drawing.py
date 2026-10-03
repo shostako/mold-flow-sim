@@ -42,8 +42,9 @@ from .profile_gate import GateProfileSpec, ProfilePlateConfig, build_profile_gat
 #: Mesh the drawing is built on [mm]. 0.1 mm keeps the A3 1:1 plan at roughly
 #: 250 dpi and builds the 300 mm block in about half a second.
 FINE_CELL_MM = 0.1
-#: Plan scale. Sections are 5:1 when two columns of them fit the sheet.
-PLAN_SCALE = 1.0
+#: Plan scales tried in order (1:1, 1:2, ...). Sections are 5:1 when two
+#: columns of them fit the sheet.
+PLAN_SCALES = (1.0, 0.5, 0.25, 0.2, 0.1)
 CONTOUR_STEP_MM = 0.5
 A3_MM = (420.0, 297.0)
 
@@ -119,10 +120,45 @@ class DrawingField:
     t_max: float
 
 
+#: Cap on the drawing mesh's cell count: the fine mesh doubles until the
+#: block fits (a 400 mm exit at 0.1 mm is about 1.6 M cells).
+MAX_DRAWING_CELLS = 3_000_000
+
+
+def block_plate(plate: ProfilePlateConfig) -> ProfilePlateConfig:
+    """The plate cut down to a 1 mm strip: the drawing only reads the block.
+
+    The builder rasterises the whole product too; at 0.1 mm a 400 × 200 mm
+    plate would be ~10 M cells of which the drawing uses none (Codex P2 on
+    PR #104). The block does not depend on the product's height or
+    thickness zones, only on its width (the grid-fit check).
+    """
+    return dataclasses.replace(
+        plate,
+        plate_h_mm=1.0,
+        plate_split_height_mm=0.0,
+        plate_lower_thk_mm=None,
+        plate_upper_thk_mm=None,
+    )
+
+
+def drawing_cell_mm(spec: GateProfileSpec, plate: ProfilePlateConfig) -> float:
+    """``FINE_CELL_MM``, doubled until the block's grid fits ``MAX_DRAWING_CELLS``."""
+    dx = FINE_CELL_MM
+    w = 2 * plate.pad_mm + plate.plate_w_mm
+    h = 2 * plate.pad_mm + spec.t_max() + 1.0
+    while (w / dx) * (h / dx) > MAX_DRAWING_CELLS:
+        dx *= 2.0
+    return dx
+
+
 def drawing_field(
-    spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float = FINE_CELL_MM
+    spec: GateProfileSpec, plate: ProfilePlateConfig, cell_size_mm: float | None = None
 ) -> DrawingField:
-    geom = build_profile_gate_geometry(spec, plate, cell_size_mm=cell_size_mm)
+    """The block's depth field on the drawing mesh (the product is cut to a strip)."""
+    if cell_size_mm is None:
+        cell_size_mm = drawing_cell_mm(spec, plate)
+    geom = build_profile_gate_geometry(spec, block_plate(plate), cell_size_mm=cell_size_mm)
     x0, y0 = geom.display_origin_mm()
     dx = geom.cell_size_mm
     x = (np.arange(geom.nx) + 0.5) * dx - x0
@@ -141,17 +177,22 @@ def exit_half_width(spec: GateProfileSpec) -> float:
 def section_positions(
     spec: GateProfileSpec, cell_mm: float = FINE_CELL_MM
 ) -> list[tuple[str, float]]:
-    """Four cuts: centre, about 1/3 and 2/3 of the width (rounded to 5 mm), edge.
+    """Four cuts: centre, about 1/3 and 2/3 of the width, edge.
 
     ``w`` is the spec's own width coordinate (distance from the valve axis,
-    or from the valve-side edge for a one-sided block).
+    or from the valve-side edge for a one-sided block). The middle two are
+    rounded to 5 mm when that keeps the four strictly inside and in order;
+    a narrow exit gets the plain thirds (a 4 mm half-width would otherwise
+    round to 0, 0, 5 -- a repeated cut and one outside the pocket, Codex P2
+    on PR #104).
     """
     wmax = exit_half_width(spec)
     first = 0.0 if spec.symmetric else cell_mm
-    mid1 = 5.0 * round(wmax / 15.0)
-    mid2 = 5.0 * round(2.0 * wmax / 15.0)
     last = wmax - cell_mm
-    return [("A", first), ("B", mid1), ("C", mid2), ("D", last)]
+    mids = [5.0 * round(wmax / 15.0), 5.0 * round(2.0 * wmax / 15.0)]
+    if not first < mids[0] < mids[1] < last:
+        mids = [round(first + (last - first) * k / 3.0, 1) for k in (1, 2)]
+    return [("A", first), ("B", mids[0]), ("C", mids[1]), ("D", last)]
 
 
 def w_to_x(spec: GateProfileSpec, w: float) -> float:
@@ -233,6 +274,10 @@ _LIST_LABELS = {
 _SKIP = {"name", "units"}
 
 
+def _scale_text(s: float) -> str:
+    return f"{_fmt_num(s)}:1" if s >= 1 else f"1:{_fmt_num(1.0 / s)}"
+
+
 def _fmt_num(v: float) -> str:
     if isinstance(v, bool):
         return "はい" if v else "いいえ"
@@ -309,6 +354,7 @@ class GateDrawing:
     pocket_volume_mm3: float
     sections: tuple[tuple[str, float], ...]
     section_scale: float
+    plan_scale: float
 
 
 def _pocket_volume_mm3(field: DrawingField) -> float:
@@ -376,9 +422,21 @@ def render_gate_drawing(
         x_hi = field.x[xs.max()] + 4.0
         y_lo = -field.t_max - 3.0
         y_hi = 4.0
-        pw = (x_hi - x_lo) * PLAN_SCALE
-        ph = (y_hi - y_lo) * PLAN_SCALE
-        p_left = max(14.0, (W - 16 - pw) / 2.0) if pw < W - 40 else 14.0
+        # 1:1 unless the block is wider than the sheet (a 400 mm exit) or so
+        # deep it would crowd out the sections: then 1:2, 1:4, ... (Codex P2
+        # on PR #104 -- an oversized 1:1 axes ran off the page).
+        plan_scale = next(
+            (
+                s_
+                for s_ in PLAN_SCALES
+                if (x_hi - x_lo) * s_ <= W - 28.0 and (y_hi - y_lo) * s_ <= 80.0
+            ),
+            PLAN_SCALES[-1],
+        )
+        plan_txt = _scale_text(plan_scale)
+        pw = (x_hi - x_lo) * plan_scale
+        ph = (y_hi - y_lo) * plan_scale
+        p_left = (W - pw) / 2.0
         p_top = 34.0
         ax = axes_mm(fig, p_left, p_top, pw, ph)
         dx = field.geometry.cell_size_mm
@@ -449,11 +507,16 @@ def render_gate_drawing(
         ax.set_ylim(y_lo, y_hi)
         ax.set_aspect("auto")
         ax.set_xticks(np.arange(math.ceil(x_lo / 50) * 50, x_hi, 50))
-        ax.set_yticks(np.arange(math.ceil(y_lo / 5) * 5, y_hi, 5))
+        ystep = 5.0 if plan_scale >= 1.0 else 10.0
+        ax.set_yticks(np.arange(math.ceil(y_lo / ystep) * ystep, y_hi, ystep))
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
         frame.text(
-            p_left, p_top - 2.0, "平面図 1:1（x = 0 はバルブ軸、y = −t）", fontsize=6.5, va="bottom"
+            p_left,
+            p_top - 2.0,
+            f"平面図 {plan_txt}（x = 0 はバルブ軸、y = −t）",
+            fontsize=6.5,
+            va="bottom",
         )
 
         # ---- sections: 5:1 when two columns fit, smaller otherwise ----
@@ -487,7 +550,7 @@ def render_gate_drawing(
             frame.text(
                 left,
                 top - 2.0,
-                f"{lab}–{lab} 断面 {_fmt_num(scale)}:1　w = {_fmt_num(w)}"
+                f"{lab}–{lab} 断面 {_scale_text(scale)}　w = {_fmt_num(w)}"
                 + (f"（{where}）" if where else ""),
                 fontsize=6.5,
                 va="bottom",
@@ -496,13 +559,13 @@ def render_gate_drawing(
 
         # ---- notes, right of the sections ----
         notes = [
-            f"平面図 1:1、断面 {_fmt_num(scale)}:1（縦横とも）。単位 mm。",
+            f"平面図 {plan_txt}、断面 {_scale_text(scale)}（縦横とも）。単位 mm。",
             "深さはパーティングラインからの深さ。",
             "斜線: ランド（深さ = ランド深さ）。",
             f"細線: 深さ {_fmt_num(CONTOUR_STEP_MM)} mm ごとの等深線。",
             "破線の円: バルブゲート。一点鎖線: 断面の位置。",
             "断面の点線: ランド深さと斜面の上限深さ。",
-            f"網目 {_fmt_num(FINE_CELL_MM)} mm で組んだ形状を描いている"
+            f"網目 {_fmt_num(field.geometry.cell_size_mm)} mm で組んだ形状を描いている"
             + (f"（解析は {_fmt_num(solver_cell_mm)} mm）。" if solver_cell_mm else "。"),
             "アプリの入力から自動で作図した。",
             "寸法は寸法表を正とする。",
@@ -544,7 +607,7 @@ def render_gate_drawing(
         frame.text(
             bx + 2,
             by + 13.2,
-            f"尺度　平面 1:1／断面 {_fmt_num(scale)}:1　　単位 mm",
+            f"尺度　平面 {plan_txt}／断面 {_scale_text(scale)}　　単位 mm",
             fontsize=6,
             va="center",
         )
@@ -568,6 +631,7 @@ def render_gate_drawing(
         pocket_volume_mm3=vol,
         sections=tuple(secs),
         section_scale=scale,
+        plan_scale=plan_scale,
     )
 
 

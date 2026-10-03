@@ -10,9 +10,9 @@ hands the solver a flat rate, the staged widgets appear only when asked for,
 the direct-rate path still wins when chosen, and an impossible condition stops
 the run with a message instead of an exception.
 
-Since v0.50.0 the page opens on the direct rate (589 cm³/s) and the layered
-wall model (user's call, 2026-09-30). ``_app()`` therefore switches to the
-screw side and the skin wall model -- the setting every test below was written
+Since v0.57.0 the page opens on the screw side (Φ50 × 200 mm/s, one stage;
+user's call, 2026-10-03) with the layered wall model. ``_app()`` additionally
+switches to the skin wall model -- the setting every test below was written
 against (the skin clock radio only exists under the skin model);
 ``_page_as_opened()`` is the untouched page.
 
@@ -117,13 +117,15 @@ def _quick(at: AppTest) -> None:
 STAGED_ONLY = {"inj_meter_pos", "inj_vp_pos", "inj_switch_0", "inj_velocity_0"}
 
 
-def test_the_page_opens_on_the_direct_rate_589():
-    """v0.50.0: the direct rate is the opening input (user's call)."""
+def test_the_page_opens_on_the_screw_side_one_stage():
+    """v0.57.0: the page opens on Φ50 × 200 mm/s, one stage (user's call, 2026-10-03)."""
     at = _page_as_opened()
-    assert at.radio(key="inj_mode").value == "direct"
-    assert at.slider(key="inj_Q_direct").value == 589.0
-    assert "inj_screw_d" not in _keys(at)
-    assert "inj_num_stages" not in _keys(at)
+    assert at.radio(key="inj_mode").value == "machine"
+    assert at.number_input(key="inj_screw_d").value == DEF_SCREW_D
+    assert at.number_input(key="inj_num_stages").value == DEF_STAGES == 1
+    assert at.number_input(key="inj_velocity").value == DEF_VELOCITY
+    assert "inj_Q_direct" not in {str(s.key) for s in at.slider}
+    assert f"{DEF_Q:.1f} cm³/s" in _captions(at)
 
 
 def test_the_screw_side_opens_on_one_stage_with_diameter_and_speed_only():

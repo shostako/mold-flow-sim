@@ -214,6 +214,12 @@ def section_profile(field: DrawingField, x_mm: float) -> tuple[np.ndarray, np.nd
     return t[order], d[order]
 
 
+def column_w(spec: GateProfileSpec, field: DrawingField, x_mm: float) -> float:
+    """The spec width ``w`` of the column :func:`section_profile` reads for ``x_mm``."""
+    xc = float(field.x[int(np.argmin(np.abs(field.x - x_mm)))])
+    return abs(xc) if spec.symmetric else xc + spec.valve.w
+
+
 # ----------------------------- the spec table -----------------------------
 _LABELS = {
     "symmetric": "左右対称",
@@ -348,6 +354,225 @@ def spec_rows(spec: GateProfileSpec, plate: ProfilePlateConfig) -> list[tuple[st
     return rows
 
 
+# ------------------------------- dimensions -------------------------------
+@dataclass(frozen=True)
+class Dim:
+    """One dimension on the sheet.
+
+    ``exact`` is True when the number is the spec's own value (the reading
+    off the drawing mesh agreed with it within a cell); False when it was
+    read off the mesh, which is what happens wherever a feature the closed
+    forms below do not model (a ramp cut, an island, a rounded corner, ...)
+    shapes that section. Inexact numbers print with a leading ``≈``.
+    """
+
+    view: str  # "平面" or the section label "A".."D"
+    name: str
+    value: float
+    exact: bool
+
+    def text(self) -> str:
+        s = f"{self.value:.2f}".rstrip("0").rstrip(".")
+        return s if self.exact else f"≈{s}"
+
+
+def land_end_t(spec: GateProfileSpec, w: float) -> float:
+    """``L(w)``: where the land ends at width ``w`` (the land profile, if any)."""
+    lp = spec.land.profile
+    if lp is None:
+        return spec.land.length
+    frac = min(max(1.0 - max(w, 0.0) / exit_half_width(spec), 0.0), 1.0)
+    return spec.land.length + (lp.center_length - spec.land.length) * frac**lp.power
+
+
+def cap_reach(spec: GateProfileSpec, w: float) -> tuple[float, float]:
+    """``(t, depth)`` where the main ramp tops out at width ``w``: the cap line,
+    graded at the ends (``ramp_ends``) and shifted by the land profile."""
+    t_c = spec.ramp_cap_t()
+    d_c = spec.main_ramp.cap_depth
+    re_ = spec.ramp_ends
+    W = exit_half_width(spec)
+    if re_ is not None and w >= re_.w_from - 1e-9:
+        frac = (min(w, W) - re_.w_from) / max(W - re_.w_from, 1e-12)
+        t_c = t_c + (re_.t_end - t_c) * frac
+        if re_.depth_end is not None:
+            d_c = d_c + (re_.depth_end - d_c) * frac
+    return t_c + land_end_t(spec, w) - spec.land.length, d_c
+
+
+def wall_end_t(spec: GateProfileSpec, w: float) -> float | None:
+    """t where the outer wall line reaches width ``w`` (single-pocket specs)."""
+    if spec.outer_wall_line is None:
+        return None
+    (t1, w1), (t2, w2) = spec.outer_wall_line
+    if abs(w1 - w2) < 1e-12 or w > w1:
+        return None
+    return t1 + (w1 - w) * (t2 - t1) / (w1 - w2)
+
+
+def _snap(meas: float, candidates, tol: float) -> tuple[float, bool]:
+    best = None
+    for c in candidates:
+        if (
+            c is not None
+            and abs(c - meas) <= tol
+            and (best is None or abs(c - meas) < abs(best - meas))
+        ):
+            best = c
+    return (best, True) if best is not None else (meas, False)
+
+
+@dataclass(frozen=True)
+class SectionDims:
+    land_end: Dim | None
+    cap_reach: Dim | None
+    pocket_end: Dim | None
+    cap_depth: Dim | None
+    max_depth: Dim | None
+    angle_deg: Dim | None
+
+
+def section_dims(
+    spec: GateProfileSpec,
+    label: str,
+    w: float,
+    t: np.ndarray,
+    d: np.ndarray,
+    dx: float,
+    w_col: float | None = None,
+) -> SectionDims:
+    """Read the section's key positions off the profile and snap them to the spec.
+
+    Boundaries are read as the midpoint between the last cell on one side and
+    the first on the other (error ≤ dx/2), then replaced by the closed-form
+    value when that lies within a cell -- so a plain section prints the spec's
+    numbers and a section reshaped by a feature prints what is drawn.
+    ``w`` is the nominal cut (the closed forms are reported there); ``w_col``
+    is the width of the column actually drawn, within half a cell of ``w``,
+    which sets the depth the profile is tested against (a graded cap depth
+    differs between the two).
+    """
+    w_col = w if w_col is None else w_col
+    none = SectionDims(None, None, None, None, None, None)
+    pocket = d > 0
+    if not pocket.any():
+        return none
+    i0 = int(np.argmax(pocket))
+    i1 = i0
+    while i1 + 1 < len(d) and pocket[i1 + 1]:
+        i1 += 1
+    st, sd = t[i0 : i1 + 1], d[i0 : i1 + 1]
+    land = spec.land.depth
+    tc_x, dc_x = cap_reach(spec, w)
+    dc_col = cap_reach(spec, w_col)[1]
+    l_x = land_end_t(spec, w)
+
+    land_dim = None
+    above = np.where(sd > land + 1e-6)[0]
+    if i0 == 0 and len(above) and above[0] > 0 and np.allclose(sd[: above[0]], land):
+        v, ex = _snap(float(st[above[0]] - dx / 2), [l_x], dx)
+        land_dim = Dim(label, "ランド長", v, ex)
+
+    cap_dim = cap_d_dim = None
+    reach = np.where(sd >= dc_col - 1e-6)[0]
+    if len(reach) and reach[0] > 0:
+        v, ex = _snap(float(st[reach[0]] - dx / 2), [tc_x], dx)
+        cap_dim = Dim(label, "上限深さに達する t", v, ex)
+        cap_d_dim = Dim(label, "上限深さ", dc_x, True)
+
+    cands = [wall_end_t(spec, w), spec.t_max()]
+    if spec.well is not None:
+        cands.append(spec.well.t_range[1])
+    v, ex = _snap(float(st[-1] + dx / 2), cands, dx)
+    end_dim = Dim(label, "ポケットの奥", v, ex)
+
+    dmax = float(sd.max())
+    max_dim = None
+    if dmax > max(dc_x, dc_col) + 1e-6:
+        dc = [spec.well.depth if spec.well is not None else None]
+        if spec.ramp_cut is not None:
+            dc.append(spec.ramp_cut.depth)
+        if spec.runner is not None:
+            dc.append(spec.runner.depth)
+        v, ex = _snap(dmax, dc, 1e-6)
+        max_dim = Dim(label, "最大深さ", v, ex)
+
+    ang = None
+    if land_dim is not None and cap_dim is not None and cap_dim.value > land_dim.value:
+        a = math.degrees(math.atan((dc_x - land) / (cap_dim.value - land_dim.value)))
+        ang = Dim(label, "斜面角度", a, land_dim.exact and cap_dim.exact)
+    return SectionDims(land_dim, cap_dim, end_dim, cap_d_dim, max_dim, ang)
+
+
+def plan_dims(spec: GateProfileSpec) -> list[Dim]:
+    """The plan view's dimensions, straight from the spec."""
+    out = [Dim("平面", "ゲート出口幅", spec.gate_exit_width, True)]
+    if spec.land.closed_line is not None:
+        (t1, w1), (t2, w2) = spec.land.closed_line
+        w0 = w1 if t1 >= 0 else w1 + (w2 - w1) * (0 - t1) / (t2 - t1)
+        out.append(Dim("平面", "閉鎖幅（製品側）", 2 * w0 if spec.symmetric else w0, True))
+    if spec.outer_wall_line is not None:
+        out.append(Dim("平面", "外壁の始点 t（端）", spec.outer_wall_line[0][0], True))
+    out.append(Dim("平面", "ブロックの奥行き", spec.t_max(), True))
+    out.append(Dim("平面", "バルブ位置 t", spec.valve.t, True))
+    return out
+
+
+def _hdim(ax, x0, x1, y, text, *, ext=None, fs=5.0, color="#222"):
+    """Horizontal dimension line from x0 to x1 at y (data units) with the text above."""
+    ax.annotate(
+        "",
+        xy=(x0, y),
+        xytext=(x1, y),
+        arrowprops=dict(
+            arrowstyle="<->", lw=0.35, color=color, shrinkA=0, shrinkB=0, mutation_scale=4
+        ),
+        zorder=8,
+    )
+    if ext is not None:
+        for x in (x0, x1):
+            ax.plot([x, x], [ext, y], color=color, lw=0.25, zorder=8)
+    ax.text(
+        (x0 + x1) / 2,
+        y,
+        text,
+        ha="center",
+        va="bottom",
+        fontsize=fs,
+        color=color,
+        zorder=9,
+        bbox=dict(fc="white", ec="none", pad=0.15, alpha=0.85),
+    )
+
+
+def _vdim(ax, x, y0, y1, text, *, ext=None, fs=5.0, color="#222", side="left"):
+    """Vertical dimension line from y0 to y1 at x with the text beside it."""
+    ax.annotate(
+        "",
+        xy=(x, y0),
+        xytext=(x, y1),
+        arrowprops=dict(
+            arrowstyle="<->", lw=0.35, color=color, shrinkA=0, shrinkB=0, mutation_scale=4
+        ),
+        zorder=8,
+    )
+    if ext is not None:
+        for y in (y0, y1):
+            ax.plot([ext, x], [y, y], color=color, lw=0.25, zorder=8)
+    ax.text(
+        x,
+        (y0 + y1) / 2,
+        f" {text} ",
+        ha="right" if side == "left" else "left",
+        va="center",
+        fontsize=fs,
+        color=color,
+        rotation=0,
+        zorder=9,
+        bbox=dict(fc="white", ec="none", pad=0.1, alpha=0.85),
+    )
+
+
 # ------------------------------- rendering --------------------------------
 @dataclass(frozen=True)
 class GateDrawing:
@@ -358,6 +583,7 @@ class GateDrawing:
     sections: tuple[tuple[str, float], ...]
     section_scale: float
     plan_scale: float
+    dims: tuple[Dim, ...] = ()
 
 
 def _pocket_volume_mm3(field: DrawingField) -> float:
@@ -421,10 +647,10 @@ def render_gate_drawing(
 
         # ---- plan, 1:1 ----
         ys, xs = np.where(np.isfinite(field.depth))
-        x_lo = field.x[xs.min()] - 4.0
+        x_lo = field.x[xs.min()] - 13.0  # room for the vertical dimensions
         x_hi = field.x[xs.max()] + 4.0
         y_lo = -field.t_max - 3.0
-        y_hi = 4.0
+        y_hi = 10.0  # room for the exit width and closure dimensions
         # 1:1 unless the block is wider than the sheet (a 400 mm exit) or so
         # deep it would crowd out the sections: then 1:2, 1:4, ... (Codex P2
         # on PR #104 -- an oversized 1:1 axes ran off the page).
@@ -506,6 +732,53 @@ def render_gate_drawing(
             ax.text(
                 xc, y_lo + 0.6, lab, color="#c8551b", fontsize=6, ha="center", va="bottom", zorder=6
             )
+        # ---- plan dimensions ----
+        dims: list[Dim] = []
+        pd = plan_dims(spec)
+        dims.extend(pd)
+        by = {d_.name: d_ for d_ in pd}
+        wmax = exit_half_width(spec)
+        xa, xb = (
+            (w_to_x(spec, -wmax), w_to_x(spec, wmax))
+            if spec.symmetric
+            else (w_to_x(spec, 0.0), w_to_x(spec, wmax))
+        )
+        _hdim(ax, xa, xb, 7.0, by["ゲート出口幅"].text(), ext=0.0)
+        if "閉鎖幅（製品側）" in by:
+            cw = by["閉鎖幅（製品側）"].value
+            ca, cb = (-cw / 2, cw / 2) if spec.symmetric else (w_to_x(spec, 0.0), w_to_x(spec, cw))
+            _hdim(ax, ca, cb, 3.0, by["閉鎖幅（製品側）"].text(), ext=0.0)
+        x_left = field.x[xs.min()]
+        if "外壁の始点 t（端）" in by:
+            _vdim(
+                ax,
+                x_left - 3.0,
+                0.0,
+                -by["外壁の始点 t（端）"].value,
+                by["外壁の始点 t（端）"].text(),
+                ext=x_left,
+            )
+        _vdim(
+            ax,
+            x_left - 8.0,
+            0.0,
+            -by["ブロックの奥行き"].value,
+            by["ブロックの奥行き"].text(),
+            ext=x_left,
+        )
+        if vm is not None:
+            vx = vm[0] - x0
+            r_off = (spec.well.half_width if spec.well is not None else vm[2]) + 3.0
+            _vdim(ax, vx + r_off, 0.0, -spec.valve.t, by["バルブ位置 t"].text(), side="right")
+            ax.text(
+                vx + vm[2] + 0.3,
+                -spec.valve.t - vm[2] - 0.3,
+                f"Φ{_fmt_num(spec.valve.orifice_diameter)}",
+                fontsize=4.8,
+                ha="left",
+                va="top",
+                zorder=9,
+            )
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
         ax.set_aspect("auto")
@@ -525,14 +798,17 @@ def render_gate_drawing(
         # ---- sections: 5:1 when two columns fit, smaller otherwise ----
         t_hi = field.t_max + 1.0
         d_hi = dmax + 0.6
-        scale = next((s_ for s_ in (5.0, 4.0, 3.0, 2.0) if 2 * t_hi * s_ + 22.0 <= 310.0), 1.0)
-        sw = t_hi * scale
-        sh = d_hi * scale
-        s_top0 = p_top + ph + 14.0
+        sec_h = d_hi + 1.6  # with the dimension band above the PL
+        scale = next(
+            (s_ for s_ in (5.0, 4.0, 3.0, 2.0) if 2 * (t_hi + 2.2) * s_ + 22.0 <= 380.0), 1.0
+        )
+        sw = (t_hi + 2.2) * scale
+        sh = sec_h * scale
+        s_top0 = p_top + ph + 16.0
         cols = (20.0, 20.0 + sw + 22.0)
         for k, (lab, w) in enumerate(secs):
             left = cols[k % 2]
-            top = s_top0 + (k // 2) * (sh + 18.0)
+            top = s_top0 + (k // 2) * (sh + 20.0)
             sa = axes_mm(fig, left, top, sw, sh)
             tt, dd = section_profile(field, w_to_x(spec, w))
             sa.fill_between(tt, 0.0, dd, step="mid", color="#dbe8f5", lw=0, zorder=1)
@@ -541,8 +817,51 @@ def render_gate_drawing(
             sa.axhline(0.0, color="k", lw=0.8, zorder=3)
             sa.axhline(spec.land.depth, color="#1d5c9e", lw=0.3, ls=":", zorder=2)
             sa.axhline(spec.main_ramp.cap_depth, color="#1d5c9e", lw=0.3, ls=":", zorder=2)
-            sa.set_xlim(0.0, t_hi)
-            sa.set_ylim(d_hi, -0.0001)
+            # The closed forms are read at the column actually drawn (within
+            # half a cell of the nominal w), so a graded cap depth matches.
+            sdims = section_dims(
+                spec,
+                lab,
+                w,
+                tt,
+                dd,
+                field.geometry.cell_size_mm,
+                w_col=column_w(spec, field, w_to_x(spec, w)),
+            )
+            dims.extend(d_ for d_ in sdims.__dict__.values() if d_ is not None)
+            lv = (-0.35, -0.8, -1.25)
+            if sdims.land_end is not None:
+                _hdim(sa, 0.0, sdims.land_end.value, lv[0], sdims.land_end.text(), ext=0.0)
+            if sdims.cap_reach is not None:
+                _hdim(sa, 0.0, sdims.cap_reach.value, lv[1], sdims.cap_reach.text(), ext=0.0)
+            if sdims.pocket_end is not None:
+                _hdim(sa, 0.0, sdims.pocket_end.value, lv[2], sdims.pocket_end.text(), ext=0.0)
+            _vdim(sa, -0.45, 0.0, spec.land.depth, _fmt_num(spec.land.depth))
+            if sdims.cap_depth is not None:
+                _vdim(sa, -1.3, 0.0, sdims.cap_depth.value, sdims.cap_depth.text())
+            if sdims.max_depth is not None:
+                _vdim(
+                    sa, t_hi - 0.4, 0.0, sdims.max_depth.value, sdims.max_depth.text(), side="left"
+                )
+            if (
+                sdims.angle_deg is not None
+                and sdims.land_end is not None
+                and sdims.cap_reach is not None
+            ):
+                tm = (sdims.land_end.value + sdims.cap_reach.value) / 2
+                dm = (spec.land.depth + sdims.cap_depth.value) / 2
+                sa.text(
+                    tm + 0.4,
+                    dm - 0.15,
+                    f"{sdims.angle_deg.text()}°",
+                    fontsize=5,
+                    ha="left",
+                    va="bottom",
+                    zorder=9,
+                    bbox=dict(fc="white", ec="none", pad=0.1, alpha=0.85),
+                )
+            sa.set_xlim(-2.2, t_hi)
+            sa.set_ylim(d_hi, -1.6)
             sa.set_xticks(np.arange(0, t_hi, 5))
             sa.set_xticks(np.arange(0, t_hi, 1), minor=True)
             sa.set_yticks(np.arange(0, d_hi, 0.5 if d_hi < 8 else 1.0))
@@ -558,9 +877,9 @@ def render_gate_drawing(
                 fontsize=6.5,
                 va="bottom",
             )
-        s_bottom = s_top0 + 2 * (sh + 18.0)
+        s_bottom = s_top0 + 2 * (sh + 20.0)
 
-        # ---- notes, right of the sections ----
+        # ---- notes, bottom left beside the title block ----
         notes = [
             f"平面図 {plan_txt}、断面 {_scale_text(scale)}（縦横とも）。単位 mm。",
             "深さはパーティングラインからの深さ。",
@@ -571,12 +890,17 @@ def render_gate_drawing(
             f"網目 {_fmt_num(field.geometry.cell_size_mm)} mm で組んだ形状を描いている"
             + (f"（解析は {_fmt_num(solver_cell_mm)} mm）。" if solver_cell_mm else "。"),
             "アプリの入力から自動で作図した。",
+            "寸法の ≈ は網目から読んだ値（spec の式と形が合わない所）。",
             "寸法は寸法表を正とする。",
         ]
-        n_left = cols[1] + sw + 14.0
-        frame.text(n_left, s_top0 - 2.0, "注記", fontsize=6.5, va="bottom")
+        n_top = H - 14.0 - 26.0 + 1.0
+        frame.text(14.0, n_top - 1.5, "注記", fontsize=6.5, va="bottom")
+        per = math.ceil(len(notes) / 2)
         for i, s_ in enumerate(notes):
-            frame.text(n_left, s_top0 + 2.5 + i * 3.8, f"・{s_}", fontsize=5.8, va="center")
+            c, r = divmod(i, per)
+            frame.text(
+                14.0 + c * 128.0, n_top + 2.5 + r * 3.6, f"・{s_}", fontsize=5.6, va="center"
+            )
 
         # ---- table, full width under the sections ----
         rows = spec_rows(spec, plate)
@@ -635,6 +959,7 @@ def render_gate_drawing(
         sections=tuple(secs),
         section_scale=scale,
         plan_scale=plan_scale,
+        dims=tuple(dims),
     )
 
 

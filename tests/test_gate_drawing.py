@@ -404,3 +404,15 @@ def test_a_section_with_a_steel_gap_measures_the_back_and_depth_over_all_runs():
     last_pocket = t[d > 0].max()
     assert sd.pocket_end.value == pytest.approx(last_pocket, abs=f.geometry.cell_size_mm)
     assert sd.max_depth is not None and sd.max_depth.value == pytest.approx(spec.well.depth)
+
+
+def test_the_deepest_point_can_sit_in_the_first_run():
+    """Synthetic: a deep first run, steel, then a shallow run -- the max is the first."""
+    t = np.arange(0.05, 20.0, 0.1)
+    d = np.where(
+        t < 1.0, 0.35, np.where(t < 8.0, 3.0, np.where(t < 10.0, 0.0, np.where(t < 15.0, 1.0, 0.0)))
+    )
+    sd = gd.section_dims(_spec(), "X", 50.0, t, d, 0.1)
+    assert sd.max_depth is not None and sd.max_depth.value == pytest.approx(3.0)
+    assert sd.pocket_end.value == pytest.approx(15.0, abs=0.1)
+    assert not sd.pocket_end.exact  # 15 is none of the spec's candidates at w = 50

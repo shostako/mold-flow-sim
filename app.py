@@ -3548,6 +3548,7 @@ def _gate_drawing_cached(
 
 def _gate_drawing_panel(src, title: str) -> None:
     """Expander with the drawing of the current spec-based shape."""
+    st.session_state.pop("mfs_gate_drawing", None)
     if src is None:
         return
     spec_d, plate_d, dx_d, file_tag = src
@@ -3564,6 +3565,9 @@ def _gate_drawing_panel(src, title: str) -> None:
             pdf, png = _gate_drawing_cached(
                 spec_key(spec_d, plate_d), title, float(dx_d), build_label()
             )
+        # What is on screen, for the tests: the element type of ``st.image``
+        # differs between Streamlit versions, the session state does not.
+        st.session_state["mfs_gate_drawing"] = (spec_key(spec_d, plate_d), pdf)
         st.image(png)
         st.download_button(
             "図面 PDF をダウンロード",

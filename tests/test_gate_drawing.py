@@ -393,3 +393,14 @@ def test_a_section_through_steel_has_no_dimensions():
     t = np.linspace(0.05, 27.45, 275)
     sd = gd.section_dims(_spec(), "X", 0.0, t, np.zeros_like(t), 0.1)
     assert all(v is None for v in sd.__dict__.values())
+
+
+def test_a_section_with_a_steel_gap_measures_the_back_and_depth_over_all_runs():
+    """The twin-fan centre: land, a steel diamond, then the well (Codex P1 on PR #106)."""
+    spec = GateProfileSpec.from_json((DATA / "demo_twin_fan_gate.json").read_text())
+    f = gd.drawing_field(spec, PLATE)
+    t, d = gd.section_profile(f, 0.0)
+    sd = gd.section_dims(spec, "A", 0.0, t, d, f.geometry.cell_size_mm)
+    last_pocket = t[d > 0].max()
+    assert sd.pocket_end.value == pytest.approx(last_pocket, abs=f.geometry.cell_size_mm)
+    assert sd.max_depth is not None and sd.max_depth.value == pytest.approx(spec.well.depth)

@@ -483,10 +483,14 @@ def section_dims(
     cands = [wall_end_t(spec, w), spec.t_max()]
     if spec.well is not None:
         cands.append(spec.well.t_range[1])
-    v, ex = _snap(float(st[-1] + dx / 2), cands, dx)
+    # The back of the pocket and its deepest point are read over every pocket
+    # cell of the section, not just the first run: a fan's centre section has
+    # the land, a steel gap, then the well (Codex P1 on PR #106).
+    last = int(np.where(pocket)[0][-1])
+    v, ex = _snap(float(t[last] + dx / 2), cands, dx)
     end_dim = Dim(label, "ポケットの奥", v, ex)
 
-    dmax = float(sd.max())
+    dmax = float(d[pocket].max())
     max_dim = None
     if dmax > max(dc_x, dc_col) + 1e-6:
         dc = [spec.well.depth if spec.well is not None else None]

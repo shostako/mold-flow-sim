@@ -315,3 +315,81 @@ def test_spec_key_is_stable_and_shape_sensitive():
         "land": {**LANDHANGER["land"], "profile": {"center_length": 6.0, "power": 2.0}},
     }
     assert a != gd.spec_key(_spec(other), PLATE)
+
+
+# ------------------------------ dimensions --------------------------------
+def _dims(d: dict | None = None) -> dict[tuple[str, str], gd.Dim]:
+    g = gd.render_gate_drawing(_spec(d), PLATE, title="dims")
+    return {(x.view, x.name): x for x in g.dims}
+
+
+def test_plan_dimensions_are_the_spec_values():
+    dims = _dims()
+    assert dims[("平面", "ゲート出口幅")].value == 298.0
+    assert dims[("平面", "外壁の始点 t（端）")].value == pytest.approx(15.736241)
+    assert dims[("平面", "ブロックの奥行き")].value == pytest.approx(27.5)
+    assert dims[("平面", "バルブ位置 t")].value == 21.5
+    assert all(x.exact for (v, _), x in dims.items() if v == "平面")
+    assert ("平面", "閉鎖幅（製品側）") not in dims
+
+
+def test_land_profile_sections_print_the_closed_form_values():
+    """Centre: land 5, cap at 16, well 4.5 deep to 27.5. Edge: land 1, cap at 12."""
+    dims = _dims()
+    assert dims[("A", "ランド長")].value == pytest.approx(5.0, abs=1e-3)
+    assert dims[("A", "上限深さに達する t")].value == pytest.approx(16.0, abs=1e-3)
+    assert dims[("A", "ポケットの奥")].value == pytest.approx(27.5)
+    assert dims[("A", "最大深さ")].value == 4.5
+    assert dims[("D", "ランド長")].value == pytest.approx(1.0, abs=1e-3)
+    assert dims[("D", "上限深さに達する t")].value == pytest.approx(12.0, abs=1e-3)
+    for lab in "ABCD":
+        assert dims[(lab, "斜面角度")].value == pytest.approx(RAMP_DEG, abs=0.01)
+    assert all(x.exact for x in dims.values())
+
+
+def test_graded_ends_and_a_closure_are_dimensioned():
+    graded = {
+        **LANDHANGER,
+        "land": {"depth": 0.35, "length": 1.0, "closed_line": [[0.0, 50.0], [1.0, 47.644148]]},
+        "ramp_ends": {"w_from": 60.0, "t_end": 2.5, "depth_end": 3.5},
+    }
+    dims = _dims(graded)
+    assert dims[("平面", "閉鎖幅（製品側）")].value == pytest.approx(100.0)
+    d_cap = dims[("D", "上限深さ")]
+    t_cap = dims[("D", "上限深さに達する t")]
+    assert d_cap.value == pytest.approx(3.5, abs=0.01) and t_cap.exact
+    assert t_cap.value == pytest.approx(2.5, abs=0.05)
+    # The centre is closed at the land: no land length there, the rest still reads.
+    assert ("A", "ランド長") not in dims and ("A", "ポケットの奥") in dims
+
+
+def test_a_feature_without_a_closed_form_prints_what_is_drawn_with_approx():
+    """A ramp cut (Film gate 10) reshapes the edge: the cap is reached earlier."""
+    cut = {
+        **LANDHANGER,
+        "land": {"depth": 0.35, "length": 1.0},
+        "ramp_cut": {
+            "line": [[7.451, 149.0], [12.1126, 60.0]],
+            "depth": 2.5,
+            "slope_angle_deg": 20.0,
+        },
+    }
+    dims = _dims(cut)
+    t_cap = dims[("D", "上限深さに達する t")]
+    assert not t_cap.exact and t_cap.text().startswith("≈")
+    assert t_cap.value < 12.0 - 1.0
+    assert dims[("B", "上限深さに達する t")].exact  # inside the uncut 120 mm
+
+
+def test_dim_text_and_snapping():
+    assert gd.Dim("A", "x", 5.0, True).text() == "5"
+    assert gd.Dim("A", "x", 7.456, False).text() == "≈7.46"
+    assert gd._snap(5.04, [5.0, 6.0], 0.1) == (5.0, True)
+    assert gd._snap(5.3, [5.0], 0.1) == (5.3, False)
+    assert gd._snap(5.0, [None], 0.1) == (5.0, False)
+
+
+def test_a_section_through_steel_has_no_dimensions():
+    t = np.linspace(0.05, 27.45, 275)
+    sd = gd.section_dims(_spec(), "X", 0.0, t, np.zeros_like(t), 0.1)
+    assert all(v is None for v in sd.__dict__.values())

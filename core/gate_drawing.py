@@ -443,6 +443,11 @@ def section_dims(
 ) -> SectionDims:
     """Read the section's key positions off the profile and snap them to the spec.
 
+    The land, the ramp and the cap are read on the first pocket run from the
+    product edge; a ramp that only starts behind a steel gap is not
+    dimensioned (the dimensions are missing, never wrong). The back of the
+    pocket and the deepest point are read over every run.
+
     Boundaries are read as the midpoint between the last cell on one side and
     the first on the other (error ≤ dx/2), then replaced by the closed-form
     value when that lies within a cell -- so a plain section prints the spec's
@@ -480,9 +485,19 @@ def section_dims(
         cap_dim = Dim(label, "上限深さに達する t", v, ex)
         cap_d_dim = Dim(label, "上限深さ", dc_x, True)
 
-    cands = [wall_end_t(spec, w), spec.t_max()]
-    if spec.well is not None:
-        cands.append(spec.well.t_range[1])
+    # t_max and the well's end are only candidates where the cut can reach
+    # them -- across the well (or with no wall line to stop it). Elsewhere a
+    # back that merely lands within a cell of t_max would print as exact
+    # (review on PR #106).
+    cands = [wall_end_t(spec, w)]
+    in_well = (
+        spec.well is not None
+        and abs(w - (spec.valve.w if not spec.symmetric else 0.0)) <= spec.well.half_width
+    )
+    if in_well or spec.outer_wall_line is None:
+        cands.append(spec.t_max())
+        if spec.well is not None:
+            cands.append(spec.well.t_range[1])
     # The back of the pocket and its deepest point are read over every pocket
     # cell of the section, not just the first run: a fan's centre section has
     # the land, a steel gap, then the well (Codex P1 on PR #106).

@@ -191,7 +191,10 @@ def section_positions(
     last = wmax - cell_mm
     mids = [5.0 * round(wmax / 15.0), 5.0 * round(2.0 * wmax / 15.0)]
     if not first < mids[0] < mids[1] < last:
-        mids = [round(first + (last - first) * k / 3.0, 1) for k in (1, 2)]
+        thirds = [first + (last - first) * k / 3.0 for k in (1, 2)]
+        mids = [round(v, 1) for v in thirds]
+        if not first < mids[0] < mids[1] < last:  # a sub-millimetre exit
+            mids = thirds
     return [("A", first), ("B", mids[0]), ("C", mids[1]), ("D", last)]
 
 
@@ -387,7 +390,7 @@ def render_gate_drawing(
         fm.fontManager.addfont(font.path)
         family = [fm.FontProperties(fname=font.path).get_name(), "DejaVu Sans"]
     date = date or _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).date()
-    secs = section_positions(spec)
+    secs = section_positions(spec, field.geometry.cell_size_mm)
     vol = _pocket_volume_mm3(field)
 
     W, H = A3_MM

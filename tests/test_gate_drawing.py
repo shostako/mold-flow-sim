@@ -84,6 +84,29 @@ def test_a_large_product_is_not_rasterised_for_the_drawing():
     assert f.geometry.ny * f.geometry.cell_size_mm < _spec().t_max() + 2 * big.pad_mm + 2.0
 
 
+def test_a_coarsened_mesh_still_cuts_the_edge_section_inside_the_pocket(monkeypatch):
+    """The edge cut steps in by the drawing mesh, not by 0.1 mm (review on PR #104).
+
+    Stepping in by one cell keeps the nearest column centre (at most half a
+    cell away) inside the exit; stepping in by 0.1 mm on a 0.4 mm mesh does
+    not, wherever the columns happen to fall.
+    """
+    monkeypatch.setattr(gd, "MAX_DRAWING_CELLS", 200_000)
+    f = gd.drawing_field(_spec(), PLATE)
+    dx = f.geometry.cell_size_mm
+    assert dx > gd.FINE_CELL_MM
+    g = gd.render_gate_drawing(_spec(), PLATE, title="coarse")
+    lab, w = g.sections[-1]
+    assert lab == "D" and w == pytest.approx(gd.exit_half_width(_spec()) - dx)
+    _t, d = gd.section_profile(f, gd.w_to_x(_spec(), w))
+    assert d.max() > 0.0
+
+
+def test_a_sub_millimetre_exit_still_has_four_distinct_cuts():
+    pos = [w for _, w in gd.section_positions(_spec({**LANDHANGER, "gate_exit_width": 0.5}), 0.05)]
+    assert pos == sorted(set(pos)) and len(pos) == 4
+
+
 def test_the_drawing_mesh_coarsens_past_the_cell_cap(monkeypatch):
     monkeypatch.setattr(gd, "MAX_DRAWING_CELLS", 200_000)
     dx = gd.drawing_cell_mm(_spec(), PLATE)

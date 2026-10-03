@@ -44,6 +44,7 @@ from core import (
     render_weldlines,
     wrap_standalone_html,
 )
+from core.gate_drawing import render_gate_drawing, spec_key
 from core.geometry import Geometry
 from core.injection_profile import InjectionProfile, InjectionStage
 from core.profile_gate import (
@@ -2802,6 +2803,7 @@ def _valve_orifice_hits_pocket(
 def _build_film_gate(entry: _FilmGate, v: dict, source: str) -> tuple[Geometry, dict]:
     spec, plate, dx = entry.assemble(entry.record_name, v)
     geom = build_profile_gate_geometry(spec, plate, cell_size_mm=dx)
+    st.session_state["mfs_gate_spec"] = (spec, plate, dx, entry.record_name)
     # The builder snaps a gate whose orifice misses the pocket to the nearest
     # masked cell. The slider bounds keep the orifice inside the pocket along
     # t; this catches the miss the bounds cannot express.
@@ -2827,6 +2829,8 @@ def build_geometry() -> tuple[Geometry, dict]:
     The settings travel with the results ZIP so a downloaded run can be
     reproduced without measuring the images and solving for the volume.
     """
+    # The spec the drawing panel draws; set by the spec-based branches below.
+    st.session_state.pop("mfs_gate_spec", None)
     if geom_source.startswith("Direct gate"):
         try:
             cfg_dg = DirectGateConfig(
@@ -2872,9 +2876,9 @@ def build_geometry() -> tuple[Geometry, dict]:
                 plate_lower_thk_mm=plate_lower_pg if plate_split_pg > 0 else None,
                 plate_upper_thk_mm=plate_upper_pg if plate_split_pg > 0 else None,
             )
-            return build_profile_gate_geometry(
-                spec_pg, plate_pg, cell_size_mm=cell_size_pg
-            ), config_settings(
+            _geom_pg = build_profile_gate_geometry(spec_pg, plate_pg, cell_size_mm=cell_size_pg)
+            st.session_state["mfs_gate_spec"] = (spec_pg, plate_pg, cell_size_pg, "profile_gate")
+            return _geom_pg, config_settings(
                 geom_source,
                 plate_pg,
                 cell_size_mm=cell_size_pg,
@@ -3520,6 +3524,56 @@ with st.sidebar:
 # ----------------------- main panel -----------------------
 
 
+@st.cache_data(max_entries=8, show_spinner=False)
+def _gate_drawing_cached(
+    key: str, title: str, solver_cell_mm: float, version: str
+) -> tuple[bytes, bytes]:
+    """The A3 drawing of one exact shape, cached on the spec + plate text.
+
+    Rendering takes a couple of seconds; the cache keeps every unrelated
+    rerun (a slider elsewhere, a solve) from paying it again, and a changed
+    shape is a new key, so the drawing on screen is always the shape that
+    will be solved.
+    """
+    d = json.loads(key)
+    drawing = render_gate_drawing(
+        GateProfileSpec.from_dict(d["spec"]),
+        ProfilePlateConfig(**d["plate"]),
+        title=title,
+        solver_cell_mm=solver_cell_mm,
+        version=version,
+    )
+    return drawing.pdf, drawing.png
+
+
+def _gate_drawing_panel(src, title: str) -> None:
+    """Expander with the drawing of the current spec-based shape."""
+    if src is None:
+        return
+    spec_d, plate_d, dx_d, file_tag = src
+    with st.expander("図面（A3 PDF）", expanded=False):
+        on = st.checkbox(
+            "図面を作る",
+            key="gate_drawing_on",
+            help="今の入力で解く形状を A3 の図面（平面図 1:1・断面 4 本・寸法表）にする。"
+            "入力を変えると描き直す。作図に数秒かかるので、必要なときだけ ON にする。",
+        )
+        if not on:
+            return
+        with st.spinner("作図中…"):
+            pdf, png = _gate_drawing_cached(
+                spec_key(spec_d, plate_d), title, float(dx_d), build_label()
+            )
+        st.image(png)
+        st.download_button(
+            "図面 PDF をダウンロード",
+            data=pdf,
+            file_name=f"{file_tag}_drawing.pdf",
+            mime="application/pdf",
+            key="gate_drawing_pdf",
+        )
+
+
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
@@ -3560,6 +3614,7 @@ with col_left:
         "フィルムゲートのゲートブロック／ランナーは y < 0 側、"
         "ダイレクトゲートのゲートは製品内（y > 0）。"
     )
+    _gate_drawing_panel(st.session_state.get("mfs_gate_spec"), geom_source)
 
 
 if do_run:

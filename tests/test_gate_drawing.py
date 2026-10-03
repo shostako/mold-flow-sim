@@ -9,6 +9,7 @@ PDF plus a preview PNG.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import re
@@ -58,16 +59,38 @@ def _spec(d: dict | None = None) -> GateProfileSpec:
 
 
 def test_the_drawing_field_is_the_solvers_builder_on_the_fine_mesh():
+    """Same builder, same block -- the product is only cut to a strip."""
     spec = _spec()
     f = gd.drawing_field(spec, PLATE)
     ref = build_profile_gate_geometry(spec, PLATE, cell_size_mm=gd.FINE_CELL_MM)
     assert f.geometry.cell_size_mm == gd.FINE_CELL_MM
-    block = (f.y < 0)[:, None] & ref.mask
-    assert np.array_equal(np.isfinite(f.depth), block)
-    assert np.array_equal(f.depth[block], ref.thickness_mm[block])
+    x0, y0 = ref.display_origin_mm()
+    y_ref = (np.arange(ref.ny) + 0.5) * ref.cell_size_mm - y0
+    rows_ref, rows = np.where(y_ref < 0)[0], np.where(f.y < 0)[0]
+    assert np.allclose(y_ref[rows_ref], f.y[rows])
+    want = np.where(ref.mask[rows_ref], ref.thickness_mm[rows_ref], np.nan)
+    assert np.array_equal(np.isfinite(f.depth[rows]), np.isfinite(want))
+    assert np.array_equal(f.depth[rows][np.isfinite(want)], want[np.isfinite(want)])
     # Display frame: x = 0 on the valve axis, the block below y = 0.
     assert f.y[np.isfinite(f.depth).any(axis=1)].max() < 0
     assert abs(f.x[np.argmin(np.abs(f.x))]) <= gd.FINE_CELL_MM
+
+
+def test_a_large_product_is_not_rasterised_for_the_drawing():
+    """A 400 × 200 plate at 0.1 mm would be ~10 M cells (Codex P2 on PR #104)."""
+    big = dataclasses.replace(PLATE, plate_w_mm=400.0, plate_h_mm=200.0)
+    f = gd.drawing_field(_spec(), big)
+    assert f.geometry.mask.size < 2_000_000
+    assert f.geometry.ny * f.geometry.cell_size_mm < _spec().t_max() + 2 * big.pad_mm + 2.0
+
+
+def test_the_drawing_mesh_coarsens_past_the_cell_cap(monkeypatch):
+    monkeypatch.setattr(gd, "MAX_DRAWING_CELLS", 200_000)
+    dx = gd.drawing_cell_mm(_spec(), PLATE)
+    assert dx > gd.FINE_CELL_MM
+    w = 2 * PLATE.pad_mm + PLATE.plate_w_mm
+    h = 2 * PLATE.pad_mm + _spec().t_max() + 1.0
+    assert (w / dx) * (h / dx) <= 200_000
 
 
 def test_the_centre_and_edge_sections_read_the_land_profile():
@@ -101,6 +124,19 @@ def test_section_positions_spread_over_the_exit_width():
     assert pos[0] > 0 and pos[-1] < one.gate_exit_width and pos == sorted(pos)
     # The one-sided block measures w from the valve-side edge.
     assert gd.w_to_x(one, 0.0) == -one.valve.w
+
+
+def test_a_narrow_exit_keeps_four_distinct_cuts_inside_the_pocket():
+    """Rounding to 5 mm would give 0, 0, 5, 3.9 for a 4 mm half-width (Codex P2)."""
+    narrow = {
+        **LANDHANGER,
+        "gate_exit_width": 8.0,
+        "land": {"depth": 0.35, "length": 1.0},
+        "outer_wall_line": [[15.0, 4.0], [23.0, 3.0]],
+    }
+    pos = [w for _, w in gd.section_positions(_spec(narrow))]
+    assert pos == sorted(set(pos)) and len(pos) == 4
+    assert 0.0 <= pos[0] and pos[-1] < 4.0
 
 
 def _leaf_paths(obj, path=""):
@@ -205,6 +241,23 @@ def test_the_reported_pocket_volume_matches_the_solver_mesh(drawing):
     assert drawing.pocket_volume_mm3 == pytest.approx(v_coarse, rel=5e-3)
     # The 10/02 drawing's own number for this pocket.
     assert drawing.pocket_volume_mm3 == pytest.approx(9731.0, abs=2.0)
+
+
+def test_a_wide_exit_drops_the_plan_to_one_half_instead_of_running_off_the_page():
+    """A 400 mm exit at 1:1 is wider than A3 (Codex P2 on PR #104)."""
+    wide = {
+        **LANDHANGER,
+        "gate_exit_width": 400.0,
+        "outer_wall_line": [[15.736241, 200.0], [23.309724, 4.489329]],
+    }
+    plate = dataclasses.replace(PLATE, plate_w_mm=400.0)
+    g = gd.render_gate_drawing(_spec(wide), plate, title="wide")
+    assert g.plan_scale == 0.5
+    assert (400.0 + 8.0) * g.plan_scale <= gd.A3_MM[0] - 28.0
+
+
+def test_the_default_block_stays_at_one_to_one(drawing):
+    assert drawing.plan_scale == 1.0
 
 
 def test_a_deep_block_shrinks_the_sections_instead_of_overflowing():

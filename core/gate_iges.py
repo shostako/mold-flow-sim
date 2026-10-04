@@ -77,6 +77,8 @@ _NAMES = {
     "OCP.BRepBuilderAPI": [
         "BRepBuilderAPI_MakeFace",
         "BRepBuilderAPI_MakePolygon",
+        "BRepBuilderAPI_MakeSolid",
+        "BRepBuilderAPI_Sewing",
         "BRepBuilderAPI_Transform",
     ],
     "OCP.BRepCheck": ["BRepCheck_Analyzer"],
@@ -92,12 +94,14 @@ _NAMES = {
     "OCP.GeomAbs": ["GeomAbs_Cone", "GeomAbs_Cylinder"],
     "OCP.gp": ["gp_Ax2", "gp_Dir", "gp_Pnt", "gp_Trsf", "gp_Vec"],
     "OCP.GProp": ["GProp_GProps"],
-    "OCP.IGESControl": ["IGESControl_Writer"],
+    "OCP.IGESControl": ["IGESControl_Reader", "IGESControl_Writer"],
     "OCP.Interface": ["Interface_Static"],
+    "OCP.ShapeCustom": ["ShapeCustom"],
+    "OCP.ShapeFix": ["ShapeFix_Solid"],
     "OCP.ShapeUpgrade": ["ShapeUpgrade_UnifySameDomain"],
     "OCP.TColgp": ["TColgp_Array2OfPnt"],
     "OCP.TColStd": ["TColStd_Array1OfInteger", "TColStd_Array1OfReal"],
-    "OCP.TopAbs": ["TopAbs_FACE", "TopAbs_SOLID"],
+    "OCP.TopAbs": ["TopAbs_FACE", "TopAbs_SHELL", "TopAbs_SOLID"],
     "OCP.TopExp": ["TopExp_Explorer"],
     "OCP.TopLoc": ["TopLoc_Location"],
     "OCP.TopoDS": ["TopoDS"],
@@ -382,8 +386,8 @@ def _frame(spec: GateProfileSpec) -> _Frame:
             deepest.append(x.depth)
     deepest += [ec.depth for ec in spec.edge_channels]
     deepest += [ec.depth for sg in spec.sub_gates for ec in sg.edge_channels]
-    if spec.island is not None:
-        isl = spec.island
+    islands = [spec.island] + [sg.island for sg in spec.sub_gates]
+    for isl in (i for i in islands if i is not None):  # a sloped band is not capped
         deepest.append(
             spec.land.depth
             + math.tan(math.radians(isl.angle_deg)) * (isl.end_dist - spec.land.length)
@@ -431,8 +435,24 @@ def _ramp_patch(spec: GateProfileSpec, fr: _Frame, w0: float, w1: float):
         def v_t(w):  # run from the land end to the cap line
             return t_c0 + (re_.t_end - t_c0) * frac(w) - L0
 
+        def v_z(w):  # depth gained over that run
+            return -(cap + (d_end - cap) * frac(w) - dL)
+
         def d_cap(w):
             return cap + (d_end - cap) * frac(w)
+
+        if cap - dL <= 1e-12:
+            # A flat main ramp: the cap line starts on the land end at w_from, where
+            # run and rise both vanish. Their ratio does not -- the graded ramp is the
+            # one plane d = land + (D_end − land)(t − L(w))/(t_end − land.length).
+            if d_end - dL <= 1e-12:
+                return land  # no ramp anywhere: the land is the floor
+
+            def v_t(w):
+                return np.full_like(np.asarray(w, dtype=float), re_.t_end - L0)
+
+            def v_z(w):
+                return np.full_like(np.asarray(w, dtype=float), -(d_end - dL))
 
         caps = _wz_prism(
             [(w0, _Z_TOP), (w1, _Z_TOP), (w1, -float(d_cap(w1))), (w0, -float(d_cap(w0)))],
@@ -440,12 +460,14 @@ def _ramp_patch(spec: GateProfileSpec, fr: _Frame, w0: float, w1: float):
             fr.t_hi,
         )
     else:
+        if cap - dL <= 1e-12:  # a flat ramp: min(ramp, cap) never leaves the land
+            return land
 
         def v_t(w):
             return np.full_like(np.asarray(w, dtype=float), (cap - dL) / max(tan, 1e-12))
 
-        def d_cap(w):
-            return np.full_like(np.asarray(w, dtype=float), cap)
+        def v_z(w):
+            return np.full_like(np.asarray(w, dtype=float), -(cap - dL))
 
         caps = _box(fr.t_lo, fr.t_hi, w0, w1, -cap, _Z_TOP)
 
@@ -484,7 +506,7 @@ def _ramp_patch(spec: GateProfileSpec, fr: _Frame, w0: float, w1: float):
     sp, _err = _w_spline(land_end, w0, w1, m=m, deg=deg)
     w_p, t_p = sp.fit(lambda w: w), sp.fit(land_end)
     vt_p = sp.fit(v_t)
-    vz_p = sp.fit(lambda w: -(d_cap(w) - dL))  # z change from the land end to the cap line
+    vz_p = sp.fit(v_z)
     # s runs from just inside the land (s0 < 0) to past the block's end (s1).
     vt_s = sp.eval(vt_p)
     s0 = -_ramp_start(spec) / float(np.max(vt_s))
@@ -772,6 +794,54 @@ def iges_bytes(shape) -> bytes:
         os.unlink(path)
 
 
+#: Sewing tolerance of the read-back: the written faces must close at this gap.
+READBACK_SEW_MM = 1e-6
+
+
+@dataclass(frozen=True)
+class ReadBack:
+    """An IGES file read back: its faces sewn, and the volume they close."""
+
+    shape: object  # the sewn faces
+    faces: int
+    free_edges: int
+    volume_mm3: float | None  # None unless the faces close into one shell
+
+
+def read_iges(data: bytes) -> ReadBack:
+    """Read IGES bytes back the way a CAD system would: transfer, sew, close."""
+    k = _k()
+    fd, path = tempfile.mkstemp(suffix=".igs")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        reader = k["IGESControl_Reader"]()
+        if reader.ReadFile(path) != 1:
+            raise RuntimeError("IGES reader failed")
+        reader.TransferRoots()
+        faces = reader.OneShape()
+    finally:
+        os.unlink(path)
+    # IGES carries a cone as a surface of revolution; give it back its cone so the
+    # read-back is meshed like the solid that was written.
+    faces = k["ShapeCustom"].SweptToElementary_s(faces)
+    sew = k["BRepBuilderAPI_Sewing"](READBACK_SEW_MM)
+    sew.Add(faces)
+    sew.Perform()
+    sewn = sew.SewedShape()
+    shells = []
+    e = k["TopExp_Explorer"](sewn, k["TopAbs_SHELL"])
+    while e.More():
+        shells.append(k["TopoDS"].Shell_s(e.Current()))
+        e.Next()
+    volume = None
+    if sew.NbFreeEdges() == 0 and len(shells) == 1:
+        fix = k["ShapeFix_Solid"](k["BRepBuilderAPI_MakeSolid"](shells[0]).Solid())
+        fix.Perform()
+        volume = abs(volume_mm3(fix.Solid()))
+    return ReadBack(sewn, _count(sewn, k["TopAbs_FACE"]), sew.NbFreeEdges(), volume)
+
+
 # ---------------------------------------------------------------------------
 # reading a solid back from above
 # ---------------------------------------------------------------------------
@@ -872,24 +942,43 @@ CHECK_TOL_MM = 2e-3
 
 @dataclass(frozen=True)
 class GateIges:
-    """An IGES of the block and how it compares with the solver's own field."""
+    """An IGES of the block, read back and compared with the solver's own field."""
 
     iges: bytes
-    volume_mm3: float
+    volume_mm3: float  # of the solid that was written
     faces: int
+    readback: ReadBack  # the file read back
     field_volume_mm3: float  # the same pocket on the check mesh
     cell_mm: float  # the check mesh
-    check: FieldCheck
+    check: FieldCheck  # the read-back file against the field
 
     @property
     def ok(self) -> bool:
-        """Same outline cell for cell, and the depths within :data:`CHECK_TOL_MM`."""
-        return self.check.outline_mismatch == 0 and self.check.max_depth_diff_mm <= CHECK_TOL_MM
+        """The file closes into the solid that was written, and that solid is the field.
+
+        Closed: every face sewn at :data:`READBACK_SEW_MM` with no free edge, one
+        shell, the volume of the solid. The field: the same outline cell for cell
+        and the depths within :data:`CHECK_TOL_MM`.
+        """
+        rb = self.readback
+        closed = (
+            rb.free_edges == 0
+            and rb.faces == self.faces
+            and rb.volume_mm3 is not None
+            and abs(rb.volume_mm3 - self.volume_mm3) <= 1e-6 * self.volume_mm3
+        )
+        return (
+            closed
+            and self.check.outline_mismatch == 0
+            and self.check.max_depth_diff_mm <= CHECK_TOL_MM
+        )
 
 
 def export_gate_iges(spec: GateProfileSpec, plate, cell_size_mm: float | None = None) -> GateIges:
-    """Build the solid, write it, and read it back against the drawing's field.
+    """Build the solid, write it, read the file back and compare it with the drawing's field.
 
+    The check reads the bytes that are handed out, not the solid they were
+    written from: a face the writer drops or a trim it alters shows up.
     ``plate`` only sets the grid the field is built on (the block depends on
     the product's width alone); ``cell_size_mm`` defaults to the drawing's
     mesh (0.1 mm unless the block is too large for it).
@@ -897,15 +986,18 @@ def export_gate_iges(spec: GateProfileSpec, plate, cell_size_mm: float | None = 
     from core.gate_drawing import drawing_field
 
     solid = build_gate_solid(spec)
+    data = iges_bytes(solid.shape)
+    back = read_iges(data)
     field = drawing_field(spec, plate, cell_size_mm)
     dx = field.geometry.cell_size_mm
     return GateIges(
-        iges=iges_bytes(solid.shape),
+        iges=data,
         volume_mm3=solid.volume_mm3,
         faces=solid.faces,
+        readback=back,
         field_volume_mm3=float(np.nansum(field.depth) * dx * dx),
         cell_mm=float(dx),
-        check=check_against_field(solid.shape, field.x, field.y, field.depth),
+        check=check_against_field(back.shape, field.x, field.y, field.depth),
     )
 
 
@@ -956,11 +1048,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     res = export_gate_iges(spec, plate_for(spec), a.cell)
     with open(a.out, "wb") as f:
         f.write(res.iges)
-    c = res.check
+    c, rb = res.check, res.readback
     print(
-        f"{a.out}: {res.faces} faces, volume {res.volume_mm3:.1f} mm3 "
-        f"(field {res.field_volume_mm3:.1f} at {res.cell_mm:g} mm); outline mismatch "
+        f"{a.out}: {res.faces} faces, volume {res.volume_mm3:.1f} mm3; read back {rb.faces} faces, "
+        f"{rb.free_edges} free edges, volume {rb.volume_mm3}; against the field at "
+        f"{res.cell_mm:g} mm ({res.field_volume_mm3:.1f} mm3): outline mismatch "
         f"{c.outline_mismatch}/{c.cells} cells, max depth difference {c.max_depth_diff_mm:.4f} mm"
+        + ("" if res.ok else "  -- NOT OK")
     )
     return 0 if res.ok else 1
 

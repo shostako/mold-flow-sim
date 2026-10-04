@@ -8,6 +8,7 @@ check does not match.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -59,9 +60,7 @@ def test_a_solid_that_does_not_match_is_not_offered(monkeypatch):
     def off_by_a_cell(spec, plate, cell_size_mm=None):
         res = real(spec, plate, cell_size_mm)
         bad = gate_iges.FieldCheck(res.check.cells, 3, res.check.max_depth_diff_mm)
-        return gate_iges.GateIges(
-            res.iges, res.volume_mm3, res.faces, res.field_volume_mm3, res.cell_mm, bad
-        )
+        return dataclasses.replace(res, check=bad)
 
     monkeypatch.setattr(gate_iges, "export_gate_iges", off_by_a_cell)
     at = _app()

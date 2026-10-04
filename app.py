@@ -3592,6 +3592,9 @@ def _gate_iges_cached(key: str) -> dict:
         "ok": res.ok,
         "faces": res.faces,
         "volume_mm3": res.volume_mm3,
+        "readback_faces": res.readback.faces,
+        "free_edges": res.readback.free_edges,
+        "readback_volume_mm3": res.readback.volume_mm3,
         "field_volume_mm3": res.field_volume_mm3,
         "cell_mm": res.cell_mm,
         "cells": res.check.cells,
@@ -3617,7 +3620,8 @@ def _gate_iges_panel(src) -> None:
             "IGES を作る",
             key="gate_iges_on",
             help="今の入力で解く形状の樹脂側を、面を一つずつ組んだ立体にして IGES に書き出す。"
-            "書き出した立体を上から読み直し、ソルバーの形と網目単位で一致するかを確かめる。"
+            "書き出したファイルを読み直して閉じた立体になるかと、上から見た形がソルバーの形と"
+            "網目単位で一致するかを確かめる。"
             "数秒かかるので、必要なときだけ ON にする。",
         )
         if not on:
@@ -3632,16 +3636,19 @@ def _gate_iges_panel(src) -> None:
                 )
                 return
         st.session_state["mfs_gate_iges"] = (key, r["iges"] if r["ok"] else None)
+        rb_vol = r["readback_volume_mm3"]
         check = (
-            f"上から読み直した形とソルバーの形（{r['cell_mm']:g} mm 網目、{r['cells']:,} セル）: "
+            f"書き出したファイルを読み直すと面 {r['readback_faces']} 枚（書いたのは "
+            f"{r['faces']} 枚）、縫い残し {r['free_edges']} 辺、体積 "
+            + (f"{rb_vol:,.1f} mm³" if rb_vol is not None else "（閉じない）")
+            + f"。上から見た形とソルバーの形（{r['cell_mm']:g} mm 網目、{r['cells']:,} セル）は"
             f"外形の食い違い {r['outline_mismatch']} セル、深さの差 最大 "
-            f"{r['max_depth_diff_mm']:.4f} mm。体積は IGES {r['volume_mm3']:,.1f} mm³、"
-            f"網目 {r['field_volume_mm3']:,.1f} mm³。"
+            f"{r['max_depth_diff_mm']:.4f} mm、網目の体積 {r['field_volume_mm3']:,.1f} mm³。"
         )
         if not r["ok"]:
             st.error("IGES がソルバーの形と一致しないので、書き出しを止めた。" + check)
             return
-        st.caption(check + f" 面 {r['faces']} 枚。")
+        st.caption(check)
         st.download_button(
             "IGES をダウンロード",
             data=r["iges"],

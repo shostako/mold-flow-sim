@@ -114,6 +114,24 @@ def _twin_with_edges() -> dict:
     return d
 
 
+def _steep_stem_island() -> dict:
+    """The T gate with a sloped island in the stem, 58° and 19 mm long: 30 mm deep.
+
+    Deeper than anything else in the spec; the frame has to reach it (Codex P2 on PR #108).
+    """
+    d = copy.deepcopy(T_GATE)
+    d["sub_gates"][1]["island"] = {
+        "angle_deg": 58.0,
+        "inner_line": [[1.0, 0.0], [20.0, 0.0]],
+        "outer_line": [[1.0, 2.0], [20.0, 1.0]],
+        "end_dist": 20.0,
+    }
+    return d
+
+
+#: A flat main ramp (cap = land) with graded ends: run and rise of the graded ramp
+#: both vanish at w_from (Codex P2 on PR #108).
+_FLAT_GRADED = {"ramp_ends": {"w_from": 60.0, "t_end": 2.5, "depth_end": 3.5}}
 _CUT_LINE = [[7.451, 149.0], [12.0, 60.0]]
 CASES = {
     "plain": PLAIN,
@@ -144,6 +162,10 @@ CASES = {
     },
     "twin fan + runner + fan island + edge channels": _twin_with_edges(),
     "T gate (fans with flat splitters)": T_GATE,
+    "T gate with a 30 mm deep stem island": _steep_stem_island(),
+    "flat main ramp + graded ends": _with(PLAIN, main_ramp__cap_depth=0.35) | _FLAT_GRADED,
+    "flat main ramp + graded ends + land profile": _with(LANDHANGER, main_ramp__cap_depth=0.35)
+    | _FLAT_GRADED,
 }
 
 
@@ -203,6 +225,39 @@ def test_the_check_tells_a_wrong_solid_from_the_right_one():
     closed = _spec(_with(LANDHANGER, land__closed_line=[[0.0, 50.0], [1.0, 47.6]]))
     fc = drawing_field(closed, PLATE, cell_size_mm=0.25)
     assert gi.check_against_field(solid, fc.x, fc.y, fc.depth).outline_mismatch > 0
+
+
+@needs_ocp
+def test_the_check_reads_the_file_that_is_handed_out(monkeypatch):
+    """A face the writer drops fails the check, though the solid it wrote from is right.
+
+    Codex P1 on PR #108: the check used to read the solid, not the file.
+    """
+    from OCP.BRep import BRep_Builder
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS_Compound
+
+    real = gi.iges_bytes
+
+    def drops_a_face(shape):
+        comp, builder = TopoDS_Compound(), BRep_Builder()
+        builder.MakeCompound(comp)
+        e = TopExp_Explorer(shape, TopAbs_FACE)
+        e.Next()  # the first face is lost
+        while e.More():
+            builder.Add(comp, e.Current())
+            e.Next()
+        return real(comp)
+
+    spec = _spec(LANDHANGER)
+    good = gi.export_gate_iges(spec, PLATE, cell_size_mm=0.5)
+    assert good.ok and good.readback.faces == good.faces and good.readback.free_edges == 0
+    monkeypatch.setattr(gi, "iges_bytes", drops_a_face)
+    bad = gi.export_gate_iges(spec, PLATE, cell_size_mm=0.5)
+    assert not bad.ok
+    assert bad.readback.faces == bad.faces - 1 and bad.readback.free_edges > 0
+    assert bad.readback.volume_mm3 is None
 
 
 @needs_ocp

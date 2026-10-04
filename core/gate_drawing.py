@@ -159,10 +159,13 @@ def drawing_field(
     if cell_size_mm is None:
         cell_size_mm = drawing_cell_mm(spec, plate)
     geom = build_profile_gate_geometry(spec, block_plate(plate), cell_size_mm=cell_size_mm)
-    x0, y0 = geom.display_origin_mm()
     dx = geom.cell_size_mm
-    x = (np.arange(geom.nx) + 0.5) * dx - x0
-    y = (np.arange(geom.ny) + 0.5) * dx - y0
+    # The frame from the builder's own layout, not ``display_origin_mm``: that reads
+    # y = 0 off the first product row's lower edge, which is the exit (t = 0) only
+    # when pad + t_max is a whole number of cells -- at 0.2 mm on a 32.5 mm block it
+    # is half a cell off, and every section and dimension with it.
+    x = (np.arange(geom.nx) + 0.5) * dx - geom.valve_axis_x_mm
+    y = (np.arange(geom.ny) + 0.5) * dx - (plate.pad_mm + spec.t_max())
     in_block = (y < 0)[:, None] & geom.mask
     depth = np.where(in_block, geom.thickness_mm, np.nan)
     return DrawingField(geometry=geom, x=x, y=y, depth=depth, t_max=float(spec.t_max()))
@@ -733,11 +736,9 @@ def render_gate_drawing(
         ax.axhline(0.0, color="k", lw=0.4, zorder=4)
         ax.text(x_lo + 1, 0.8, "製品端（t = 0）", fontsize=5, va="bottom")
         vm = field.geometry.valve_marker_mm
-        if vm is not None:
-            x0, y0 = field.geometry.display_origin_mm()
-            ax.add_patch(
-                Circle((vm[0] - x0, vm[1] - y0), vm[2], fill=False, ls="--", lw=0.5, zorder=5)
-            )
+        if vm is not None:  # the field's frame: x from the valve axis, y = −t
+            xv = vm[0] - field.geometry.valve_axis_x_mm
+            ax.add_patch(Circle((xv, -spec.valve.t), vm[2], fill=False, ls="--", lw=0.5, zorder=5))
         for lab, w in secs:
             xc = w_to_x(spec, w)
             ax.plot(
@@ -786,7 +787,7 @@ def render_gate_drawing(
             ext=x_left,
         )
         if vm is not None:
-            vx = vm[0] - x0
+            vx = vm[0] - field.geometry.valve_axis_x_mm
             r_off = (spec.well.half_width if spec.well is not None else vm[2]) + 3.0
             _vdim(ax, vx + r_off, 0.0, -spec.valve.t, by["バルブ位置 t"].text(), side="right")
             ax.text(

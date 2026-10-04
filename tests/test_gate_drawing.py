@@ -76,6 +76,24 @@ def test_the_drawing_field_is_the_solvers_builder_on_the_fine_mesh():
     assert abs(f.x[np.argmin(np.abs(f.x))]) <= gd.FINE_CELL_MM
 
 
+def test_the_field_frame_is_the_exit_on_a_mesh_that_does_not_divide_the_block():
+    """y = −t exactly, also when pad + t_max (32.5) is not a whole number of cells.
+
+    The field used to take y = 0 from the first product row's lower edge,
+    half a cell off the exit at 0.2 mm: the land read 0.1 mm long.
+    """
+    spec = _spec()
+    f = gd.drawing_field(spec, PLATE, cell_size_mm=0.2)
+    col = int(np.argmin(np.abs(f.x - 0.1)))  # next to the valve axis: land 5 mm long
+    tan = math.tan(math.radians(spec.main_ramp.angle_deg))
+    for t in (4.8, 5.0, 5.2, 5.4):
+        row = int(np.argmin(np.abs(f.y + t)))
+        assert f.y[row] == pytest.approx(-t)
+        extra = 4.0 * (1.0 - abs(f.x[col]) / 149.0) ** 2  # land 1 + 4(1 − w/149)²
+        want = 0.35 + tan * max(0.0, t - (1.0 + extra))
+        assert f.depth[row, col] == pytest.approx(want, abs=1e-9)
+
+
 def test_a_large_product_is_not_rasterised_for_the_drawing():
     """A 400 × 200 plate at 0.1 mm would be ~10 M cells (Codex P2 on PR #104)."""
     big = dataclasses.replace(PLATE, plate_w_mm=400.0, plate_h_mm=200.0)

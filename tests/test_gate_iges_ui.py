@@ -72,6 +72,26 @@ def test_a_solid_that_does_not_match_is_not_offered(monkeypatch):
     st.cache_data.clear()
 
 
+@needs_ocp
+def test_an_ocp_failure_is_a_fixed_message_not_its_text(monkeypatch):
+    """OCP raises its own exception types; their text must not reach the page."""
+    st.cache_data.clear()
+
+    class Standard_Failure(Exception):  # noqa: N801 - OCP's own name
+        pass
+
+    def fails(*_a, **_k):
+        raise Standard_Failure("BRep_API: command not done /home/someone/secret")
+
+    monkeypatch.setattr(gate_iges, "export_gate_iges", fails)
+    at = _app()
+    at.checkbox(key="gate_iges_on").set_value(True).run()
+    assert not at.exception
+    assert any("組めなかった" in e.value for e in at.error)
+    assert not any("secret" in e.value or "BRep_API" in e.value for e in at.error)
+    st.cache_data.clear()
+
+
 def test_without_ocp_the_panel_says_so(monkeypatch):
     monkeypatch.setattr(gate_iges, "available", lambda: False)
     at = _app()

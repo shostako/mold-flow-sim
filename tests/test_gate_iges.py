@@ -224,7 +224,52 @@ def test_the_check_tells_a_wrong_solid_from_the_right_one():
     # Different outline (a closure in the land).
     closed = _spec(_with(LANDHANGER, land__closed_line=[[0.0, 50.0], [1.0, 47.6]]))
     fc = drawing_field(closed, PLATE, cell_size_mm=0.25)
-    assert gi.check_against_field(solid, fc.x, fc.y, fc.depth).outline_mismatch > 0
+    c = gi.check_against_field(solid, fc.x, fc.y, fc.depth)
+    assert c.outline_mismatch > 0
+    # ... and says where: inside the closure (t ≤ 1, |x| < 50).
+    assert c.mismatch_at and all(t <= 1.0 and abs(x) < 50.0 for x, t in c.mismatch_at)
+
+
+@needs_ocp
+def test_the_volume_has_to_agree_too():
+    """Centres miss a boundary moved by under half a cell; the volume does not."""
+    import dataclasses
+
+    good = gi.export_gate_iges(_spec(LANDHANGER), PLATE)  # the 0.1 mm mesh
+    assert good.ok and good.cell_mm == 0.1
+    off = dataclasses.replace(
+        good, field_volume_mm3=good.field_volume_mm3 * (1 + 2 * gi.VOLUME_TOL_REL)
+    )
+    assert not off.ok
+
+
+def test_the_fine_mesh_is_the_drawings():
+    from core import gate_drawing
+
+    assert gi._FINE_MM == gate_drawing.FINE_CELL_MM
+
+
+@needs_ocp
+def test_a_block_too_large_for_the_fine_mesh_is_checked_on_a_stretched_one():
+    """A 1200 mm product needs a coarser mesh; its centres must stay off round boundaries.
+
+    At exactly 0.2 mm rows of centres sit on t = 1, 4 … and the check reports
+    mismatches the shape does not have; stretched by 3 % it matches.
+    """
+    import dataclasses
+
+    plate = dataclasses.replace(PLATE, plate_w_mm=1200.0)
+    res = gi.export_gate_iges(_spec(LANDHANGER), plate)
+    assert res.cell_mm == pytest.approx(0.2 * gi.COARSE_MESH_STRETCH)
+    assert res.ok, res.check
+    assert res.check.outline_mismatch == 0
+
+
+def test_available_needs_every_name_not_just_the_package(monkeypatch):
+    """Another OCP that lacks one name must read as unavailable (claude review on PR #108)."""
+    monkeypatch.setattr(gi, "_NS", {})
+    monkeypatch.setitem(gi._NAMES, "OCP.gp", [*gi._NAMES["OCP.gp"], "gp_NoSuchName"])
+    assert gi.available() is False
 
 
 @needs_ocp

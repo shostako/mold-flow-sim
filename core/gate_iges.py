@@ -55,13 +55,18 @@ MESH_DEFLECTION_MM = 2e-4
 MESH_ANGLE_RAD = 0.01
 
 _Z_TOP = 1.0  # columns start above the PL; the pocket clips them to z ≤ 0
+_FINE_MM = 0.1  # gate_drawing.FINE_CELL_MM (not imported: that pulls matplotlib in)
 
 
 def available() -> bool:
-    """True when OCP can be imported (``pip install -e ".[cad]"``)."""
+    """True when every OCP name this module uses imports (``pip install -e ".[cad]"``).
+
+    Not just the package: an OCP of another version that lacks one of the
+    names would pass a bare ``import OCP`` and fail half-way through an export.
+    """
     try:
-        import OCP.BRepAlgoAPI  # noqa: F401
-    except ImportError:
+        _k()
+    except (ImportError, AttributeError):
         return False
     return True
 
@@ -111,13 +116,19 @@ _NS: dict = {}
 
 
 def _k() -> dict:
-    """The OCP names this module uses, imported on first call."""
+    """The OCP names this module uses, imported on first call.
+
+    Filled in one step from a complete local table: Streamlit runs sessions
+    in threads, and a table filled name by name would be seen half-full.
+    """
     if not _NS:
         import importlib
 
-        for mod, names in _NAMES.items():
+        names = {}
+        for mod, wanted in _NAMES.items():
             m = importlib.import_module(mod)
-            _NS.update({n: getattr(m, n) for n in names})
+            names.update({n: getattr(m, n) for n in wanted})
+        _NS.update(names)
     return _NS
 
 
@@ -889,7 +900,9 @@ def raster_depth(shape, x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
     ``x`` (nx,) and ``y`` (ny,) are increasing CAD coordinates; the result
     is (ny, nx). The solid is a column ``−d ≤ z ≤ 0``, so the lowest point
-    of the non-vertical faces over a centre is the depth there.
+    of the non-vertical faces over a centre is the depth there. That needs
+    the faces to close (a missing floor would show the one below it only as
+    a depth error); :class:`GateIges` checks the closure separately.
     """
     tris = _triangles(shape)
     z_low = np.full((len(y), len(x)), np.inf)
@@ -920,6 +933,10 @@ class FieldCheck:
     cells: int  # pocket cells of the field
     outline_mismatch: int  # cells in one but not the other
     max_depth_diff_mm: float  # over the cells both have
+    #: (x, t) of the first few mismatched cells: a boundary that lies on a row of
+    #: cell centres (the builder's ``<`` against the solid's closed faces) shows
+    #: as a line of them, a wrong shape as a patch.
+    mismatch_at: tuple[tuple[float, float], ...] = ()
 
 
 def check_against_field(shape, x: np.ndarray, y_display: np.ndarray, depth: np.ndarray):
@@ -933,11 +950,23 @@ def check_against_field(shape, x: np.ndarray, y_display: np.ndarray, depth: np.n
     want_in, got_in = np.isfinite(depth), np.isfinite(got)
     both = want_in & got_in
     diff = float(np.max(np.abs(got[both] - depth[both]))) if both.any() else 0.0
-    return FieldCheck(int(want_in.sum()), int((want_in ^ got_in).sum()), diff)
+    rows, cols = np.nonzero(want_in ^ got_in)
+    at = tuple((float(x[c]), float(-y_display[r])) for r, c in zip(rows[:5], cols[:5], strict=True))
+    return FieldCheck(int(want_in.sum()), len(rows), diff, at)
 
 
 #: Largest depth difference :class:`GateIges` accepts (the cones' mesh sag is ~7e-4 mm).
 CHECK_TOL_MM = 2e-3
+#: Largest relative difference between the solid's and the field's volume. The
+#: centres miss a boundary moved by less than half a cell and a feature thinner
+#: than one; the volume does not. Checked on the 0.1 mm mesh only, where the
+#: raster's own volume agrees to ~5e-5 -- a coarser one is 1-12 % off by itself
+#: on narrow shapes (the T gate at 0.2-0.8 mm), so there only the cells count.
+VOLUME_TOL_REL = 2e-3
+#: Step a coarse check mesh is stretched by: 0.2, 0.4 … would put rows of
+#: centres on round boundaries (t = 1, 4 …) and turn the builder's ``<`` against
+#: the solid's closed faces into mismatches.
+COARSE_MESH_STRETCH = 1.03
 
 
 @dataclass(frozen=True)
@@ -957,8 +986,11 @@ class GateIges:
         """The file closes into the solid that was written, and that solid is the field.
 
         Closed: every face sewn at :data:`READBACK_SEW_MM` with no free edge, one
-        shell, the volume of the solid. The field: the same outline cell for cell
-        and the depths within :data:`CHECK_TOL_MM`.
+        shell, the volume of the solid. The field: the same outline cell for cell,
+        the depths within :data:`CHECK_TOL_MM`, and (on the 0.1 mm mesh) the
+        volume within :data:`VOLUME_TOL_REL`. The face count compares the read-back with the
+        written solid; another OCP version may split or merge faces on the way,
+        which would show here first.
         """
         rb = self.readback
         closed = (
@@ -967,10 +999,15 @@ class GateIges:
             and rb.volume_mm3 is not None
             and abs(rb.volume_mm3 - self.volume_mm3) <= 1e-6 * self.volume_mm3
         )
+        fine = self.cell_mm <= _FINE_MM + 1e-9
+        volume = abs(self.volume_mm3 - self.field_volume_mm3) <= (
+            VOLUME_TOL_REL * self.field_volume_mm3
+        )
         return (
             closed
             and self.check.outline_mismatch == 0
             and self.check.max_depth_diff_mm <= CHECK_TOL_MM
+            and (volume or not fine)
         )
 
 
@@ -983,8 +1020,12 @@ def export_gate_iges(spec: GateProfileSpec, plate, cell_size_mm: float | None = 
     the product's width alone); ``cell_size_mm`` defaults to the drawing's
     mesh (0.1 mm unless the block is too large for it).
     """
-    from core.gate_drawing import drawing_field
+    from core.gate_drawing import drawing_cell_mm, drawing_field
 
+    if cell_size_mm is None:
+        cell_size_mm = drawing_cell_mm(spec, plate)
+        if cell_size_mm > _FINE_MM + 1e-9:
+            cell_size_mm *= COARSE_MESH_STRETCH
     solid = build_gate_solid(spec)
     data = iges_bytes(solid.shape)
     back = read_iges(data)
@@ -1056,6 +1097,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{c.outline_mismatch}/{c.cells} cells, max depth difference {c.max_depth_diff_mm:.4f} mm"
         + ("" if res.ok else "  -- NOT OK")
     )
+    if c.mismatch_at:
+        print("  mismatched cells (x, t):", ", ".join(f"({x:g}, {t:g})" for x, t in c.mismatch_at))
     return 0 if res.ok else 1
 
 

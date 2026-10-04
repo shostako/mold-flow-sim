@@ -3600,6 +3600,7 @@ def _gate_iges_cached(key: str) -> dict:
         "cells": res.check.cells,
         "outline_mismatch": res.check.outline_mismatch,
         "max_depth_diff_mm": res.check.max_depth_diff_mm,
+        "mismatch_at": res.check.mismatch_at,
     }
 
 
@@ -3630,7 +3631,7 @@ def _gate_iges_panel(src) -> None:
         with st.spinner("立体を組んで照合中…"):
             try:
                 r = _gate_iges_cached(key)
-            except (RuntimeError, ValueError):
+            except Exception:  # OCP raises its own types; never show their text
                 st.error(
                     "この形状は IGES に組めなかった。入力を少し変えて試すか、形状を知らせてほしい。"
                 )
@@ -3646,7 +3647,12 @@ def _gate_iges_panel(src) -> None:
             f"{r['max_depth_diff_mm']:.4f} mm、網目の体積 {r['field_volume_mm3']:,.1f} mm³。"
         )
         if not r["ok"]:
-            st.error("IGES がソルバーの形と一致しないので、書き出しを止めた。" + check)
+            where = "".join(f"（x {x:g}, t {t:g}）" for x, t in r["mismatch_at"][:3])
+            st.error(
+                "IGES がソルバーの形と一致しないので、書き出しを止めた。"
+                + check
+                + (f" 食い違うセルの例: {where}" if where else "")
+            )
             return
         st.caption(check)
         st.download_button(

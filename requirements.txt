@@ -6,6 +6,9 @@
 #
 # For local development, use pyproject.toml instead:
 #   uv pip install -e ".[dev]" --python .venv/bin/python
+#
+# The "cad" extra (OCP, for the IGES export) is left out on purpose: the
+# public instance does not carry the CAD kernel and the panel says so.
 
 numpy>=1.24
 scipy>=1.10

@@ -34,6 +34,7 @@ from core import (
     fill_frame_fractions,
     fill_frame_times,
     fill_player_height_px,
+    gate_iges,
     render_3d_fill_time,
     render_3d_pressure,
     render_3d_thickness_map,
@@ -3579,6 +3580,83 @@ def _gate_drawing_panel(src, title: str) -> None:
         )
 
 
+@st.cache_data(max_entries=4, show_spinner=False)
+def _gate_iges_cached(key: str) -> dict:
+    """IGES of one exact shape plus its read-back check, cached like the drawing."""
+    d = json.loads(key)
+    res = gate_iges.export_gate_iges(
+        GateProfileSpec.from_dict(d["spec"]), ProfilePlateConfig(**d["plate"])
+    )
+    return {
+        "iges": res.iges,
+        "ok": res.ok,
+        "faces": res.faces,
+        "volume_mm3": res.volume_mm3,
+        "field_volume_mm3": res.field_volume_mm3,
+        "cell_mm": res.cell_mm,
+        "cells": res.check.cells,
+        "outline_mismatch": res.check.outline_mismatch,
+        "max_depth_diff_mm": res.check.max_depth_diff_mm,
+    }
+
+
+def _gate_iges_panel(src) -> None:
+    """Expander with the IGES of the current spec-based shape (needs OCP)."""
+    st.session_state.pop("mfs_gate_iges", None)
+    if src is None:
+        return
+    spec_d, plate_d, _dx, file_tag = src
+    with st.expander("3D モデル（IGES）", expanded=False):
+        if not gate_iges.available():
+            st.caption(
+                "IGES の出力には CAD カーネル（OCP）が要る。手元の環境なら "
+                '`uv pip install -e ".[cad]"` で入る。公開版（Streamlit Cloud）には入れていない。'
+            )
+            return
+        on = st.checkbox(
+            "IGES を作る",
+            key="gate_iges_on",
+            help="今の入力で解く形状の樹脂側を、面を一つずつ組んだ立体にして IGES に書き出す。"
+            "書き出した立体を上から読み直し、ソルバーの形と網目単位で一致するかを確かめる。"
+            "数秒かかるので、必要なときだけ ON にする。",
+        )
+        if not on:
+            return
+        key = spec_key(spec_d, plate_d)
+        with st.spinner("立体を組んで照合中…"):
+            try:
+                r = _gate_iges_cached(key)
+            except (RuntimeError, ValueError):
+                st.error(
+                    "この形状は IGES に組めなかった。入力を少し変えて試すか、形状を知らせてほしい。"
+                )
+                return
+        st.session_state["mfs_gate_iges"] = (key, r["iges"] if r["ok"] else None)
+        check = (
+            f"上から読み直した形とソルバーの形（{r['cell_mm']:g} mm 網目、{r['cells']:,} セル）: "
+            f"外形の食い違い {r['outline_mismatch']} セル、深さの差 最大 "
+            f"{r['max_depth_diff_mm']:.4f} mm。体積は IGES {r['volume_mm3']:,.1f} mm³、"
+            f"網目 {r['field_volume_mm3']:,.1f} mm³。"
+        )
+        if not r["ok"]:
+            st.error("IGES がソルバーの形と一致しないので、書き出しを止めた。" + check)
+            return
+        st.caption(check + f" 面 {r['faces']} 枚。")
+        st.download_button(
+            "IGES をダウンロード",
+            data=r["iges"],
+            file_name=f"{file_tag}.igs",
+            mime="model/iges",
+            key="gate_iges_file",
+        )
+        st.caption(
+            "座標は受領した CAD と同じ: x = バルブ軸からの幅、"
+            f"y = {gate_iges.CAD_Y_AT_EXIT:g} − t（ゲート出口が y = {gate_iges.CAD_Y_AT_EXIT:g}）、"
+            "z = −深さ（PL が z = 0）。中身はポケットの樹脂側を閉じた面（IGES 144）で、"
+            "製品とバルブ穴は含まない。"
+        )
+
+
 col_left, col_right = st.columns([1, 1.3])
 
 with col_left:
@@ -3620,6 +3698,7 @@ with col_left:
         "ダイレクトゲートのゲートは製品内（y > 0）。"
     )
     _gate_drawing_panel(st.session_state.get("mfs_gate_spec"), geom_source)
+    _gate_iges_panel(st.session_state.get("mfs_gate_spec"))
 
 
 if do_run:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mold-flow-sim"
-version = "0.58.0"
+version = "0.59.0"
 description = "Simplified injection-molding flow analyzer (Hele-Shaw + Cross-WLF + Pseudo-Conduction). Educational / early-screening use."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -36,6 +36,11 @@ dev = [
     "pytest>=7.4",
     "pytest-xdist>=3.5",
     "ruff>=0.5",
+]
+# IGES of the gate block (core/gate_iges.py). Local only: not in requirements.txt,
+# so the Streamlit Cloud instance does not carry the CAD kernel (~160 MB).
+cad = [
+    "cadquery-ocp-novtk>=7.9,<8",
 ]
 
 [project.urls]

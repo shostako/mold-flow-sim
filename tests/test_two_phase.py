@@ -528,6 +528,50 @@ def test_the_layered_shot_keeps_the_volume_contract():
     assert full.metadata["injection_center_solid_cells"] >= 0
 
 
+@pytest.mark.parametrize("shear", [False, True])
+def test_the_centre_solid_count_reads_the_tau_the_pool_comes_from(monkeypatch, shear):
+    """Codex P2 on mold-flow-fangate2#13: each fixed-point iteration builds
+    the temperatures from the tau it started with, then moves tau. Cut off after one
+    iteration, ``short_shot_mask`` belongs to the baseline tau while the pool
+    comes from the updated one. The count must use the temperatures of the
+    returned tau -- which is exactly what the loop itself builds at the start
+    of the next iteration, so a two-iteration run is the oracle. With shear
+    heating the next iteration also adds the shear rise on the last
+    viscosity, and so must the re-read."""
+    import dataclasses
+
+    import core.multilayer_solver as mls
+
+    seen: list[dict] = []
+    orig = mls.MultilayerHeleShawSolver._fixed_point
+
+    def spy(self, *a, **k):
+        out = orig(self, *a, **k)
+        seen.append(out)
+        return out
+
+    monkeypatch.setattr(mls.MultilayerHeleShawSolver, "_fixed_point", spy)
+    geom = _thick_branch_thin_plate()
+    V_shot = 0.125
+    base = dataclasses.replace(
+        _ml_solver(geom, Q=V_shot / 2.0, num_layers=7), shear_heating_enabled=shear
+    )
+    one = solve_two_phase_short_shot(dataclasses.replace(base, max_iterations=1), V_shot)
+    solve_two_phase_short_shot(dataclasses.replace(base, max_iterations=2), V_shot)
+    fp1, fp2 = seen
+    assert fp1["converged"] is False
+    # the loop's own reading of tau_1 (iteration 2 starts from it): the
+    # temperatures, which carry the shear rise, and the mask taken from them
+    np.testing.assert_array_equal(fp1["layer_T_K_end"], fp2["layer_T_K"])
+    np.testing.assert_array_equal(fp1["short_shot_mask_end"], fp2["short_shot_mask"])
+    pool = one.injection_mask
+    expected = int((fp2["short_shot_mask"] & pool).sum())
+    assert one.metadata["injection_center_solid_cells"] == expected
+    # and the case discriminates: the lagged mask would count differently
+    assert expected > 0
+    assert int((fp1["short_shot_mask"] & pool).sum()) != expected
+
+
 def _choked_strip() -> Geometry:
     """Thick strip with a 0.05 mm choke two cells wide: the choke seals almost
     the moment the front passes it, cutting the cells behind it off."""

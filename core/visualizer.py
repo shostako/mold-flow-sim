@@ -794,6 +794,15 @@ def render_core_layer_map(
 # --------------------------------------------------------------------------
 
 
+# Upper end of a log colour scale. A melt near the bottom of the Cross-WLF
+# range has a viscosity up to 1e308 Pa·s (inf once frozen). A log axis that
+# reaches that far strides its ticks by tens of decades and puts the next one
+# past the float range, which overflows matplotlib's tick formatter (1e300
+# still does). Anything above 1e100 Pa·s is solid for every purpose here and
+# is drawn in the top colour.
+_LOG_SCALE_CEILING = 1e100
+
+
 def _scalar_layer_field(
     result: MultilayerFlowResult, field: str, layer_idx: int
 ) -> tuple[np.ndarray, str, str]:
@@ -863,7 +872,16 @@ def render_layer_map(
             log_scale = False
             norm = None
         else:
-            norm = mcolors.LogNorm(vmin=float(valid.min()), vmax=float(valid.max()))
+            vmin = min(float(valid.min()), _LOG_SCALE_CEILING)
+            vmax = min(float(valid.max()), _LOG_SCALE_CEILING)
+            if vmin >= vmax:
+                # Every finite value at or above the ceiling (or one uniform
+                # value) collapses the norm and draws in the bottom colour;
+                # keep one decade below so it draws in the top colour
+                # (Codex P2 on mold-flow-fangate2#15). Frozen cells (inf) stay
+                # blank by design.
+                vmin = vmax / 10.0
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
     if not log_scale:
         valid = masked[np.isfinite(masked)]
         if valid.size == 0:
@@ -947,7 +965,14 @@ def render_layer_grid(
     else:
         vmin = float(valid.min())
         vmax = float(valid.max())
-        if vmin == vmax:
+        if log_scale:
+            vmin = min(vmin, _LOG_SCALE_CEILING)
+            vmax = min(vmax, _LOG_SCALE_CEILING)
+            if vmin >= vmax:
+                # vmax + 1.0 is a no-op at the 1e100 ceiling; keep a decade
+                # instead (Codex P2 on mold-flow-fangate2#15)
+                vmin = vmax / 10.0
+        elif vmin == vmax:
             vmax = vmin + 1.0
     norm = (
         mcolors.LogNorm(vmin=vmin, vmax=vmax)

@@ -116,6 +116,37 @@ def test_render_layer_grid_viscosity(tmp_path) -> None:
     assert out.exists()
 
 
+def test_layer_viscosity_maps_draw_a_partly_frozen_melt(tmp_path) -> None:
+    """PA66's wall layers start below the Cross-WLF range: their viscosity
+    is inf (frozen) and, just above it, up to 1e300 Pa·s. A log colour scale
+    reaching that far overflowed matplotlib's tick formatter, so the scale
+    stops at a ceiling and both renderers must still draw."""
+    import numpy as np
+
+    from core.geometry import Geometry
+
+    mat = MaterialDB()["PA66"]
+    g = Geometry(
+        mask=np.ones((8, 20), dtype=bool), thickness_mm=np.full((8, 20), 0.35), cell_size_mm=1.0
+    )
+    g.add_gate(0, 10)
+    r = MultilayerHeleShawSolver(
+        geometry=g,
+        material=mat,
+        melt_temperature_K=sum(mat.T_melt_recommended) / 2,
+        mold_temperature_K=sum(mat.T_mold_recommended) / 2,
+        injection_velocity_mms=200.0,
+        injection_volume_flow_cm3s=2.0,
+        num_layers=7,
+        layer_distribution="wall_refined",
+    ).solve(num_frames=2)
+    eta = r.layer_viscosity_Pa_s_field[:, g.mask]
+    assert np.isinf(eta).any()  # frozen cells reach the renderers
+    assert eta[np.isfinite(eta)].max() > 1e200  # and so do near-frozen ones
+    assert render_layer_grid(r, tmp_path / "grid.png", field="viscosity").exists()
+    assert render_layer_map(r, 0, tmp_path / "wall.png", field="viscosity").exists()
+
+
 def test_render_short_shot_map_no_short_shot(tmp_path) -> None:
     """A warm plate produces no flagged cells — the renderer still emits
     a file, with a 'no short shot' annotation in lieu of red markers."""

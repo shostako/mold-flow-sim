@@ -9,6 +9,138 @@ Versions 0.1.0 to 0.14.0 were **assigned retroactively from the development hist
 
 This is a translation of the Japanese `CHANGELOG.md`. If the two disagree, the Japanese file is authoritative.
 
+## [0.60.1] — 2026-10-06
+
+### Fixed
+
+- Per-layer viscosity maps (`render_layer_map` / `render_layer_grid`): in a layer whose finite values were all 1e100 or more (or uniform), the top and bottom of the log scale
+  were clipped to the same ceiling, the norm collapsed, and the layer was drawn in the lowest color. The `vmax + 1.0` safeguard in the grid version has no effect at the 1e100 magnitude.
+  The bottom is now set one decade below the top, and the layer is drawn in the highest color. Leaving frozen cells (inf) blank is the 0.60.0 design and is unchanged
+  (Codex P2 on mold-flow-fangate2#15; the same patch goes to fangate2).
+- Tests: with every layer set to 1e200, both renderers build a LogNorm one decade wide. They fail before the fix.
+
+## [0.60.0] — 2026-10-06
+
+**The viscous heating of the multilayer model is now solved self-consistently with the viscosity after heating. Geometries whose fixed point fell into a period-2 oscillation under strong shear and did not converge now converge in a few iterations. The converged result is still the fixed point of the original equations. Also fixed Cross-WLF returning NaN or 0 in cold layers.**
+
+### Fixed
+
+- The rise from viscous heating (stage 1) `ΔT_k = η_k·γ̇_k²·min(t_arr, τ_thermal)/(ρ·cp)` is now solved with η_k read at the temperature after heating,
+  `T_Neumann + ΔT`, instead of η_k from the previous iteration. Per element this is the one-variable equation `ΔT = k·η(T_Neumann + ΔT)`; the right-hand side
+  decreases as ΔT grows, so it has exactly one root. Added `self_consistent_shear_heating` to `core/multilayer_thermal.py`. The root is searched on
+  `log ΔT − log(k·η)` with the Illinois method and stops at a residual of 1e-9 K. `MultilayerHeleShawSolver._layer_temperatures` uses it both at the start of each iteration and in the re-read from #109.
+- The old one-iteration lag iterated the map `ΔT ↦ k·η(T_c + ΔT)`. This map is decreasing, so the iteration jumps back and forth across the solution, and the error
+  shrinks each step only by the factor of the slope `ΔT·|d ln η/dT|`. In cold wall layers under strong shear the slope approaches 1 (0.98 in the wall layer of 0.35 mm PP-T20 at 2 m/s).
+  Combined with the τ update, the whole iteration oscillated, and the default gate of mold-flow-fangate2 (Br max 48–54) did not converge even with 80 iterations and damping 0.5.
+- The convergence criterion `convergence_tol` is unchanged. Only the iteration path changed.
+- `cross_wlf_viscosity`: from around `D2 − A2` downward, intermediate values overflowed float, and evaluating the formula as written gave NaN (inf/inf) or 0 (finite/inf).
+  0 treats a frozen layer as the layer that flows most easily. Only the elements where `η0`, `η0·γ̇` (the product before dividing by τ*), or the ratio overflows are evaluated in log space,
+  returning a huge finite value or `inf` (frozen) (the product condition is from the @claude review on PR #111: for ABS, PC, and PA66 with τ* ≥ 1.8e4 Pa, the product overflowed and gave 0 even when the ratio did not).
+  Where nothing overflows, the formula is used as is, and results are bit-identical in the normal range for all resins (only the boundary band differs by 1e-13 of rounding).
+  At the recommended mold temperatures this is reached by PA66 (`D2 − A2` = 164 °C, the whole range), PC (80–95 °C), and ABS (40–50 °C); the wall layers of the multilayer model cool down to the mold temperature
+  (Codex P1 on PR #111).
+- For frozen layers (`k·η(T_c)` = inf) and near-frozen layers (on the order of 1e60 K), the root search for viscous heating finds the upper bracket by doubling from 1 K. A viscosity function that returns NaN is rejected.
+  Elements where the secant method did not close in within the iteration limit are finished by bisection; no value is returned unconverged.
+- Per-layer viscosity maps: the top of the log color scale is capped at 1e100. Taking it up to the near-frozen 1e300 range overflows the scale in float and
+  crashes matplotlib. Values above the top are drawn in the highest color; frozen cells (inf) are left blank.
+
+### Verification
+
+- Ran the mold-flow-fangate2 defaults (N=7, wall_refined, thermal coupling, viscous heating, 12 iterations, tol 1e-3) on a copy with the shared files replaced.
+  Gate 1 converged in 3 main-analysis and 3 two-phase iterations, Gate 2 in 4 main-analysis and 3 two-phase iterations (before the fix, both were cut off at 12).
+  T_fill is 0.26836 s for Gate 1 (inside the pre-fix oscillation, 0.2679–0.2684) and 0.30218 s for Gate 2 (slightly above the pre-fix 0.2902–0.3017).
+- Gate 2 lands outside the oscillation range because this fixed point was unstable under the old iteration. Applying the old map once to the state solved again with tol 1e-8 (T_fill 0.302174 s)
+  moves τ by only 2e-7, so it is a fixed point of the original equations. Iterating the old map from there, the deviation grows about 4× per step
+  and moves into the oscillation. Gate 1 behaves the same; the first change is 1.7e-7. The difference in T_fill between the default tol 1e-3 result and the tol 1e-8 result is 5e-6 for Gate 2 and 1.3e-5 for Gate 1.
+- On a small flat plate (20×8 mm, 0.35 mm, V 2 m/s, 0.2 cm³/s), the old code was cut off at 12 iterations in both the main analysis and two-phase; the new code converges in 4 and 2.
+  Tightened to tol 1e-9, the old result after 3000 iterations, 0.4246046 s, and the new result after 10, 0.4246054 s, agree to 2e-6.
+- Changes on the sim default screen (Film gate 1, multilayer N=7, viscous heating, two-phase ON): iterations are 2 main-analysis and 3 two-phase, the same as before the fix. T_fill changes by 1.9e-7 relative,
+  the fill-time field by at most 4.9 µs (2e-4 of T_fill), and the normalized pressure by at most 7e-6. The two-phase pool and final shape are identical cell by cell,
+  and the injection-phase times shift by at most 5 µs. The maximum viscous heating goes from 6.61 to 6.08 K, the mean from 0.207 to 0.206 K, and layer temperatures differ by at most 0.53 K.
+  The old values were computed with the viscosity of the previous iteration.
+- Small PA66 flat plate (V 200 mm/s, 2 cm³/s): before the fix, NaN appeared in the layer viscosity with viscous heating both OFF and ON (72 and 62 elements), and the iteration was cut off at 12.
+  After the fix, OFF converges in 4 and ON in 3, with no NaN (with OFF, 60 frozen elements are inf). T_fill goes from 0.00107 to 0.00152 s with OFF
+  and from 0.00092 to 0.00151 s with ON. PC, ABS, and PMMA under the same conditions with viscous heating ON were cut off at 12 before the fix and converge in 3–4 after it.
+- Tests: on a strongly sheared flat plate, the main analysis and two-phase converge within 12 iterations; the reported ΔT_k/(η_k·γ̇_k²) is the same for every layer in a cell;
+  the converged state is also a fixed point of the old map (τ changes by less than 1e-8); in the cold wall layers of PA66, layer viscosity and rise are finite and converge.
+  Unit tests: the returned ΔT satisfies the stage-1 equation; it always lies between two consecutive iterates of the lagged map; a finite root is returned when starting from frozen and near-frozen states;
+  a viscosity function that returns NaN is rejected; bisection reaches the root even when the secant method is cut off after one step; Cross-WLF returns neither NaN nor 0 in the frozen range or in the band where only the product overflows,
+  and is bit-identical in the normal range; a viscosity map that contains frozen cells can be drawn.
+  Mutations were applied to a copy: reverting the solver to the one-iteration lag, reverting Cross-WLF to the formula as written, removing the product condition, keeping the upper bracket of the root search at `k·η(T_c)`,
+  removing the bisection finish, and removing the cap on the color scale.
+  For each mutation, the test that guards that part fails.
+
+## [0.59.1] — 2026-10-06
+
+**When the injection phase of two-phase is solved with the multilayer model, the frozen cells of the center layer are now counted at the temperature of the τ that determined the pool. The main-analysis output is unchanged.**
+
+### Fixed
+
+- Each iteration of `MultilayerHeleShawSolver._fixed_point` builds arrival times and layer temperatures from the τ it starts with, and then updates τ.
+  So the returned `short_shot_mask` (the center layer of the last `layer_T_K`) belongs to the τ one step before the returned τ. Two-phase
+  `injection_center_solid_cells` counted the overlap of this mask with the pool Ω₁ determined from the returned τ. When converged, the difference stays within
+  the tolerance of 1e-3, but when the iteration is cut off (an oscillating fixed point) the two disagree. `_fixed_point` now also returns `layer_T_K_end`, the layer temperatures re-read
+  at the returned τ, and `short_shot_mask_end` of its center layer. The corrections for arrival time, Neumann, and viscous heating use the same expressions as the start of
+  the next iteration. Two-phase counts with this mask. The main analysis's `short_shot_mask` and `layer_T_K` are unchanged
+  (Issue #109; the same fix as the Codex P2 on mold-flow-fangate2#13).
+
+### Verification
+
+- The reference in the test is a 2-iteration run. The second iteration builds temperatures from the τ of the first, so its `layer_T_K` and `short_shot_mask` are
+  bit-identical to `layer_T_K_end` and `short_shot_mask_end` of a 1-iteration run. The test runs with viscous heating both ON and OFF and compares temperatures
+  (comparing the mask alone passes on a small geometry even if the viscous term is dropped from the re-read). The old expression counts 0 cells, the new one 4.
+- Checked with mutations on a copy. Reverting two-phase to the old mask fails both ON and OFF; dropping the viscous term from the re-read fails ON.
+
+## [0.59.0] — 2026-10-05
+
+**The geometry solved with the current inputs can now be exported as IGES (3D). It is a solid built exactly, face by face, and before export it is checked against the solver's shape cell by cell.**
+
+### Added
+
+- `core/gate_iges.py`: `build_gate_solid(spec)` builds the resin side of the gate block as a single solid, and `iges_bytes` writes only its faces to
+  IGES (trimmed surface, entity 144, mm). Instead of fitting surfaces to a raster, it turns the steps of `build_profile_gate_geometry`
+  directly into solid operations (floor = union, cap = intersection, override = union of difference and intersection, steel = difference). All faces are exact:
+  planes; the edge of a variable land length is a B-spline (exponents 1, 2, and 3 are polynomials and are represented exactly; other exponents are fitted within 1e-4 mm;
+  edges with an exponent below 1 or a non-integer exponent are reparametrized to remove the infinite slope at the end); the ramp behind it is a sweep of that curve;
+  the graded ramp angle is a ruled surface between two lines; a well is two cones and a trapezoidal prism; the corner R of the outer wall is a cylinder. Symmetric shapes are built as one half
+  and mirrored about the valve axis; the runner and wells are added after mirroring. Coordinates are the same as in the received CAD (`Runner-block_3D_*.igs`):
+  x = width from the valve axis, y = 20 − t, z = −depth (the PL is at z = 0). The part and the valve hole are not included.
+- `read_iges` / `raster_depth` / `check_against_field`: read the exported IGES back, sew it, triangulate it, read it from above, and
+  turn it back into a depth at each cell center. `export_gate_iges(spec, plate)` builds, writes, reads back, and checks against the depth field on the same 0.1 mm mesh as the drawing,
+  and returns `GateIges.ok`. The conditions are that the read-back faces are sewn into a closed shell with nothing left open, with the same face count and volume as the written solid
+  (volume to 1e-6); that the outline mismatch is 0 cells; and that the depth difference is within 2e-3 mm. What is checked is the exported file itself, so
+  export stops if faces are dropped or changed while writing (Codex P1 on PR #108).
+- UI: below the part design drawing, after the drawing, an expander "3D model (IGES)". The checkbox `gate_iges_on` (default OFF)
+  builds and checks the solid and offers `{record_name}.igs` for download only on a match. On a mismatch, export is stopped and
+  the number of mismatches is shown. Without OCP (Streamlit Cloud) only that fact is shown.
+- Command line: `python -m core.gate_iges <spec.json | settings.json> <out.igs>` (a run's settings.json can also be read).
+- Dependency: an optional `cad` extra (`cadquery-ocp-novtk>=7.9,<8`). It is not in `requirements.txt`. CI installs `.[dev,cad]` and runs the IGES tests as well.
+
+### Fixed
+
+- The coordinates of the drawing's depth field (`drawing_field`) now come from the builder's placement (y = −t) instead of `display_origin_mm` (the bottom edge of the first part row).
+  When pad + t_max was not divisible by the mesh, y = 0 of the drawing was half a cell off the exit. The usual 0.1 mm drawings
+  divide evenly and do not change. Only large blocks whose mesh became 0.2 mm or coarser had sections and dimensions off by up to 0.1 mm.
+
+### Verification
+
+- Checked the 31 specs on hand (the original drawings of Film gate 1–15, T-shape, fan, one-sided, candidates A–C, and others) and 22 combinations that no spec uses
+  (coring welded up to the cap, a 90° cut-down step, exponents 0.5–4, variable land length / closure / thickening at both ends on one side, edge channels on both sides of a fan,
+  wells with vertical walls, an offset valve axis) on a 0.1 mm mesh. In every case the outline mismatch is 0 cells, the depth difference is within 0.001 mm,
+  and the volume difference is within 0.5 mm³.
+- Read back, the exported IGES closes with no gaps at a sewing tolerance of 1e-6 mm, and its volume matches the original solid to 1e-6. The check including the read-back takes
+  2–6 s per shape (0.1 mm mesh).
+- Shapes that add the graded ramp angle or a variable land length to a flat main ramp (cap = land depth), and deep tilted coring inside a fan, can also be built
+  (Codex P2 on PR #108).
+- Added volume agreement on the 0.1 mm mesh (within 2e-3) to the check conditions. Checking at cell centers alone misses boundary shifts smaller than half a cell and
+  features thinner than a cell. For large blocks with a coarse mesh, the mesh is stretched by 3% so that cell centers do not land on boundaries such as t = 1, 4, ….
+  `available()` also checks that every OCP name used can be imported, and the UI catches every export exception and shows only a fixed message
+  (@claude review on PR #108).
+- The IGES of Film gate 15 (center 5) built by hand on 10/02 has a volume of 9,725 mm³; the one built now from the same spec has 9,731 mm³ (9,731 on the 0.1 mm mesh as well).
+  Compared from above, the outlines match, and only the 10/02 version is up to 0.0027 mm shallower on the ramp (within |x| ≤ 133, with the maximum around mid-width, |x| ≈ 75).
+  The 10/02 version drew the parabola at the end of the land on a face 1 mm wider than the exit, with a half-width of 150 (149 is correct).
+  As a result, the end of the land sat up to 0.013 mm farther back around mid-width, and the land was longer by that amount.
+
 ## [0.58.0] — 2026-10-03
 
 **Added dimension lines to the gate-block drawing. The plan view shows the gate exit width, closure width, start of the outer wall, block depth, and valve position; each section shows the land length, the t at which the cap depth is reached, the back of the pocket, the depth, and the ramp angle.**

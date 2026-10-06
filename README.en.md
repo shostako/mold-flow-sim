@@ -53,7 +53,8 @@ Hosted on the free tier of Streamlit Community Cloud. Nothing to install.
 - Layer maps for the skin-layer and multilayer models, history animation of the two-phase short shot
 - 3D view (Plotly)
 - A ZIP of all results (images, `metadata.json`, the input settings as `settings.json`, and a standalone `player.html`)
-- Automatic A3 PDF drawing of the gate block (1:1 plan view, four sections, dimension lines and notes)
+- Automatic A3 PDF drawing of the gate block (1:1 plan view, four sections, dimension lines and notes). Film gate 1 to 15 and Profile gate only; not available for Direct gate
+- IGES (3D) export of the resin side of the gate block (also Film gate 1 to 15 and Profile gate only). The exported file is read back and checked against the solver's shape cell by cell, and it is offered for download only on a match. It needs a CAD kernel (OCP), so it is for local installs only and is not in the public demo
 
 Materials: PP / PP_T10 / PP_T20 / PP_T30 / ABS / PC / PA66 / PMMA (generic values in `data/materials.json`).
 
@@ -64,7 +65,7 @@ Materials: PP / PP_T10 / PP_T20 / PP_T30 / ABS / PC / PA66 / PMMA (generic value
 | In-plane 3D flow, jetting, corner vortices | Not supported (a fundamental limit of Hele-Shaw methods; needs full 3D FVM/FEM) |
 | Packing stage | Not supported. Only filling is solved |
 | Crystallization, shrinkage, warpage, residual stress | Not supported |
-| Self-consistent viscous heating (stage 2) | Not supported. The stage-1 closed form drifts where Br ≫ 1 |
+| Viscous heating stage 2 (energy equation through the thickness) | Not supported. Stage 1 is a closed-form local approximation and drifts where Br ≫ 1 |
 | Feedback from the flow field to shear rate | Not supported. γ̇ varies by layer and cell but is derived from a single representative injection speed |
 | Real time in the compression phase | Not supported. The compression phase only gives the order of advance. Freezing during compression and overlapping injection and compression are not handled |
 | Absolute pressure field, required clamp force | Not supported. Pressure is normalized only (gate = 1, flow front = 0) |
@@ -81,7 +82,7 @@ Done:
 3. Transient heat and frozen layer: skin-layer model, N-layer multilayer model, viscous heating stage 1
 4. Two-phase ICM (partial): the two-phase short-shot model. The regular fill time and pressure map still use the equivalent model
 5. Input from machine settings: screw diameter, injection speed, multi-stage injection, V/P switchover
-6. Practical output: results ZIP with the recorded inputs, automatic gate-block drawing
+6. Practical output: results ZIP with the recorded inputs, automatic gate-block drawing, IGES export
 
 Remaining:
 
@@ -100,6 +101,7 @@ python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -e .                     # runtime only
 pip install -e ".[dev]"              # development (includes ruff and pytest)
+pip install -e ".[cad]"              # for IGES export (OCP, about 160 MB)
 ```
 
 Requires Python 3.11 or later.

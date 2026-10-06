@@ -133,8 +133,9 @@ def cross_wlf_viscosity(
     g_safe = np.where(g <= 1e-12, 1e-12, g)
 
     ln_eta0 = np.log(material.D1) - material.A1 * dT / denom
-    ln_ratio = ln_eta0 + np.log(g_safe) - np.log(material.tau_star)
-    fits = (ln_eta0 < _LN_SAFE) & (ln_ratio < _LN_SAFE)
+    ln_prod = ln_eta0 + np.log(g_safe)  # eta0·gamma_dot, formed before dividing by tau*
+    ln_ratio = ln_prod - np.log(material.tau_star)
+    fits = (ln_eta0 < _LN_SAFE) & (ln_prod < _LN_SAFE) & (ln_ratio < _LN_SAFE)
     with np.errstate(over="ignore", invalid="ignore"):
         eta0 = material.D1 * np.exp(-material.A1 * dT / denom)
         ratio = (eta0 * g_safe) / material.tau_star

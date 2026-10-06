@@ -798,9 +798,8 @@ def render_core_layer_map(
 # range has a viscosity up to 1e308 Pa·s (inf once frozen). A log axis that
 # reaches that far strides its ticks by tens of decades and puts the next one
 # past the float range, which overflows matplotlib's tick formatter (1e300
-# still does). Values above the ceiling are drawn in the top colour; 1e100 is
-# above anything the direct Cross-WLF expression ever produced (its largest
-# finite values were about 1e86).
+# still does). Anything above 1e100 Pa·s is solid for every purpose here and
+# is drawn in the top colour.
 _LOG_SCALE_CEILING = 1e100
 
 
@@ -964,7 +963,7 @@ def render_layer_grid(
             vmin = min(vmin, _LOG_SCALE_CEILING)
             vmax = min(vmax, _LOG_SCALE_CEILING)
         if vmin == vmax:
-            vmax = vmin + 1.0 if not log_scale else vmin * 10.0
+            vmax = vmin + 1.0
     norm = (
         mcolors.LogNorm(vmin=vmin, vmax=vmax)
         if log_scale

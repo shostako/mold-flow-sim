@@ -103,6 +103,32 @@ def test_cross_wlf_is_frozen_not_nan_or_zero_below_its_range() -> None:
     assert isinstance(cross_wlf_viscosity(pa, 300.0, 100.0), np.floating)
 
 
+def test_cross_wlf_does_not_return_zero_where_only_eta0_times_shear_overflows() -> None:
+    """@claude review on PR #111: eta0 itself may still fit while eta0·gamma_dot
+    (formed before dividing by tau*) overflows. With tau* ≥ 1.8e4 Pa that
+    happens below the ratio threshold, and the direct form then returns
+    eta0/inf = 0 -- the frozen-as-fluid defect again. Pick the temperature
+    where ln eta0 = 699 and shear at 1e5 1/s, for every resin."""
+    import numpy as np
+
+    from core import MaterialDB, cross_wlf_viscosity
+
+    db = MaterialDB()
+    zeros_direct = 0
+    for key in db.keys():
+        m = db[key]
+        c = (np.log(m.D1) - 699.0) / m.A1  # dT/(A2 + dT) giving ln eta0 = 699
+        T = m.D2 + c * m.A2_tilde / (1.0 - c)
+        g = 1e5
+        with np.errstate(all="ignore"):
+            zeros_direct += int(_direct_cross_wlf(m, np.array([T]), np.array([g]))[0] == 0.0)
+        eta = float(cross_wlf_viscosity(m, T, g))
+        assert np.isfinite(eta) and eta > 0.0, key
+        # never below the melt just above it
+        assert eta >= float(cross_wlf_viscosity(m, T + 0.01, g)), key
+    assert zeros_direct >= 1  # the gap is real for some resin (ABS, PC, PA66)
+
+
 def test_pp_talc_grades_are_loaded() -> None:
     """PP_T10 / PP_T20 / PP_T30 must be present in the bundled DB."""
     from core import MaterialDB

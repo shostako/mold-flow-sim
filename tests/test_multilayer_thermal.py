@@ -521,6 +521,24 @@ def test_self_consistent_rise_rejects_a_nan_viscosity() -> None:
         )
 
 
+def test_self_consistent_rise_finishes_by_bisection_when_the_secant_runs_out() -> None:
+    """@claude review on PR #111: a secant search cut off by max_iterations
+    must not hand back an unconverged rise. With a single secant step, the
+    bisection that follows still lands on the root to the tolerance, in
+    the strong-shear case and in the frozen PA66 one."""
+    for case in (_strong_shear_case, _cold_pa66_case):
+        *_, T_c, gamma, common, viscosity = case()
+        dT = self_consistent_shear_heating(
+            T_conduction_K=T_c,
+            gamma_dot_per_layer_s_inv=gamma,
+            viscosity=viscosity,
+            max_iterations=1,
+            **common,
+        )
+        back = _explicit_rise(T_c + dT, gamma, common, viscosity)
+        np.testing.assert_allclose(dT, back, rtol=0.0, atol=1e-8)
+
+
 def test_self_consistent_rise_rejects_bad_input() -> None:
     T_c, gamma, common, viscosity = _strong_shear_case()
     with pytest.raises(ValueError, match="shapes mismatch"):

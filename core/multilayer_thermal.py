@@ -394,6 +394,8 @@ def _solve_rise(
     ``x ≥ heated(x)``. Any upper end ``hi`` gives the lower end
     ``heated(hi) ≤ x*``. Regula falsi with the Illinois modification then
     runs on ``log x − log heated(x)``; convergence is judged in kelvin.
+    Elements still open after ``max_iterations`` secant steps are finished
+    by bisection.
     """
     every = np.arange(n)
     hi = heated(np.zeros(n), every)
@@ -446,6 +448,22 @@ def _solve_rise(
         last_side[open_] = side
         done = (np.abs(xs - q) <= tol_K) | ((hi[open_] - lo[open_]) <= tol_K)
         open_ = open_[~done]
+    # Whatever the secant left open is finished by bisection, which halves
+    # the bracket every step: a bounded number of steps, never a silent
+    # unconverged answer.
+    if open_.size:
+        width = float(np.max(hi[open_] - lo[open_]))
+        for _ in range(int(np.ceil(np.log2(max(width / tol_K, 1.0)))) + 1):
+            if open_.size == 0:
+                break
+            xs = 0.5 * (lo[open_] + hi[open_])
+            q = heated(xs, open_)
+            x[open_] = xs
+            left = xs < q
+            lo[open_[left]] = xs[left]
+            hi[open_[~left]] = xs[~left]
+            done = (np.abs(xs - q) <= tol_K) | ((hi[open_] - lo[open_]) <= tol_K)
+            open_ = open_[~done]
     return x
 
 

@@ -872,10 +872,16 @@ def render_layer_map(
             log_scale = False
             norm = None
         else:
-            norm = mcolors.LogNorm(
-                vmin=min(float(valid.min()), _LOG_SCALE_CEILING),
-                vmax=min(float(valid.max()), _LOG_SCALE_CEILING),
-            )
+            vmin = min(float(valid.min()), _LOG_SCALE_CEILING)
+            vmax = min(float(valid.max()), _LOG_SCALE_CEILING)
+            if vmin >= vmax:
+                # Every finite value at or above the ceiling (or one uniform
+                # value) collapses the norm and draws in the bottom colour;
+                # keep one decade below so it draws in the top colour
+                # (Codex P2 on mold-flow-fangate2#15). Frozen cells (inf) stay
+                # blank by design.
+                vmin = vmax / 10.0
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
     if not log_scale:
         valid = masked[np.isfinite(masked)]
         if valid.size == 0:
@@ -962,7 +968,11 @@ def render_layer_grid(
         if log_scale:
             vmin = min(vmin, _LOG_SCALE_CEILING)
             vmax = min(vmax, _LOG_SCALE_CEILING)
-        if vmin == vmax:
+            if vmin >= vmax:
+                # vmax + 1.0 is a no-op at the 1e100 ceiling; keep a decade
+                # instead (Codex P2 on mold-flow-fangate2#15)
+                vmin = vmax / 10.0
+        elif vmin == vmax:
             vmax = vmin + 1.0
     norm = (
         mcolors.LogNorm(vmin=vmin, vmax=vmax)

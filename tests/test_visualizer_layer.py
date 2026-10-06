@@ -147,6 +147,38 @@ def test_layer_viscosity_maps_draw_a_partly_frozen_melt(tmp_path) -> None:
     assert render_layer_map(r, 0, tmp_path / "wall.png", field="viscosity").exists()
 
 
+def test_log_scale_keeps_a_decade_when_every_value_is_past_the_ceiling(
+    tmp_path, monkeypatch
+) -> None:
+    """A layer whose finite viscosities all sit at or above the 1e100 ceiling
+    clipped both bounds to the same value: the norm collapsed and the layer
+    drew in the bottom colour, and the grid's ``vmax + 1.0`` guard is a no-op
+    at that magnitude. Both renderers keep one decade below the ceiling so
+    the layer draws in the top colour (Codex P2 on mold-flow-fangate2#15)."""
+    import numpy as np
+
+    import core.visualizer as vis
+
+    r = _solve(num_layers=3)
+    r.layer_viscosity_Pa_s_field = np.where(
+        np.isfinite(r.layer_viscosity_Pa_s_field), 1e200, r.layer_viscosity_Pa_s_field
+    )
+    seen = []
+
+    class _Rec(mcolors.LogNorm):
+        def __init__(self, vmin=None, vmax=None, **kw):
+            seen.append((vmin, vmax))
+            super().__init__(vmin=vmin, vmax=vmax, **kw)
+
+    monkeypatch.setattr(vis.mcolors, "LogNorm", _Rec)
+    assert render_layer_map(r, 0, tmp_path / "wall.png", field="viscosity").exists()
+    assert render_layer_grid(r, tmp_path / "grid.png", field="viscosity").exists()
+    assert len(seen) == 2
+    for vmin, vmax in seen:
+        assert vmax == vis._LOG_SCALE_CEILING
+        assert vmin == pytest.approx(vmax / 10.0)
+
+
 def test_render_short_shot_map_no_short_shot(tmp_path) -> None:
     """A warm plate produces no flagged cells — the renderer still emits
     a file, with a 'no short shot' annotation in lieu of red markers."""

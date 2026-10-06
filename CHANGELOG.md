@@ -1,5 +1,7 @@
 # 変更履歴
 
+日本語 | [English](CHANGELOG.en.md)
+
 このファイルは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に準拠し、
 バージョン番号は [セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 

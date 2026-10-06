@@ -381,6 +381,8 @@ class MultilayerHeleShawSolver:
         layer_shear_dT_K: np.ndarray | None = None
         layer_Brinkman: np.ndarray | None = None
         short_shot_mask: np.ndarray | None = None
+        short_shot_mask_end: np.ndarray | None = None
+        layer_T_K_end: np.ndarray | None = None
         iters_done = 0
         converged = False
         damping_events = 0
@@ -545,6 +547,39 @@ class MultilayerHeleShawSolver:
                 T_mid = layer_T_K[k_mid]
                 short_shot_mask = cavity_mask & (T_mid <= T_solid_K)
 
+                # Each iteration builds the temperatures from the tau it
+                # started with and then moves tau, so ``short_shot_mask``
+                # belongs to the tau one step before the returned one. On a
+                # converged loop the two agree to ``tol``; on a cut-off loop
+                # (an oscillating fixed point) they need not. Read the centre
+                # layer once more on the returned tau -- the same map the next
+                # iteration would start from -- for callers that intersect it
+                # with a region taken from that tau (the two-phase pool, Codex
+                # P2 on mold-flow-fangate2#13).
+                t_arr_end = base._arrival_time_field(tau, ~np.isnan(tau), cell_volume, T_fill)
+                t_arr_end = np.where(np.isnan(t_arr_end), 0.0, t_arr_end)
+                T_end = neumann_layer_temperatures(
+                    zeta_centers=zeta_centers,
+                    t_arr_s=t_arr_end,
+                    h_total_mm=h_open,
+                    T_melt_K=float(self.melt_temperature_K),
+                    T_mold_K=float(self.mold_temperature_K),
+                    alpha_m2_s=alpha,
+                )
+                if self.shear_heating_enabled and layer_eta_Pa_s is not None:
+                    dT_end = shear_heating_temperature_rise(
+                        eta_per_layer_Pa_s=layer_eta_Pa_s,
+                        gamma_dot_per_layer_s_inv=layer_gamma_dot,
+                        t_arr_s=t_arr_end,
+                        h_total_mm=h_open,
+                        density_kg_m3=float(self.material.density_melt_kgm3),
+                        specific_heat_J_kgK=float(self.material.specific_heat_J_kgK),
+                        alpha_m2_s=alpha,
+                    )
+                    T_end = T_end + np.where(cavity_mask[None, :, :], dT_end, 0.0)
+                layer_T_K_end = T_end
+                short_shot_mask_end = cavity_mask & (T_end[k_mid] <= T_solid_K)
+
             # Diagnostic Brinkman number from the converged state. Always
             # computed (even when shear_heating_enabled is False) so the
             # user can decide whether the correction is needed for their
@@ -576,6 +611,8 @@ class MultilayerHeleShawSolver:
             "layer_shear_dT_K": layer_shear_dT_K,
             "layer_Brinkman": layer_Brinkman,
             "short_shot_mask": short_shot_mask,
+            "short_shot_mask_end": short_shot_mask_end,
+            "layer_T_K_end": layer_T_K_end,
             "iters_done": iters_done,
             "converged": converged,
             "damping_events": damping_events,

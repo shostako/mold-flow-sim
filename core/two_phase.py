@@ -359,12 +359,15 @@ def solve_two_phase_short_shot(
         omega1[sel] = take
 
     injection_fill_time_s = np.where(omega1, t_arr1, np.nan)
-    if fp is not None and fp["short_shot_mask"] is not None:
+    if fp is not None and fp["short_shot_mask_end"] is not None:
         # Diagnostic only: pool cells whose centre layer fell below the
         # solidification threshold on the machine clock. The layer model has
         # no seal time, so these cells are not taken out of phase 2 (the skin
         # branch's ``injection_sealed_mask`` has no layered counterpart yet).
-        skin_meta["injection_center_solid_cells"] = int((fp["short_shot_mask"] & omega1).sum())
+        # The mask is read on the returned tau, the one the pool comes from
+        # (``short_shot_mask`` lags it by an iteration; Codex P2 on
+        # mold-flow-fangate2#13).
+        skin_meta["injection_center_solid_cells"] = int((fp["short_shot_mask_end"] & omega1).sum())
     injection_skin_mm: np.ndarray | None = None
     injection_sealed: np.ndarray | None = None
     if skin_on:

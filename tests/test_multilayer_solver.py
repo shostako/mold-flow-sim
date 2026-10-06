@@ -1049,3 +1049,22 @@ def test_multilayer_temperatures_come_from_the_volume_map_arrivals() -> None:
     cav = np.broadcast_to(g.mask, T_expected.shape)
     max_dev_K = float(np.nanmax(np.abs(r.layer_temperature_K - T_expected)[cav]))
     assert max_dev_K < 0.5
+
+
+def test_shear_heating_keeps_cold_pa66_layers_finite() -> None:
+    """Codex P1 on PR #111: PA66's wall layers start below D2 − A2, where
+    Cross-WLF gives NaN. With shear heating on, every layer viscosity the
+    solver reports must be finite, and the loop must converge."""
+    mat = MaterialDB()["PA66"]
+    solver = _strong_shear_solver(
+        material=mat,
+        melt_temperature_K=sum(mat.T_melt_recommended) / 2,
+        mold_temperature_K=sum(mat.T_mold_recommended) / 2,
+        injection_velocity_mms=200.0,
+        injection_volume_flow_cm3s=2.0,
+    )
+    r = solver.solve(num_frames=2)
+    cav = r.geometry.mask
+    assert np.all(np.isfinite(r.layer_viscosity_Pa_s_field[:, cav]))
+    assert np.all(np.isfinite(r.layer_shear_heating_dT_K[:, cav]))
+    assert r.metadata["multilayer_converged"] is True

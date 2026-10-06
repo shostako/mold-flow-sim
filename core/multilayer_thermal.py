@@ -290,6 +290,18 @@ def self_consistent_shear_heating(
     root is unique and bracketed. It is found by regula falsi with the
     Illinois modification, element by element.
 
+    A layer can sit below the temperature where the Cross-WLF form breaks
+    down (``D2 − A2``; PA66 at 164 °C, above its mold temperatures). There
+    the melt is frozen and ``cross_wlf_viscosity`` returns ``inf``, so
+    ``k·η(T_c)`` gives no upper bound; just above it the viscosity is finite
+    but absurd (1e60 Pa·s and more), so ``k·η(T_c)`` is no useful bound
+    either. For both, the bracket is grown from 1 K by doubling until ``f``
+    turns non-negative, and the root lies where the heated melt has an
+    ordinary viscosity again (Codex P1 on PR #111). The secant runs on
+    ``log ΔT − log(k·η)`` so those orders of magnitude cannot stall it. A
+    viscosity that answers NaN is rejected: it is not ordered against T,
+    and the bracket cannot be kept on it.
+
     Parameters
     ----------
     T_conduction_K
@@ -299,7 +311,8 @@ def self_consistent_shear_heating(
     t_arr_s, h_total_mm, density_kg_m3, specific_heat_J_kgK, alpha_m2_s
         As in ``shear_heating_temperature_rise``.
     viscosity
-        ``viscosity(T_K, gamma_dot)`` on flat arrays; must not rise with T.
+        ``viscosity(T_K, gamma_dot)`` on flat arrays; must not rise with T,
+        and ``inf`` (not NaN) where the melt is frozen.
     active
         Optional ``(ny, nx)`` bool mask; elsewhere the rise is 0.
     tol_K
@@ -338,44 +351,102 @@ def self_consistent_shear_heating(
     g = gamma[sel]
     k = k_all[sel]
 
-    def residual(x: np.ndarray, i: np.ndarray) -> np.ndarray:
-        return x - k[i] * np.asarray(viscosity(Tc[i] + x, g[i]), dtype=float)
+    def heated(x: np.ndarray, i: np.ndarray) -> np.ndarray:
+        """k·η(T_c + x): the stage-1 rise at the viscosity of the melt heated by x."""
+        eta = np.asarray(viscosity(Tc[i] + x, g[i]), dtype=float)
+        if np.isnan(eta).any():
+            raise ValueError(
+                "viscosity returned NaN; a frozen melt must be inf "
+                "(cross_wlf_viscosity does so since v0.60.0)"
+            )
+        return k[i] * eta
 
-    every = np.arange(Tc.size)
-    lo = np.zeros(Tc.size)
-    f_lo = residual(lo, every)  # = −k·η(T_c) ≤ 0
-    hi = -f_lo
-    f_hi = residual(hi, every)  # ≥ 0: η(T_c + hi) ≤ η(T_c)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        rise[sel] = _solve_rise(heated, Tc.size, tol_K, int(max_iterations))
+    return rise
+
+
+# Upper ends above this are not used as they come: the search grows a bracket
+# from 1 K instead. A near-frozen layer has k·η(T_c) of 1e87 K, which no
+# number of secant steps brings down to the root's scale.
+_BRACKET_CAP_K = 4096.0
+# Doublings from 1 K allowed while growing that bracket.
+_BRACKET_DOUBLINGS = 64
+
+
+def _log_gap(x: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """``log x − log q``: the residual on a scale the viscosity's orders of
+    magnitude cannot swamp. Same sign as ``x − q``."""
+    out = np.log(x) - np.log(q)
+    return np.where(x == q, 0.0, out)
+
+
+def _solve_rise(
+    heated: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n: int,
+    tol_K: float,
+    max_iterations: int,
+) -> np.ndarray:
+    """Root of ``x = heated(x)`` on ``n`` elements (``heated`` falls with x).
+
+    The upper end is ``heated(0) = k·η(T_c)`` when that is at most
+    ``_BRACKET_CAP_K``, otherwise the first of 1, 2, 4, … K with
+    ``x ≥ heated(x)``. Any upper end ``hi`` gives the lower end
+    ``heated(hi) ≤ x*``. Regula falsi with the Illinois modification then
+    runs on ``log x − log heated(x)``; convergence is judged in kelvin.
+    """
+    every = np.arange(n)
+    hi = heated(np.zeros(n), every)
+    grow = every[~(hi <= _BRACKET_CAP_K)]  # also catches inf and NaN
+    step = 1.0
+    for _ in range(_BRACKET_DOUBLINGS):
+        if grow.size == 0:
+            break
+        up = heated(np.full(grow.size, step), grow) <= step
+        hi[grow[up]] = step
+        grow = grow[~up]
+        step *= 2.0
+    if grow.size:
+        raise RuntimeError(
+            f"shear heating: no finite bracket for {grow.size} element(s) "
+            f"within {2.0**_BRACKET_DOUBLINGS:.3g} K"
+        )
+    q_hi = heated(hi, every)
+    lo = q_hi.copy()
+    q_lo = heated(lo, every)
+    g_lo = _log_gap(lo, q_lo)  # ≤ 0
+    g_hi = _log_gap(hi, q_hi)  # ≥ 0
     x = hi.copy()
-    last_side = np.zeros(Tc.size, dtype=np.int8)
+    last_side = np.zeros(n, dtype=np.int8)
     open_ = every[(hi - lo) > tol_K]
-    for _ in range(int(max_iterations)):
+    for _ in range(max_iterations):
         if open_.size == 0:
             break
         a, b = lo[open_], hi[open_]
-        fa, fb = f_lo[open_], f_hi[open_]
-        span = fb - fa
+        ga, gb = g_lo[open_], g_hi[open_]
+        span = gb - ga
         safe = np.where(span > 0.0, span, 1.0)
-        xs = np.where(span > 0.0, a - fa * (b - a) / safe, 0.5 * (a + b))
+        # A non-finite end (lo = 0) gives NaN here; bisect instead.
+        xs = np.where(span > 0.0, a - ga * (b - a) / safe, 0.5 * (a + b))
         xs = np.where((xs > a) & (xs < b), xs, 0.5 * (a + b))
-        fx = residual(xs, open_)
+        q = heated(xs, open_)
+        gx = _log_gap(xs, q)
         x[open_] = xs
-        left = fx < 0.0
+        left = gx < 0.0
         lo[open_[left]] = xs[left]
-        f_lo[open_[left]] = fx[left]
+        g_lo[open_[left]] = gx[left]
         hi[open_[~left]] = xs[~left]
-        f_hi[open_[~left]] = fx[~left]
+        g_hi[open_[~left]] = gx[~left]
         # Illinois: when the same end moves twice running, halve the value
         # kept at the other end so the secant stops creeping.
         side = np.where(left, -1, 1).astype(np.int8)
         again = last_side[open_] == side
-        f_hi[open_[again & left]] *= 0.5
-        f_lo[open_[again & ~left]] *= 0.5
+        g_hi[open_[again & left]] *= 0.5
+        g_lo[open_[again & ~left]] *= 0.5
         last_side[open_] = side
-        done = (np.abs(fx) <= tol_K) | ((hi[open_] - lo[open_]) <= tol_K)
+        done = (np.abs(xs - q) <= tol_K) | ((hi[open_] - lo[open_]) <= tol_K)
         open_ = open_[~done]
-    rise[sel] = x
-    return rise
+    return x
 
 
 def brinkman_number(

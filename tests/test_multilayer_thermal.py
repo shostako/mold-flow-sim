@@ -458,6 +458,69 @@ def test_self_consistent_rise_is_zero_without_shear_and_outside_active() -> None
     np.testing.assert_array_equal(dT[:, active], full[:, active])
 
 
+def _cold_pa66_case():
+    """PA66 layers at 75 … 230 °C: below D2 − A2 = 164 °C the Cross-WLF form
+    breaks down (the melt is frozen, viscosity inf), and just above it the
+    viscosity climbs past 1e50 Pa·s."""
+    from core.materials import MaterialDB, cross_wlf_viscosity
+
+    mat = MaterialDB().get("PA66")
+    T_c = np.linspace(348.15, 503.15, 3 * 2 * 8).reshape(3, 2, 8)
+    gamma = np.full(T_c.shape, 3.0e4)  # 1/s, a wall layer at ~2 m/s
+    common = dict(
+        t_arr_s=np.full((2, 8), 0.05),
+        h_total_mm=np.full((2, 8), 0.35),
+        density_kg_m3=float(mat.density_melt_kgm3),
+        specific_heat_J_kgK=float(mat.specific_heat_J_kgK),
+        alpha_m2_s=float(mat.thermal_diffusivity_m2_s),
+    )
+
+    def viscosity(T, g):
+        return cross_wlf_viscosity(mat, T, g, 0.0)
+
+    return mat, T_c, gamma, common, viscosity
+
+
+def test_self_consistent_rise_handles_frozen_and_near_frozen_layers() -> None:
+    """Codex P1 on PR #111: a frozen layer has no finite k·η(T_c), and a
+    near-frozen one a finite but absurd one (1e50 K and up) that no number
+    of secant steps brings down. The rise must still be the finite root of
+    the stage-1 equation to kelvin accuracy, and lift the melt to where its
+    viscosity is ordinary."""
+    import warnings
+
+    mat, T_c, gamma, common, viscosity = _cold_pa66_case()
+    cold_eta = viscosity(T_c, gamma)
+    assert np.isinf(cold_eta).any()  # the case reaches the frozen range
+    assert cold_eta[np.isfinite(cold_eta)].max() > 1e50  # and the absurd one
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        dT = self_consistent_shear_heating(
+            T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+        )
+    assert np.all(np.isfinite(dT))
+    heated = T_c + dT
+    assert np.all(heated > mat.D2 - mat.A2_tilde)
+    back = _explicit_rise(heated, gamma, common, viscosity)
+    np.testing.assert_allclose(dT, back, rtol=0.0, atol=1e-8)
+
+
+def test_self_consistent_rise_rejects_a_nan_viscosity() -> None:
+    """A viscosity that answers NaN where its model breaks down (the direct
+    Cross-WLF expression did, as inf/inf) is not ordered against T, so the
+    bracket cannot be kept on it: refuse it instead of drifting."""
+    T_c, gamma, common, _ = _strong_shear_case()
+
+    def viscosity(T, g):
+        eta = 1.0e3 * np.exp(-0.03 * (T - 400.0)) * (g / 1.0e3) ** -0.7
+        return np.where(T < 330.0, np.nan, eta)
+
+    with pytest.raises(ValueError, match="NaN"):
+        self_consistent_shear_heating(
+            T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+        )
+
+
 def test_self_consistent_rise_rejects_bad_input() -> None:
     T_c, gamma, common, viscosity = _strong_shear_case()
     with pytest.raises(ValueError, match="shapes mismatch"):

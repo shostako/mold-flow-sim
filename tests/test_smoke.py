@@ -55,6 +55,54 @@ def test_cross_wlf_viscosity_monotone_in_temperature() -> None:
     assert eta_low > eta_high > 0
 
 
+def _direct_cross_wlf(m, T, g):
+    """The Cross-WLF expression evaluated as written (the pre-fix form)."""
+    import numpy as np
+
+    dT = T - m.D2
+    denom = np.where(m.A2_tilde + dT <= 1e-6, 1e-6, m.A2_tilde + dT)
+    eta0 = m.D1 * np.exp(-m.A1 * dT / denom)
+    ratio = eta0 * np.where(g <= 1e-12, 1e-12, g) / m.tau_star
+    return eta0 / (1.0 + ratio ** (1.0 - m.n))
+
+
+def test_cross_wlf_is_frozen_not_nan_or_zero_below_its_range() -> None:
+    """Codex P1 on PR #111: near and below D2 − A2 (PA66: 164 °C, above its
+    mold temperatures) the direct expression overflows to NaN (inf/inf) or
+    0 (finite/inf). The viscosity must instead stay positive and never fall
+    as T drops -- a large finite value, or inf where the melt is frozen --
+    and match the direct expression wherever that does not overflow."""
+    import warnings
+
+    import numpy as np
+
+    from core import MaterialDB, cross_wlf_viscosity
+
+    db = MaterialDB()
+    pa = db["PA66"]
+    T = np.linspace(pa.D2 - pa.A2_tilde - 30.0, max(pa.T_melt_recommended) + 30.0, 2001)
+    for g in (1e-3, 1.0, 1e2, 1e4, 1e6):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            eta = cross_wlf_viscosity(pa, T, np.full_like(T, g))
+        assert not np.isnan(eta).any()
+        assert np.all(eta > 0.0)
+        assert np.isinf(eta[0])  # well below D2 − A2: frozen
+        assert np.all(eta[1:] <= eta[:-1])  # never falls as T drops
+        with np.errstate(all="ignore"):
+            direct = _direct_cross_wlf(pa, T, np.full_like(T, g))
+        assert np.isnan(direct).any()  # the case reaches the broken range
+        plain = np.isfinite(direct) & (direct > 0) & (direct < 1e300)
+        np.testing.assert_allclose(eta[plain], direct[plain], rtol=1e-12)
+    # the ordinary range is the direct expression bit for bit
+    for key in db.keys():
+        m = db[key]
+        Tm = np.linspace(min(m.T_melt_recommended) - 40.0, max(m.T_melt_recommended) + 40.0, 401)
+        gm = np.geomspace(1e-2, 1e6, 401)
+        np.testing.assert_array_equal(cross_wlf_viscosity(m, Tm, gm), _direct_cross_wlf(m, Tm, gm))
+    assert isinstance(cross_wlf_viscosity(pa, 300.0, 100.0), np.floating)
+
+
 def test_pp_talc_grades_are_loaded() -> None:
     """PP_T10 / PP_T20 / PP_T30 must be present in the bundled DB."""
     from core import MaterialDB

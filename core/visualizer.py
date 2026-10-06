@@ -794,6 +794,16 @@ def render_core_layer_map(
 # --------------------------------------------------------------------------
 
 
+# Upper end of a log colour scale. A melt near the bottom of the Cross-WLF
+# range has a viscosity up to 1e308 Pa·s (inf once frozen). A log axis that
+# reaches that far strides its ticks by tens of decades and puts the next one
+# past the float range, which overflows matplotlib's tick formatter (1e300
+# still does). Values above the ceiling are drawn in the top colour; 1e100 is
+# above anything the direct Cross-WLF expression ever produced (its largest
+# finite values were about 1e86).
+_LOG_SCALE_CEILING = 1e100
+
+
 def _scalar_layer_field(
     result: MultilayerFlowResult, field: str, layer_idx: int
 ) -> tuple[np.ndarray, str, str]:
@@ -863,7 +873,10 @@ def render_layer_map(
             log_scale = False
             norm = None
         else:
-            norm = mcolors.LogNorm(vmin=float(valid.min()), vmax=float(valid.max()))
+            norm = mcolors.LogNorm(
+                vmin=min(float(valid.min()), _LOG_SCALE_CEILING),
+                vmax=min(float(valid.max()), _LOG_SCALE_CEILING),
+            )
     if not log_scale:
         valid = masked[np.isfinite(masked)]
         if valid.size == 0:
@@ -947,8 +960,11 @@ def render_layer_grid(
     else:
         vmin = float(valid.min())
         vmax = float(valid.max())
+        if log_scale:
+            vmin = min(vmin, _LOG_SCALE_CEILING)
+            vmax = min(vmax, _LOG_SCALE_CEILING)
         if vmin == vmax:
-            vmax = vmin + 1.0
+            vmax = vmin + 1.0 if not log_scale else vmin * 10.0
     norm = (
         mcolors.LogNorm(vmin=vmin, vmax=vmax)
         if log_scale

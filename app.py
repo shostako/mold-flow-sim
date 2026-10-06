@@ -268,8 +268,9 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "$\\tau_{\\text{thermal}}$ は厚み方向 1D 拡散の最低モード時定数で頭打ち。"
         "実態は **粘性散逸 vs 1D 壁面冷却** の準定常バランス近似。"
-        " $T_k \\leftarrow T_{k,\\text{Neumann}} + \\Delta T_{\\text{shear},k}$ で Cross-WLF を再評価、"
-        "粘度低下→流動加速→発熱低下の負のフィードバックは fixed-point 反復で自然収束。"
+        " $T_k \\leftarrow T_{k,\\text{Neumann}} + \\Delta T_{\\text{shear},k}$ で Cross-WLF を再評価する。"
+        "$\\eta_k$ は加熱後の $T_k$ で読み、$\\Delta T_{\\text{shear},k}$ と自己整合させてセルごとに解く"
+        "（上昇が大きいほど $\\eta_k$ が下がり発熱が減るので、解は 1 つに決まる）。"
     )
 
     st.markdown("**Brinkman 数（剪断発熱の必要性診断、補正 OFF でも常時計算）**")

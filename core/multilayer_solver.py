@@ -52,7 +52,7 @@ from .multilayer_thermal import (
     brinkman_number,
     neumann_layer_temperatures,
     poiseuille_shear_rates,
-    shear_heating_temperature_rise,
+    self_consistent_shear_heating,
 )
 from .solver import (
     FlowResult,
@@ -335,6 +335,54 @@ class MultilayerHeleShawSolver:
         zeta = self.layer_zeta()
         return 0.5 * (zeta[:-1] + zeta[1:])
 
+    def _layer_temperatures(
+        self,
+        t_arr: np.ndarray,
+        h_open: np.ndarray,
+        zeta_centers: np.ndarray,
+        alpha: float,
+        layer_gamma_dot: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Layer temperatures for the arrival times ``t_arr``.
+
+        The Neumann conduction profile, plus -- with shear heating on -- the
+        stage-1 rise solved together with the viscosity it heats
+        (``self_consistent_shear_heating``). Returns ``(T_k, ΔT_shear)``;
+        the rise is ``None`` with shear heating off. A function of
+        ``t_arr`` alone, so the fixed point's start-of-iteration reading and
+        the end-of-loop re-read are the same map.
+        """
+        cavity_mask = self.geometry.mask
+        layer_T_K = neumann_layer_temperatures(
+            zeta_centers=zeta_centers,
+            t_arr_s=t_arr,
+            h_total_mm=h_open,
+            T_melt_K=float(self.melt_temperature_K),
+            T_mold_K=float(self.mold_temperature_K),
+            alpha_m2_s=alpha,
+        )
+        if not self.shear_heating_enabled:
+            return layer_T_K, None
+        material = self.material
+
+        def viscosity(T_K: np.ndarray, gamma_dot: np.ndarray) -> np.ndarray:
+            return cross_wlf_viscosity(material, T_K, gamma_dot, 0.0)
+
+        # Only inside the cavity: outside cells carry placeholder
+        # temperatures that must not be perturbed.
+        rise = self_consistent_shear_heating(
+            T_conduction_K=layer_T_K,
+            gamma_dot_per_layer_s_inv=layer_gamma_dot,
+            t_arr_s=t_arr,
+            h_total_mm=h_open,
+            density_kg_m3=float(material.density_melt_kgm3),
+            specific_heat_J_kgK=float(material.specific_heat_J_kgK),
+            alpha_m2_s=alpha,
+            viscosity=viscosity,
+            active=cavity_mask,
+        )
+        return layer_T_K + rise, rise
+
     def _fixed_point(
         self,
         h_open: np.ndarray,
@@ -429,45 +477,16 @@ class MultilayerHeleShawSolver:
                 # does not see zero (it has its own floor too).
                 t_arr = np.where(np.isnan(t_arr), 0.0, t_arr)
 
-                layer_T_K = neumann_layer_temperatures(
-                    zeta_centers=zeta_centers,
-                    t_arr_s=t_arr,
-                    h_total_mm=h_open,
-                    T_melt_K=float(self.melt_temperature_K),
-                    T_mold_K=float(self.mold_temperature_K),
-                    alpha_m2_s=alpha,
+                # Shear heating (stage 1, optional) is solved together with
+                # the viscosity it heats. Feeding the last iteration's
+                # viscosity into the rise instead lags by one iteration; under
+                # strong shear on cold melt the lag alternates and barely
+                # settles, and with the arrival times moving too the loop
+                # rocked between two states and never converged
+                # (mold-flow-fangate2's default gates, Brinkman number up to 48).
+                layer_T_K, layer_shear_dT_K = self._layer_temperatures(
+                    t_arr, h_open, zeta_centers, alpha, layer_gamma_dot
                 )
-
-                # Shear-heating correction (stage 1, optional). Uses the
-                # *previous* iteration's per-layer viscosity to evaluate
-                # the volumetric heat source — this lags by one iteration
-                # but converges along with the rest of the fixed-point
-                # since η drops as T rises.
-                if self.shear_heating_enabled:
-                    if layer_eta_Pa_s is None:
-                        # First iteration: bootstrap with the bulk
-                        # representative viscosity, broadcast to all
-                        # layers and cells.
-                        eta_prev_field = np.full(
-                            (self.num_layers,) + h_open.shape,
-                            float(eta_baseline),
-                            dtype=float,
-                        )
-                    else:
-                        eta_prev_field = layer_eta_Pa_s
-                    layer_shear_dT_K = shear_heating_temperature_rise(
-                        eta_per_layer_Pa_s=eta_prev_field,
-                        gamma_dot_per_layer_s_inv=layer_gamma_dot,
-                        t_arr_s=t_arr,
-                        h_total_mm=h_open,
-                        density_kg_m3=float(self.material.density_melt_kgm3),
-                        specific_heat_J_kgK=float(self.material.specific_heat_J_kgK),
-                        alpha_m2_s=alpha,
-                    )
-                    # Apply only inside the cavity (outside cells have
-                    # T_bulk placeholders that should not be perturbed).
-                    layer_shear_dT_K = np.where(cavity_mask[None, :, :], layer_shear_dT_K, 0.0)
-                    layer_T_K = layer_T_K + layer_shear_dT_K
 
                 # Cells outside the cavity carry no meaningful temperature.
                 # Use the bulk so cross_wlf is well-defined (the conductance
@@ -558,25 +577,9 @@ class MultilayerHeleShawSolver:
                 # P2 on mold-flow-fangate2#13).
                 t_arr_end = base._arrival_time_field(tau, ~np.isnan(tau), cell_volume, T_fill)
                 t_arr_end = np.where(np.isnan(t_arr_end), 0.0, t_arr_end)
-                T_end = neumann_layer_temperatures(
-                    zeta_centers=zeta_centers,
-                    t_arr_s=t_arr_end,
-                    h_total_mm=h_open,
-                    T_melt_K=float(self.melt_temperature_K),
-                    T_mold_K=float(self.mold_temperature_K),
-                    alpha_m2_s=alpha,
+                T_end, _ = self._layer_temperatures(
+                    t_arr_end, h_open, zeta_centers, alpha, layer_gamma_dot
                 )
-                if self.shear_heating_enabled and layer_eta_Pa_s is not None:
-                    dT_end = shear_heating_temperature_rise(
-                        eta_per_layer_Pa_s=layer_eta_Pa_s,
-                        gamma_dot_per_layer_s_inv=layer_gamma_dot,
-                        t_arr_s=t_arr_end,
-                        h_total_mm=h_open,
-                        density_kg_m3=float(self.material.density_melt_kgm3),
-                        specific_heat_J_kgK=float(self.material.specific_heat_J_kgK),
-                        alpha_m2_s=alpha,
-                    )
-                    T_end = T_end + np.where(cavity_mask[None, :, :], dT_end, 0.0)
                 layer_T_K_end = T_end
                 short_shot_mask_end = cavity_mask & (T_end[k_mid] <= T_solid_K)
 

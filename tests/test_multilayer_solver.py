@@ -808,6 +808,128 @@ def test_shear_heating_metadata_contains_material_thermal_fields() -> None:
     )
 
 
+def _strong_shear_solver(**overrides) -> MultilayerHeleShawSolver:
+    """A 20 × 8 mm plate, 0.35 mm PP-T20, gated at the middle of one long
+    edge, V = 2 m/s on a slow 0.2 cm³/s shot: strong wall shear on melt
+    that has cooled for a while (Brinkman number about 20). With the rise
+    taken on the last iteration's viscosity, the layered fixed point did
+    not converge in 12 iterations here, neither in ``solve`` nor in the
+    two-phase injection phase -- the small stand-in for mold-flow-fangate2's
+    default gates."""
+    from core.geometry import Geometry
+
+    ny, nx = 8, 20
+    geom = Geometry(
+        mask=np.ones((ny, nx), dtype=bool),
+        thickness_mm=np.full((ny, nx), 0.35),
+        cell_size_mm=1.0,
+    )
+    geom.add_gate(0, nx // 2)
+    mat = MaterialDB()["PP_T20"]
+    kw = dict(
+        geometry=geom,
+        material=mat,
+        melt_temperature_K=sum(mat.T_melt_recommended) / 2,
+        mold_temperature_K=sum(mat.T_mold_recommended) / 2,
+        injection_velocity_mms=2000.0,
+        injection_volume_flow_cm3s=0.2,
+        num_layers=7,
+        layer_distribution="wall_refined",
+        thermal_coupling=True,
+        shear_heating_enabled=True,
+        max_iterations=12,
+    )
+    kw.update(overrides)
+    return MultilayerHeleShawSolver(**kw)
+
+
+def test_strong_shear_heating_converges_within_the_default_budget() -> None:
+    from core.two_phase import solve_two_phase_short_shot
+
+    solver = _strong_shear_solver()
+    r = solver.solve(num_frames=2)
+    assert r.metadata["brinkman_number_max"] > 10.0  # the case is strong shear
+    assert r.metadata["multilayer_converged"] is True
+    assert r.metadata["multilayer_iterations"] <= 12
+    V_cav = float((solver.geometry.thickness_mm * solver.geometry.mask).sum()) * 1e-3
+    tp = solve_two_phase_short_shot(solver, 0.8 * V_cav)
+    assert tp.metadata["multilayer_converged"] is True
+
+
+def test_strong_shear_rise_is_read_at_the_viscosity_it_produces() -> None:
+    """Stage 1 gives each layer ΔT_k = η_k·γ̇_k²·t_eff/(ρ·cp) with one t_eff
+    per cell, and η_k is the viscosity at the heated temperature. So the
+    reported rise divided by the reported η_k·γ̇_k² is the same in every
+    layer of a cell. With the rise taken on the previous iteration's
+    viscosity, the reported η_k is not the one that made the rise."""
+    r = _strong_shear_solver().solve(num_frames=2)
+    cav = r.geometry.mask
+    dT = r.layer_shear_heating_dT_K[:, cav]
+    q = r.layer_viscosity_Pa_s_field[:, cav] * r.layer_shear_rate_s_inv[:, cav] ** 2
+    per_cell = dT[0] / q[0]  # the wall layer: the largest rise
+    np.testing.assert_allclose(dT, q * per_cell[None, :], rtol=1e-6, atol=1e-8)
+
+
+def test_strong_shear_fixed_point_is_a_fixed_point_of_the_lagged_map(monkeypatch) -> None:
+    """Solving the rise with its own viscosity changes the path, not the
+    destination. From the converged state (tight tolerance), one round of
+    the original update -- the rise on the given viscosity, then η, then τ --
+    must hand back the same τ."""
+    from core.materials import cross_wlf_viscosity
+    from core.multilayer_thermal import (
+        neumann_layer_temperatures,
+        shear_heating_temperature_rise,
+    )
+
+    seen: list = []
+    orig = MultilayerHeleShawSolver._fixed_point
+
+    def spy(self, *a, **k):
+        out = orig(self, *a, **k)
+        seen.append((a, out))
+        return out
+
+    monkeypatch.setattr(MultilayerHeleShawSolver, "_fixed_point", spy)
+    solver = _strong_shear_solver(convergence_tol=1e-9, max_iterations=60)
+    solver.solve(num_frames=2)
+    (h, gates, _), out = seen[0]
+    assert out["converged"] is True
+    geom = solver.geometry
+    base = solver._base
+
+    tau, T_fill = out["tau"], out["T_fill"]
+    cell_volume = geom.cell_size_mm**2 * h
+    t_arr = base._arrival_time_field(tau, ~np.isnan(tau), cell_volume, T_fill)
+    t_arr = np.where(np.isnan(t_arr), 0.0, t_arr)
+    mat = solver.material
+    alpha = float(mat.thermal_diffusivity_m2_s)
+    T_N = neumann_layer_temperatures(
+        zeta_centers=solver.layer_zeta_centers(),
+        t_arr_s=t_arr,
+        h_total_mm=h,
+        T_melt_K=solver.melt_temperature_K,
+        T_mold_K=solver.mold_temperature_K,
+        alpha_m2_s=alpha,
+    )
+    rise = shear_heating_temperature_rise(
+        eta_per_layer_Pa_s=out["layer_eta_Pa_s"],  # the lag: the last viscosity
+        gamma_dot_per_layer_s_inv=out["layer_gamma_dot"],
+        t_arr_s=t_arr,
+        h_total_mm=h,
+        density_kg_m3=float(mat.density_melt_kgm3),
+        specific_heat_J_kgK=float(mat.specific_heat_J_kgK),
+        alpha_m2_s=alpha,
+    )
+    eta = cross_wlf_viscosity(mat, T_N + rise, out["layer_gamma_dot"], 0.0)
+    S = _multilayer_conductance(
+        h_total_mm=h, eta_per_layer_Pa_s=eta, moments=solver.layer_moments(), cavity_mask=geom.mask
+    )
+    tau_next, _ = base._solve_tau_field(S, gates)
+    m = ~np.isnan(tau)
+    rel = np.linalg.norm(tau_next[m] - tau[m]) / np.linalg.norm(tau[m])
+    assert rel < 1e-8
+
+
 # --------------------------------------------------------------------------
 # Gate reachability (Issue #58)
 # --------------------------------------------------------------------------

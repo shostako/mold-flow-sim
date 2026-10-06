@@ -25,6 +25,7 @@ from core.multilayer_thermal import (
     brinkman_number,
     neumann_layer_temperatures,
     poiseuille_shear_rates,
+    self_consistent_shear_heating,
     shear_heating_temperature_rise,
 )
 
@@ -331,6 +332,148 @@ def test_shear_heating_rejects_shape_mismatch() -> None:
             density_kg_m3=738.0,
             specific_heat_J_kgK=2400.0,
             alpha_m2_s=9e-8,
+        )
+
+
+# --------------------------------------------------------------------------
+# Shear-heating rise solved with the viscosity it heats
+# --------------------------------------------------------------------------
+
+
+def _strong_shear_case(V_mms: float = 2000.0):
+    """A 0.35 mm PP-T20 plate cut into 7 wall-refined layers at V = 2 m/s,
+    cooled for 0 … 0.4 s: wall shear on cold melt, where the one-iteration
+    lag of the stage-1 rise rocks between two states."""
+    from core.materials import MaterialDB, cross_wlf_viscosity
+    from core.multilayer_solver import _wall_refined_layer_zeta
+
+    mat = MaterialDB().get("PP_T20")
+    T_melt = sum(mat.T_melt_recommended) / 2
+    T_mold = sum(mat.T_mold_recommended) / 2
+    zeta = _wall_refined_layer_zeta(7)
+    zc = 0.5 * (zeta[:-1] + zeta[1:])
+    t_arr = np.linspace(0.0, 0.4, 24).reshape(4, 6)
+    h = np.full((4, 6), 0.35)
+    alpha = float(mat.thermal_diffusivity_m2_s)
+    T_c = neumann_layer_temperatures(
+        zeta_centers=zc,
+        t_arr_s=t_arr,
+        h_total_mm=h,
+        T_melt_K=T_melt,
+        T_mold_K=T_mold,
+        alpha_m2_s=alpha,
+    )
+    gamma = poiseuille_shear_rates(zeta_centers=zc, V_mms=V_mms, h_total_mm=h, floor_factor=0.01)
+    common = dict(
+        t_arr_s=t_arr,
+        h_total_mm=h,
+        density_kg_m3=float(mat.density_melt_kgm3),
+        specific_heat_J_kgK=float(mat.specific_heat_J_kgK),
+        alpha_m2_s=alpha,
+    )
+
+    def viscosity(T, g):
+        return cross_wlf_viscosity(mat, T, g, 0.0)
+
+    return T_c, gamma, common, viscosity
+
+
+def _explicit_rise(T, gamma, common, viscosity):
+    """The stage-1 rise with the viscosity read at ``T`` (the explicit form)."""
+    return shear_heating_temperature_rise(
+        eta_per_layer_Pa_s=viscosity(T, gamma), gamma_dot_per_layer_s_inv=gamma, **common
+    )
+
+
+def test_self_consistent_rise_solves_the_stage1_equation() -> None:
+    """The rise is the one the stage-1 formula gives at the viscosity of
+    the heated melt: ΔT = rise(η(T_c + ΔT)), to the root tolerance."""
+    T_c, gamma, common, viscosity = _strong_shear_case()
+    dT = self_consistent_shear_heating(
+        T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+    )
+    back = _explicit_rise(T_c + dT, gamma, common, viscosity)
+    np.testing.assert_allclose(dT, back, rtol=0.0, atol=1e-8)
+    # and it is a real correction here, not a rounding-level one
+    assert float(dT.max()) > 20.0
+
+
+def test_self_consistent_rise_is_bounded_by_the_unheated_viscosity() -> None:
+    """η never rises with T, so the heated rise lies between 0 and the rise
+    at the conduction temperature."""
+    T_c, gamma, common, viscosity = _strong_shear_case()
+    dT = self_consistent_shear_heating(
+        T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+    )
+    upper = _explicit_rise(T_c, gamma, common, viscosity)
+    assert np.all(dT >= 0.0)
+    assert np.all(dT <= upper + 1e-12)
+
+
+def test_lagged_rise_alternates_around_the_solution_and_barely_settles() -> None:
+    """Feeding the last viscosity into the rise iterates the decreasing map
+    ΔT ↦ rise(η(T_c + ΔT)). A decreasing map's consecutive iterates always
+    lie on opposite sides of its fixed point, so the solved rise sits
+    between every pair of lagged iterates. Under this strong shear the
+    swing shrinks by a factor close to 1 per round, so after the layered
+    solver's default 12 iterations the lag is still tens of kelvin off --
+    the slow mode that, coupled to the moving arrival times, kept the
+    layered fixed point from converging on mold-flow-fangate2's gates."""
+    T_c, gamma, common, viscosity = _strong_shear_case()
+    dT = self_consistent_shear_heating(
+        T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+    )
+    iterates = [np.zeros_like(T_c)]
+    for _ in range(12):
+        iterates.append(_explicit_rise(T_c + iterates[-1], gamma, common, viscosity))
+    for a, b in zip(iterates[1:-1], iterates[2:]):
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        assert np.all(dT >= lo - 1e-9)
+        assert np.all(dT <= hi + 1e-9)
+    assert float(np.max(np.abs(iterates[-1] - dT))) > 20.0
+
+
+def test_self_consistent_rise_is_zero_without_shear_and_outside_active() -> None:
+    T_c, gamma, common, viscosity = _strong_shear_case()
+    still = self_consistent_shear_heating(
+        T_conduction_K=T_c,
+        gamma_dot_per_layer_s_inv=np.zeros_like(gamma),
+        viscosity=viscosity,
+        **common,
+    )
+    assert np.all(still == 0.0)
+    active = np.zeros(T_c.shape[1:], dtype=bool)
+    active[1:3, 2:5] = True
+    dT = self_consistent_shear_heating(
+        T_conduction_K=T_c,
+        gamma_dot_per_layer_s_inv=gamma,
+        viscosity=viscosity,
+        active=active,
+        **common,
+    )
+    full = self_consistent_shear_heating(
+        T_conduction_K=T_c, gamma_dot_per_layer_s_inv=gamma, viscosity=viscosity, **common
+    )
+    assert np.all(dT[:, ~active] == 0.0)
+    np.testing.assert_array_equal(dT[:, active], full[:, active])
+
+
+def test_self_consistent_rise_rejects_bad_input() -> None:
+    T_c, gamma, common, viscosity = _strong_shear_case()
+    with pytest.raises(ValueError, match="shapes mismatch"):
+        self_consistent_shear_heating(
+            T_conduction_K=T_c[:, :, :3],
+            gamma_dot_per_layer_s_inv=gamma,
+            viscosity=viscosity,
+            **common,
+        )
+    with pytest.raises(ValueError, match="max_iterations"):
+        self_consistent_shear_heating(
+            T_conduction_K=T_c,
+            gamma_dot_per_layer_s_inv=gamma,
+            viscosity=viscosity,
+            max_iterations=0,
+            **common,
         )
 
 

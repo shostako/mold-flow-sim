@@ -71,6 +71,8 @@ self-consistently.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from scipy.special import erf
 
@@ -239,6 +241,141 @@ def shear_heating_temperature_rise(
     t_eff = np.minimum(t_arr_s[None, :, :], tau_thermal[None, :, :])
     t_eff = np.maximum(t_eff, 0.0)
     return q_dot * t_eff / rho_cp
+
+
+# Root-finding controls for ``self_consistent_shear_heating``. The residual
+# ``f(ΔT) = ΔT − k·η(T_c + ΔT)`` has slope ≥ 1 (η falls with T), so
+# ``|f| ≤ tol`` bounds the error on ΔT itself by ``tol``.
+SHEAR_HEATING_TOL_K = 1e-9
+SHEAR_HEATING_MAX_ITERATIONS = 100
+
+
+def self_consistent_shear_heating(
+    T_conduction_K: np.ndarray,
+    gamma_dot_per_layer_s_inv: np.ndarray,
+    t_arr_s: np.ndarray,
+    h_total_mm: np.ndarray,
+    density_kg_m3: float,
+    specific_heat_J_kgK: float,
+    alpha_m2_s: float,
+    viscosity: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    active: np.ndarray | None = None,
+    tol_K: float = SHEAR_HEATING_TOL_K,
+    max_iterations: int = SHEAR_HEATING_MAX_ITERATIONS,
+) -> np.ndarray:
+    """Stage-1 rise with the viscosity read at the heated temperature.
+
+    ``shear_heating_temperature_rise`` takes the viscosity as given. Inside
+    the fixed point the viscosity in turn depends on the temperature the
+    rise produces, so the stage-1 model is the per-element equation
+
+        ΔT = η(T_c + ΔT, γ̇) · γ̇² · min(t_arr, τ_thermal) / (ρ · cp)
+
+    with ``T_c`` the conduction (Neumann) temperature. Feeding the last
+    iteration's viscosity into the rise instead -- a one-iteration lag --
+    iterates the map ``ΔT ↦ k·η(T_c + ΔT)``. The map falls with ΔT (a
+    large rise thins the melt, which gives a small rise next time), so the
+    lagged iterates alternate on either side of the solution, and the error
+    shrinks each round only by the slope ``ΔT·|d ln η/dT|``. Under strong
+    shear on cold melt that slope comes close to 1 (0.98 on a 0.35 mm PP-T20
+    wall layer at 2 m/s): twelve rounds barely move the swing. Inside the
+    layered fixed point the arrival times move with τ at the same time, and
+    on mold-flow-fangate2's default gates the joint iteration rocked between
+    two states and never converged. Solving the equation outright removes
+    the lag; the solution is the fixed point the lagged loop would reach if
+    it converged.
+
+    ``f(ΔT) = ΔT − k·η(T_c + ΔT)`` is strictly increasing (slope ≥ 1 since
+    η never rises with T), ``f(0) ≤ 0`` and ``f(k·η(T_c)) ≥ 0``, so the
+    root is unique and bracketed. It is found by regula falsi with the
+    Illinois modification, element by element.
+
+    Parameters
+    ----------
+    T_conduction_K
+        ``(N, ny, nx)`` temperatures before the rise.
+    gamma_dot_per_layer_s_inv
+        ``(N, ny, nx)`` shear rates in s⁻¹.
+    t_arr_s, h_total_mm, density_kg_m3, specific_heat_J_kgK, alpha_m2_s
+        As in ``shear_heating_temperature_rise``.
+    viscosity
+        ``viscosity(T_K, gamma_dot)`` on flat arrays; must not rise with T.
+    active
+        Optional ``(ny, nx)`` bool mask; elsewhere the rise is 0.
+    tol_K
+        Bound on the residual (and so on the error of ΔT) in K.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N, ny, nx)`` rise in K, non-negative.
+    """
+    T_c = np.asarray(T_conduction_K, dtype=float)
+    gamma = np.asarray(gamma_dot_per_layer_s_inv, dtype=float)
+    if T_c.shape != gamma.shape:
+        raise ValueError(f"T and gamma shapes mismatch: {T_c.shape} vs {gamma.shape}")
+    if max_iterations < 1:
+        raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
+    # k = γ̇²·t_eff/(ρ·cp): the stage-1 rise per unit viscosity, through the
+    # same expression (and the same τ_thermal cap) as the explicit form.
+    k_all = shear_heating_temperature_rise(
+        eta_per_layer_Pa_s=np.ones_like(gamma),
+        gamma_dot_per_layer_s_inv=gamma,
+        t_arr_s=t_arr_s,
+        h_total_mm=h_total_mm,
+        density_kg_m3=density_kg_m3,
+        specific_heat_J_kgK=specific_heat_J_kgK,
+        alpha_m2_s=alpha_m2_s,
+    )
+    sel = k_all > 0.0
+    if active is not None:
+        sel &= np.broadcast_to(np.asarray(active, dtype=bool)[None, :, :], T_c.shape)
+    rise = np.zeros_like(T_c)
+    if not sel.any():
+        return rise
+
+    Tc = T_c[sel]
+    g = gamma[sel]
+    k = k_all[sel]
+
+    def residual(x: np.ndarray, i: np.ndarray) -> np.ndarray:
+        return x - k[i] * np.asarray(viscosity(Tc[i] + x, g[i]), dtype=float)
+
+    every = np.arange(Tc.size)
+    lo = np.zeros(Tc.size)
+    f_lo = residual(lo, every)  # = −k·η(T_c) ≤ 0
+    hi = -f_lo
+    f_hi = residual(hi, every)  # ≥ 0: η(T_c + hi) ≤ η(T_c)
+    x = hi.copy()
+    last_side = np.zeros(Tc.size, dtype=np.int8)
+    open_ = every[(hi - lo) > tol_K]
+    for _ in range(int(max_iterations)):
+        if open_.size == 0:
+            break
+        a, b = lo[open_], hi[open_]
+        fa, fb = f_lo[open_], f_hi[open_]
+        span = fb - fa
+        safe = np.where(span > 0.0, span, 1.0)
+        xs = np.where(span > 0.0, a - fa * (b - a) / safe, 0.5 * (a + b))
+        xs = np.where((xs > a) & (xs < b), xs, 0.5 * (a + b))
+        fx = residual(xs, open_)
+        x[open_] = xs
+        left = fx < 0.0
+        lo[open_[left]] = xs[left]
+        f_lo[open_[left]] = fx[left]
+        hi[open_[~left]] = xs[~left]
+        f_hi[open_[~left]] = fx[~left]
+        # Illinois: when the same end moves twice running, halve the value
+        # kept at the other end so the secant stops creeping.
+        side = np.where(left, -1, 1).astype(np.int8)
+        again = last_side[open_] == side
+        f_hi[open_[again & left]] *= 0.5
+        f_lo[open_[again & ~left]] *= 0.5
+        last_side[open_] = side
+        done = (np.abs(fx) <= tol_K) | ((hi[open_] - lo[open_]) <= tol_K)
+        open_ = open_[~done]
+    rise[sel] = x
+    return rise
 
 
 def brinkman_number(

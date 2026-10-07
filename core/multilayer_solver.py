@@ -463,6 +463,7 @@ class MultilayerHeleShawSolver:
                 repr(
                     (
                         self.geometry.mask.tobytes(),
+                        float(self.geometry.cell_size_mm),
                         tuple(self.geometry.gates),
                         self.material,
                         self.melt_temperature_K,

@@ -21,15 +21,18 @@ This is a translation of the Japanese `CHANGELOG.md`. If the two disagree, the J
   `Σ S_ij (p_i − p_j) = (V_i − C_i)/dt + q_i`, pushing out what it took beyond its capacity in the previous step, so the volume is conserved to round-off. A cell
   that fills during a step is stamped with the time its capacity was reached, interpolated linearly, and its conductance is evaluated once at that time and kept.
   The next step is as long as the next front cells can take without exceeding their capacity (CFL; their inflow is estimated from the neighbours that just filled).
-  Steps never cross a switch of a staged profile, and the last step does not deliver more than the cavity has room for.
+  Steps never cross a switch of a staged profile. No step delivers more than the cavity's net room (net of the surplus cells hold), and once that room is
+  gone the steps only move the surplus on. The end-of-fill pressure map is the pressure the injection needed in the last delivering step (without the
+  surplus push, which scales as 1/dt and dominates a short step).
 - `MultilayerHeleShawSolver(fill_method="march")` (keyword-only; `march_cfl`, `march_dt_max_fraction`): `_march_state` advances the front instead of
   `_fixed_point`. The clock has the fixed point's length (the main solve's `T_fill_baseline` with the ICM speed-up, the two-phase injection phase's metered V/Q)
   and is rate-controlled (no constant-pressure stretching). A staged profile is followed through its volume→time map renormalized onto the clock, as in
   `_arrival_time_field`. Each cell's layers are read at the time the melt reached it (front cells at the current time), with the fixed point's temperature,
   shear-rate and viscosity reading; only the way the fill is ordered changes. There is no iteration: the arrival times come out causally. The stage switches of a staged profile are passed to the marcher on the clock, so no step
   straddles one (Codex P2 on PR #114). `fill_time_s` holds the
-  arrival times themselves and `pressure_norm` the pressure solved at the end of the fill. The metadata adds `fill_method` and `march_steps`. The last march is
-  memoized with everything it read, so the two-phase model asking for the same injection phase per metered volume runs it once.
+  arrival times themselves and `pressure_norm` the pressure solved at the end of the fill. The metadata adds `fill_method` and `march_steps`; `T_fill_inflation` stays
+  near 1 (rate control, not the fixed point's constant-pressure stretch) and `tau_max_baseline` is null. The last march is memoized with everything it read
+  (cell size included), so the two-phase model asking for the same injection phase per metered volume runs it once.
 - Two-phase short shot: when the multilayer solver is set to march, the injection phase marches too (`tau1` holds the arrival times; the pool is the volume
   prefix in that order). The metadata adds `fill_method`.
 - UI: a "充填の解き方" (fill method) radio under the multilayer wall model (default: the single solve). Recorded as `wall_cooling.fill_method` in settings.json;

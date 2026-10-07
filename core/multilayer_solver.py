@@ -75,6 +75,7 @@ from .solver import (
     check_gate_reachability,
     weld_score_from_angle,
 )
+from .transient_fill import march_fill
 
 
 @dataclass
@@ -309,12 +310,36 @@ class MultilayerHeleShawSolver:
     # ultra-thin plates (t < 0.5 mm) where Br ≫ 1.
     shear_heating_enabled: bool = False
 
+    # ----- how the fill is ordered (v0.62.0) -----
+    # "tau": one elliptic solve orders the fill (the τ ↔ t_arr fixed point
+    # above). "march": the front is advanced in time (core.transient_fill) on
+    # the machine clock; each cell's layers are read at the time the melt
+    # reached it -- the same arrival-time temperature model, so only the way
+    # the fill is ordered changes. The τ solve fills the deep parts of a gate
+    # block before the thin product; the photos do not (see transient_fill).
+    # Keyword-only so the positional order of the fields above stays put.
+    fill_method: str = field(default="tau", kw_only=True)
+    #: march: the fastest front cell takes at most this many cells of melt per step
+    march_cfl: float = field(default=1.0, kw_only=True)
+    #: march: the longest step as a fraction of the fill time
+    march_dt_max_fraction: float = field(default=0.005, kw_only=True)
+
     # Internal helper, populated in __post_init__.
     _base: HeleShawSolver = field(init=False, repr=False)
+    # The last march, keyed by everything it read: the two-phase model asks for
+    # the same injection-phase march once per metered volume (a bisection on
+    # the shot asks a dozen times), and the march is the expensive part.
+    _march_memo: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.num_layers < 1:
             raise ValueError(f"num_layers must be >= 1 (got {self.num_layers})")
+        if self.fill_method not in ("tau", "march"):
+            raise ValueError(f"fill_method must be 'tau' or 'march' (got {self.fill_method!r})")
+        if not 0.0 < float(self.march_dt_max_fraction) <= 1.0:
+            raise ValueError(
+                f"march_dt_max_fraction must be in (0, 1] (got {self.march_dt_max_fraction})"
+            )
         self._base = HeleShawSolver(
             geometry=self.geometry,
             material=self.material,
@@ -366,6 +391,7 @@ class MultilayerHeleShawSolver:
         zeta_centers: np.ndarray,
         alpha: float,
         layer_gamma_dot: np.ndarray,
+        active: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None]:
         """Layer temperatures for the arrival times ``t_arr``.
 
@@ -374,9 +400,11 @@ class MultilayerHeleShawSolver:
         (``self_consistent_shear_heating``). Returns ``(T_k, ΔT_shear)``;
         the rise is ``None`` with shear heating off. A function of
         ``t_arr`` alone, so the fixed point's start-of-iteration reading and
-        the end-of-loop re-read are the same map.
+        the end-of-loop re-read are the same map. ``active`` (default: the
+        cavity) is where the shear-heating rise is solved; the march passes
+        lists of cells shaped ``(n, 1)``.
         """
-        cavity_mask = self.geometry.mask
+        cavity_mask = self.geometry.mask if active is None else active
         layer_T_K = neumann_layer_temperatures(
             zeta_centers=zeta_centers,
             t_arr_s=t_arr,
@@ -424,7 +452,41 @@ class MultilayerHeleShawSolver:
         shot is rate-controlled by definition, so the two-phase injection
         phase (``core.two_phase``) reads the layers on the machine clock.
         Returns the converged state as a dict of the locals ``solve`` uses.
+
+        With ``fill_method="march"`` the fill is advanced in time instead
+        (``_march_state``); it is rate-controlled by construction.
         """
+        if self.fill_method == "march":
+            key = (
+                h_open.tobytes(),
+                float(T_fill_baseline),
+                repr(
+                    (
+                        self.geometry.mask.tobytes(),
+                        tuple(self.geometry.gates),
+                        self.material,
+                        self.melt_temperature_K,
+                        self.mold_temperature_K,
+                        self.injection_velocity_mms,
+                        self.injection_volume_flow_cm3s,
+                        self.injection_profile,
+                        self.num_layers,
+                        self.layer_distribution,
+                        self.thermal_coupling,
+                        self.shear_rate_floor_factor,
+                        self.solidification_temperature_fraction,
+                        self.shear_heating_enabled,
+                        self.march_cfl,
+                        self.march_dt_max_fraction,
+                    )
+                ),
+            )
+            if self._march_memo is None or self._march_memo[0] != key:
+                self._march_memo = (key, self._march_state(h_open, T_fill_baseline))
+            return {
+                k: (v.copy() if isinstance(v, np.ndarray) else v)
+                for k, v in self._march_memo[1].items()
+            }
         base = self._base
         eta_baseline = base._effective_viscosity()
         cavity_mask = self.geometry.mask
@@ -648,6 +710,153 @@ class MultilayerHeleShawSolver:
             "T_solid_K": T_solid_K,
         }
 
+    def _march_state(self, h_open: np.ndarray, T_clock: float) -> dict:
+        """The fill advanced in time on the ``h_open`` cavity (``fill_method="march"``).
+
+        The machine delivers the open cavity's volume in ``T_clock``; with an
+        injection profile it follows the profile's volume→time map,
+        renormalized onto ``T_clock`` the way ``_arrival_time_field`` does, so
+        both fill methods run on the same clock. Each cell's conductance is the
+        layer integral at the time the melt reached it -- front cells at the
+        current time -- with the temperature, shear-rate and viscosity reading
+        of the τ fixed point. There is nothing to iterate: the arrival times
+        come out causally. Returns the dict ``_fixed_point`` returns, with the
+        arrival times [s] in ``tau`` (and in ``t_arr``) and the pressure at the
+        end of the fill in ``p_end``.
+        """
+        if T_clock <= 0:
+            raise ValueError(f"the fill clock must be positive (got {T_clock})")
+        base = self._base
+        mask = self.geometry.mask
+        moments = self.layer_moments()
+        zeta_centers = self.layer_zeta_centers()
+        h_layers = self.layer_thickness_mm(h_open)
+        dx = float(self.geometry.cell_size_mm)
+        cell_volume = dx * dx * h_open  # mm^3
+        V_open = float(cell_volume[mask].sum())
+        T_solid_K = self.mold_temperature_K + float(self.solidification_temperature_fraction) * (
+            self.melt_temperature_K - self.mold_temperature_K
+        )
+        prof = self.injection_profile
+        if prof is None:
+
+            def injected_mm3(t: float) -> float:
+                return V_open * t / T_clock
+
+            def time_at_mm3(v: float) -> float:
+                return T_clock * v / V_open
+
+        else:
+            t_total = float(prof.time_at_volume_mm3(V_open))
+
+            def injected_mm3(t: float) -> float:
+                return float(prof.volume_at_time_s(t * t_total / T_clock))
+
+            def time_at_mm3(v: float) -> float:
+                return T_clock * float(prof.time_at_volume_mm3(v)) / t_total
+
+        gates = [(iy, ix) for iy, ix in self.geometry.gates if mask[iy, ix]]
+        t_start = time_at_mm3(float(sum(cell_volume[g] for g in gates)))
+        alpha = max(float(self.material.thermal_diffusivity_m2_s), 0.0)
+        V_mms = float(self.injection_velocity_mms)
+        floor = float(self.shear_rate_floor_factor)
+        h_flat = h_open.ravel()
+
+        if self.thermal_coupling:
+
+            def conductance(idx: np.ndarray, t_arr: np.ndarray) -> np.ndarray:
+                # the cells as an (n, 1) grid, so the grid-shaped helpers apply as they are
+                h = h_flat[idx][:, None]
+                ta = np.asarray(t_arr, dtype=float)[:, None]
+                ones = np.ones(h.shape, dtype=bool)
+                gam = poiseuille_shear_rates(
+                    zeta_centers=zeta_centers, V_mms=V_mms, h_total_mm=h, floor_factor=floor
+                )
+                T_k, _ = self._layer_temperatures(ta, h, zeta_centers, alpha, gam, active=ones)
+                eta = np.asarray(cross_wlf_viscosity(self.material, T_k, gam, 0.0), dtype=float)
+                return _multilayer_conductance(
+                    h_total_mm=h, eta_per_layer_Pa_s=eta, moments=moments, cavity_mask=ones
+                )[:, 0]
+
+        else:
+            S_field = _multilayer_conductance(
+                h_total_mm=h_open,
+                eta_per_layer_Pa_s=base._effective_viscosity(),
+                moments=moments,
+                cavity_mask=mask,
+            ).ravel()
+
+            def conductance(idx: np.ndarray, t_arr: np.ndarray) -> np.ndarray:
+                return S_field[idx]
+
+        res = march_fill(
+            mask,
+            cell_volume * 1e-9,
+            gates,
+            lambda t: injected_mm3(t) * 1e-9,
+            conductance,
+            t_start_s=t_start,
+            dt_max_s=float(self.march_dt_max_fraction) * T_clock,
+            cfl=float(self.march_cfl),
+        )
+        if not res.complete:
+            raise RuntimeError(f"the march stopped after {res.n_steps} steps with cells unfilled")
+        t_arr = res.t_arr_s
+        T_fill = float(np.nanmax(t_arr))
+
+        layer_T_K = layer_eta = layer_gamma_dot = layer_shear_dT_K = layer_Brinkman = None
+        short_shot_mask = None
+        if self.thermal_coupling:
+            # the layer fields on the arrival times: the reading the τ fixed point reports
+            ta = np.where(np.isnan(t_arr), 0.0, t_arr)
+            layer_gamma_dot = poiseuille_shear_rates(
+                zeta_centers=zeta_centers, V_mms=V_mms, h_total_mm=h_open, floor_factor=floor
+            )
+            layer_T_K, layer_shear_dT_K = self._layer_temperatures(
+                ta, h_open, zeta_centers, alpha, layer_gamma_dot
+            )
+            T_bulk = 0.7 * self.melt_temperature_K + 0.3 * self.mold_temperature_K
+            T_eval = np.where(~mask[None, :, :], T_bulk, layer_T_K)
+            layer_eta = np.asarray(
+                cross_wlf_viscosity(self.material, T_eval, layer_gamma_dot, 0.0), dtype=float
+            )
+            short_shot_mask = mask & (layer_T_K[self.num_layers // 2] <= T_solid_K)
+            layer_Brinkman = brinkman_number(
+                eta_per_layer_Pa_s=layer_eta,
+                gamma_dot_per_layer_s_inv=layer_gamma_dot,
+                h_total_mm=h_open,
+                thermal_conductivity_W_mK=self.material.thermal_conductivity_W_mK,
+                delta_T_K=max(float(self.melt_temperature_K) - float(self.mold_temperature_K), 1.0),
+            )
+        return {
+            "moments": moments,
+            "h_layers": h_layers,
+            "cell_volume": cell_volume,
+            "tau": t_arr,
+            "tau_max": T_fill,
+            "tau_max_baseline": None,
+            "T_fill": T_fill,
+            "T_fill_inflation": T_fill / T_clock,
+            "layer_T_K": layer_T_K,
+            "layer_eta_Pa_s": layer_eta,
+            "layer_gamma_dot": layer_gamma_dot,
+            "layer_shear_dT_K": layer_shear_dT_K,
+            "layer_Brinkman": layer_Brinkman,
+            "short_shot_mask": short_shot_mask,
+            # no lag to correct: the temperatures are read on the returned times
+            "short_shot_mask_end": short_shot_mask,
+            "layer_T_K_end": layer_T_K,
+            "iters_done": res.n_steps,
+            "converged": res.complete,
+            "damping_events": 0,
+            "tau_rep_flow": None,
+            "tau_rep_baseline": None,
+            "T_solid_K": T_solid_K,
+            "t_arr": t_arr,
+            "p_end": res.pressure_end_Pa,
+            "march_steps": res.n_steps,
+        }
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -723,11 +932,18 @@ class MultilayerHeleShawSolver:
 
         # Standard post-processing (mirrors HeleShawSolver.solve).
         msk = ~np.isnan(tau)
-        # Volume-CDF map, same as HeleShawSolver: the two solver modes must
-        # not disagree about what "fill time at a cell" means.
-        fill_time_s = base._arrival_time_field(tau, msk, cell_volume, T_fill)
         pressure_norm = np.full_like(tau, np.nan)
-        pressure_norm[msk] = 1.0 - tau[msk] / tau_max
+        if self.fill_method == "march":
+            # the march's own arrival times, and the pressure it solved at the end of the fill
+            fill_time_s = st["t_arr"]
+            p_end = st["p_end"]
+            p_top = float(np.max(p_end[msk])) if msk.any() else 0.0
+            pressure_norm[msk] = p_end[msk] / p_top if p_top > 0 else 0.0
+        else:
+            # Volume-CDF map, same as HeleShawSolver: the two solver modes must
+            # not disagree about what "fill time at a cell" means.
+            fill_time_s = base._arrival_time_field(tau, msk, cell_volume, T_fill)
+            pressure_norm[msk] = 1.0 - tau[msk] / tau_max
         weld_angle = base._weld_meeting_angle(tau)
         weld_score = weld_score_from_angle(weld_angle)
         air_traps = base._compute_air_traps(tau)
@@ -779,7 +995,16 @@ class MultilayerHeleShawSolver:
             "shear_heating_enabled": bool(self.shear_heating_enabled),
             "specific_heat_J_kgK": float(self.material.specific_heat_J_kgK),
             "thermal_conductivity_W_mK": float(self.material.thermal_conductivity_W_mK),
+            "fill_method": self.fill_method,
         }
+        if self.fill_method == "march":
+            metadata.update(
+                {
+                    "march_steps": int(st["march_steps"]),
+                    "march_cfl": float(self.march_cfl),
+                    "march_dt_max_fraction": float(self.march_dt_max_fraction),
+                }
+            )
         if layer_shear_dT_K is not None:
             # Only the cavity cells carry meaningful values (outside cells
             # were zeroed during the loop).

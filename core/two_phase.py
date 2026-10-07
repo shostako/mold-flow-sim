@@ -53,7 +53,11 @@ Model (two linear solves, no time marching):
    only shape ``tau1`` through their conductance. The layered model has no
    seal time either -- the pool cells whose centre layer fell below the
    solidification threshold are counted (``injection_center_solid_cells``)
-   but stay open for phase 2.
+   but stay open for phase 2. With ``fill_method="march"`` (v0.62.0) the
+   layered solver advances the injection in time instead of solving the fixed
+   point, and ``tau1`` holds the march's arrival times on the same machine
+   clock; the pool is still the volume prefix in that order, so a march
+   differs from the fixed point only in the order the cells fill.
 2. **Compression phase** — solve ``tau2`` on the *final-thickness* cavity
    with Dirichlet (``tau = 0``) on **all** of ``Omega1`` (the melt pool acts
    as an equipotential source while the mold closes), then advance cells in
@@ -325,6 +329,8 @@ def solve_two_phase_short_shot(
                 "multilayer_iterations": int(fp["iters_done"]),
                 "multilayer_converged": bool(fp["converged"]),
                 "thermal_diffusivity_m2_s": float(multilayer.material.thermal_diffusivity_m2_s),
+                # v0.62.0: "march" advances the injection in time (iterations = steps)
+                "fill_method": multilayer.fill_method,
             }
         )
     else:

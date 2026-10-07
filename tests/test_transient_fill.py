@@ -122,8 +122,9 @@ def test_the_volume_is_conserved_around_holes_and_uneven_cells():
     assert res.complete
     assert np.isfinite(res.t_arr_s[mask]).all() and np.isnan(res.t_arr_s[~mask]).all()
     assert res.volume_held_m3 == pytest.approx(res.volume_injected_m3, rel=1e-12)
-    # the march stops once every cell is full; the last step may overshoot a little
-    assert cap.sum() * (1 - 1e-6) <= res.volume_held_m3 <= cap.sum() * (1 + 1e-3)
+    # the last delivering step is cut to the room left, and after it the march only moves
+    # the surplus on: the cavity ends holding its capacity, not a step's worth more
+    assert res.volume_held_m3 == pytest.approx(cap.sum(), rel=1e-9)
 
 
 def test_the_gate_cells_share_one_pressure():
@@ -213,6 +214,9 @@ def test_the_march_does_not_fill_the_deep_channel_before_the_plate():
     ends_m, plate_m = min(f_m[1, 0], f_m[1, 60]), f_m[4, 30]
     assert plate_tau > ends_tau  # τ: the channel first
     assert plate_m < 0.5 * ends_m  # march: the plate long before the channel ends
+    # the end-of-fill pressure map: finite, non-negative, highest at the gate
+    p = _solver(geom, "march").solve(num_frames=4).pressure_norm
+    assert np.isfinite(p).all() and (p >= 0).all() and p[0, 30] == pytest.approx(1.0)
 
 
 def test_the_march_on_a_strip_matches_the_tau_fill():
@@ -227,10 +231,11 @@ def test_the_march_on_a_strip_matches_the_tau_fill():
     r_m = _solver(geom, "march").solve(num_frames=4)
     np.testing.assert_allclose(r_m.fill_time_s[1], f_tau[1], rtol=1e-9)
     assert r_m.metadata["fill_method"] == "march" and r_m.metadata["march_steps"] > 0
-    # the pressure map is the march's own pressure at the end of the fill: highest at the gate
-    assert r_m.pressure_norm[1, 0] == pytest.approx(1.0) and r_m.pressure_norm[
-        1, -1
-    ] == pytest.approx(0.0)
+    # the pressure map is the march's own pressure at the end of the fill: highest at the gate,
+    # falling along the strip to the front -- the injection's pressure, not the surplus push
+    p = r_m.pressure_norm[1]
+    assert p[0] == pytest.approx(1.0) and p[-1] == pytest.approx(0.0)
+    assert np.all(np.diff(p) <= 1e-12)
 
 
 def test_the_layered_march_reads_the_layers_on_its_arrival_times():

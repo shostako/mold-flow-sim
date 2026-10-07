@@ -52,6 +52,9 @@ import scipy.sparse.linalg as spla
 #: "exactly" lands a few parts in 10^9 either side; a cell left that far short
 #: took a second cell of melt in the next step (a strip was stamped 1.5 % late).
 FULL_REL = 1.0 - 1e-6
+#: Room left in the cavity (net of surplus) below this fraction of its capacity
+#: counts as none: the march stops delivering and only moves the surplus on.
+ROOM_TOL = 1e-9
 
 
 @dataclass
@@ -60,8 +63,9 @@ class MarchFillResult:
 
     ``t_arr_s`` is the time each cell became full (NaN outside the cavity and
     for cells still unfilled when the march stopped). ``pressure_end_Pa`` is
-    the pressure solved in the last step -- the field at the end of the fill
-    (zero at the front and outside the cavity).
+    the pressure the injection needed in the last step that delivered melt --
+    the field at the end of the fill, without the surplus push (zero at the
+    front and outside the cavity).
     """
 
     t_arr_s: np.ndarray
@@ -145,6 +149,8 @@ def march_fill(
     S = np.zeros(n)
     S[g] = conductance(g, t_arr[g])
     p = np.zeros(n)
+    p_report = np.zeros(n)
+    cap_total = float(C[m].sum())
     v_prev_inj = float(injected_volume_m3(t))
     bps = sorted(b for b in breakpoints_s if b > t)
     probe = min(float(dt_max_s), 1e-6 * max(abs(t), 1.0))
@@ -187,13 +193,17 @@ def march_fill(
             bps.pop(0)
         if bps:
             dt = min(dt, bps[0] - t)
-        # never deliver more than the cavity still has room for (the last step
-        # would otherwise overshoot the full cavity by up to a step's worth)
-        # (net of the surplus cells hold and pass on next step)
+        # never deliver more than the cavity still has room for, net of the surplus
+        # cells hold and pass on next step: the step that would overshoot is cut to
+        # deliver exactly the room left, and once the melt in the cavity fills it
+        # the steps only move the surplus on (@claude review on PR #114: with the
+        # room at zero the cut did not apply and a step could deliver dt_max's worth)
         room_left = float(np.sum(C[m] - V[m]))
-        if room_left > 0:
+        if room_left > ROOM_TOL * cap_total:
             dt = max(min(dt, room_left / rate_ahead(t)), 1e-12)
-        v_next = float(injected_volume_m3(t + dt))
+            v_next = float(injected_volume_m3(t + dt))
+        else:
+            v_next = v_prev_inj
         q_total = (v_next - v_prev_inj) / dt
         # unknowns: full cells that are not gates; Dirichlet: front (0) and gates (p_g)
         unk = full & ~is_gate
@@ -256,6 +266,11 @@ def march_fill(
             raise RuntimeError("the gate cells have no open face to the melt")
         p_g = (q_total - out0) / out1
         p = p0 + p_g * p1
+        if q_total > 0:
+            # the pressure the injection alone needs to reach the front, without the
+            # artificial push of the surplus terms (which scale as 1/dt and dominate
+            # a short final step): what the end-of-fill pressure map reports
+            p_report = (q_total / out1) * p1
 
         flux = Sf * (p[fa] - p[fb])  # a -> b
         inflow = np.zeros(n)
@@ -285,7 +300,7 @@ def march_fill(
 
     return MarchFillResult(
         t_arr_s=np.where(m, t_arr, np.nan).reshape(ny, nx),
-        pressure_end_Pa=np.where(m, p, 0.0).reshape(ny, nx),
+        pressure_end_Pa=np.where(m, p_report, 0.0).reshape(ny, nx),
         n_steps=steps,
         t_end_s=t,
         complete=complete,

@@ -2,21 +2,36 @@
 
 This module introduces ``MultilayerHeleShawSolver`` — a Hele-Shaw τ solver
 that discretizes the cavity thickness into ``N`` layers. Each layer
-contributes to the integrated planar conductance ``S_total`` via the
-exact Poiseuille moment integral:
+contributes to the integrated planar conductance ``S_total`` through the
+lubrication integral for a viscosity that varies across the thickness:
 
-    S_total(x,y) = (h_total³ / 2) · Σ_{k=1..N} m_k / η_k
+    S_total(x,y) = ∫_0^h (z − h/2)² / η(z) dz = h_total³ · Σ_{k=1..N} m_k / η_k
 
 with the dimensionless moment
 
-    m_k = [ζ² / 2 − ζ³ / 3]_{ζ_{k-1}}^{ζ_k}
+    m_k = [(ζ − 1/2)³ / 3]_{ζ_{k-1}}^{ζ_k}
 
 where ``ζ_k ∈ [0, 1]`` are the layer boundaries in the normalized
-thickness coordinate. For ``N=1`` (``ζ_0=0, ζ_1=1``) the moment evaluates
-to ``m_1 = 1/6`` and the formula collapses to the classical Hele-Shaw
-relation ``S = h³ / (12 η)`` — so this scheme is **numerically
-equivalent** to the existing ``HeleShawSolver`` when ``num_layers == 1``
-and the per-layer viscosity equals the single representative value.
+thickness coordinate. ``Σ m_k = 1/12`` for any partition, so with a
+uniform viscosity (in particular ``N=1``) the formula collapses to the
+classical Hele-Shaw relation ``S = h³ / (12 η)`` — this scheme is
+**numerically equivalent** to the existing ``HeleShawSolver`` when
+``num_layers == 1`` and the per-layer viscosity equals the single
+representative value.
+
+Why the weight is the squared distance from the midplane: with η = η(z)
+the momentum balance ``∂_z(η ∂_z u) = −G`` (``G = −∂p/∂x``) integrates to
+``η ∂_z u = −G (z − z₀)``, and no slip on both walls puts ``z₀`` at the
+midplane whenever η is symmetric about it — which the layer
+temperatures, shear rates and both layer distributions here are.
+Integrating the flux ``q = ∫ u dz`` by parts then gives
+``q = G ∫ (z − h/2)² / η dz``. The velocity is continuous, so a viscous
+wall layer throttles every layer inside it. Up to v0.60.1 the layers were
+summed as independent channels weighted by the Newtonian velocity profile,
+``m_k = ∫ ζ (1 − ζ) dζ`` (Σ = 1/6, prefactor h³/2): the same for a uniform
+η, but for a frozen skin around a molten core of fraction ``c`` of the
+thickness it overstated the conductance by ``1.5/c² − 0.5`` (1.8× at
+c = 0.8, 5.5× at 0.5, 16× at 0.3).
 
 Two coupling modes are supported:
 
@@ -142,19 +157,23 @@ def _layer_zeta(num_layers: int, distribution: str) -> np.ndarray:
 
 
 def _poiseuille_layer_moments(zeta: np.ndarray) -> np.ndarray:
-    """Per-layer dimensionless Poiseuille moments ``m_k``.
+    """Per-layer dimensionless flux moments ``m_k``.
 
-    Defined as
+    The second moment of each layer about the midplane,
 
-        m_k = ∫_{ζ_{k-1}}^{ζ_k} ζ (1 − ζ) dζ
-            = [ζ² / 2 − ζ³ / 3]_{ζ_{k-1}}^{ζ_k}
+        m_k = ∫_{ζ_{k-1}}^{ζ_k} (ζ − 1/2)² dζ
+            = [(ζ − 1/2)³ / 3]_{ζ_{k-1}}^{ζ_k},
 
-    The full-thickness integral is ``Σ m_k = 1/6``, which reproduces the
-    classical Hele-Shaw factor ``h³ / 12η = h³ / 2 · 1/6 / η``.
+    so that a stack of layers with viscosities ``η_k`` conducts
+    ``S = h³ · Σ m_k / η_k`` (see the module docstring for the
+    derivation). The full-thickness integral is ``Σ m_k = 1/12``, which
+    reproduces the classical Hele-Shaw factor ``h³ / 12η`` for a uniform
+    viscosity. The weight is largest at the walls and vanishes on the
+    midplane: a wall layer carries the shear of everything inside it.
 
     Returns an array of length ``len(zeta) - 1``.
     """
-    primitive = (zeta**2) / 2.0 - (zeta**3) / 3.0
+    primitive = (zeta - 0.5) ** 3 / 3.0
     return np.diff(primitive)
 
 
@@ -164,8 +183,12 @@ def _multilayer_conductance(
     moments: np.ndarray,
     cavity_mask: np.ndarray,
 ) -> np.ndarray:
-    """Compute the depth-integrated conductance ``S_total`` (mm³ Pa⁻¹ s⁻¹
-    converted to SI internally).
+    """Compute the depth-integrated conductance ``S_total = h³ · Σ m_k / η_k``
+    (mm³ Pa⁻¹ s⁻¹ converted to SI internally).
+
+    The midplane weighting assumes η is symmetric about the midplane
+    (``η_k = η_{N-1-k}`` on a symmetric partition); an asymmetric profile
+    would need ``S = I₂ − I₁² / I₀`` with ``I_n = ∫ zⁿ / η dz``.
 
     Parameters
     ----------
@@ -177,7 +200,8 @@ def _multilayer_conductance(
         ``(N, ny, nx)`` (per-layer per-cell values, used from PR-B
         onward).
     moments
-        ``(N,)`` array of dimensionless layer moments ``m_k``.
+        ``(N,)`` array of dimensionless layer moments ``m_k``
+        (:func:`_poiseuille_layer_moments`, ``Σ m_k = 1/12``).
     cavity_mask
         ``(ny, nx)`` boolean array; cells outside the cavity get
         ``S = 0``.
@@ -195,7 +219,7 @@ def _multilayer_conductance(
     if eta.ndim == 0:
         # Scalar: broadcast m_k / eta over k.
         moment_sum = float(np.sum(moments)) / max(float(eta), 1e-3)
-        S = 0.5 * h_cubed * moment_sum
+        S = h_cubed * moment_sum
     elif eta.ndim == 1:
         # Per-layer scalar η_k.
         if eta.shape[0] != moments.shape[0]:
@@ -204,7 +228,7 @@ def _multilayer_conductance(
                 f"moments length {moments.shape[0]}"
             )
         moment_sum = float(np.sum(moments / np.maximum(eta, 1e-3)))
-        S = 0.5 * h_cubed * moment_sum
+        S = h_cubed * moment_sum
     else:
         # Per-layer per-cell η_k(x,y); shape (N, ny, nx).
         if eta.shape[0] != moments.shape[0] or eta.shape[1:] != h_total_mm.shape:
@@ -214,7 +238,7 @@ def _multilayer_conductance(
             )
         m_over_eta = moments[:, None, None] / np.maximum(eta, 1e-3)
         moment_sum = m_over_eta.sum(axis=0)  # (ny, nx)
-        S = 0.5 * h_cubed * moment_sum
+        S = h_cubed * moment_sum
 
     S = np.where(cavity_mask, S, 0.0)
     return S
@@ -314,7 +338,7 @@ class MultilayerHeleShawSolver:
         return _layer_zeta(self.num_layers, self.layer_distribution)
 
     def layer_moments(self) -> np.ndarray:
-        """Per-layer Poiseuille moments ``m_k`` (length ``num_layers``)."""
+        """Per-layer flux moments ``m_k`` (length ``num_layers``, ``Σ m_k = 1/12``)."""
         return _poiseuille_layer_moments(self.layer_zeta())
 
     def layer_thickness_mm(self, h_total_mm: np.ndarray) -> np.ndarray:

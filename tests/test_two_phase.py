@@ -452,9 +452,10 @@ def test_one_uncoupled_layer_is_the_isothermal_model():
     assert np.array_equal(iso.injection_mask, ml.injection_mask)
     assert np.array_equal(iso.final_mask, ml.final_mask)
     np.testing.assert_allclose(ml.tau1, iso.tau1, rtol=1e-12, equal_nan=True)
-    # The layer moment (h^3/2 * 1/6) and h^3/12 differ in the last bits, which
-    # can swap the order of mirror-image cells whose tau ties to 1e-15; each
-    # swap moves an arrival by exactly one cell's open-gap volume over Q.
+    # The layer sum (h^3 * 1/12 from the moment differences) and h^3/12 differ
+    # in the last bits, which can swap the order of mirror-image cells whose tau
+    # ties to 1e-15; each swap moves an arrival by exactly one cell's open-gap
+    # volume over Q.
     one_cell_s = float(np.nanmax(geom.thickness_mm[geom.mask] + 0.5)) / 1000.0 / 10.0
     np.testing.assert_allclose(
         ml.injection_fill_time_s,
@@ -498,10 +499,20 @@ def test_the_layers_put_the_thick_runner_ahead_of_the_opened_thin_plate():
     temperatures: on a slow metered injection the opened 0.85 mm plate cools
     through its thickness (sqrt(alpha * 2 s) ~ 0.45 mm, its half gap) and
     its viscosity climbs, so the thick runner fills ahead of it. A fast
-    injection keeps the isothermal order -- the clock is what flips it."""
+    injection keeps the isothermal order -- the clock is what flips it.
+
+    The metered shot reflects it: the isothermal and fast pools take the
+    whole plate and stop short of the runner tip, the slow pool leaves the
+    far plate out and reaches further down the runner. (Up to v0.60.1 the
+    slow pool took the runner tip itself. With the midplane-weighted
+    conductance of v0.61.0 the cooled plate centre counts for little, and
+    four plate cells trail the tip instead of seven -- 3.4 mm³, less than
+    the 5.2 mm³ the shot leaves out.)"""
     geom = _thick_branch_thin_plate()
     runner_tip = (0, geom.nx - 1)
     plate_end = (geom.ny - 1, 0)
+    plate = geom.compression_mask
+    runner = geom.mask & ~plate
     V_shot = 0.125
     iso = solve_two_phase_short_shot(_solver(geom, Q=V_shot / 2.0), V_shot)
     slow = solve_two_phase_short_shot(_ml_solver(geom, Q=V_shot / 2.0, num_layers=7), V_shot)
@@ -509,9 +520,11 @@ def test_the_layers_put_the_thick_runner_ahead_of_the_opened_thin_plate():
     assert iso.tau1[plate_end] < iso.tau1[runner_tip]
     assert fast.tau1[plate_end] < fast.tau1[runner_tip]
     assert slow.tau1[runner_tip] < slow.tau1[plate_end]
-    assert not iso.injection_mask[runner_tip]
-    assert not fast.injection_mask[runner_tip]
-    assert slow.injection_mask[runner_tip]
+    for r in (iso, fast):
+        assert r.injection_mask[plate].all()
+        assert not r.injection_mask[runner_tip]
+    assert not slow.injection_mask[plate_end]
+    assert (slow.injection_mask & runner).sum() > (iso.injection_mask & runner).sum()
 
 
 def test_the_layered_shot_keeps_the_volume_contract():
@@ -553,8 +566,12 @@ def test_the_centre_solid_count_reads_the_tau_the_pool_comes_from(monkeypatch, s
     monkeypatch.setattr(mls.MultilayerHeleShawSolver, "_fixed_point", spy)
     geom = _thick_branch_thin_plate()
     V_shot = 0.125
+    # a 3 s clock (2 s until v0.60.1): with the midplane-weighted conductance
+    # of v0.61.0 the plate fills sooner, and with shear heating no centre
+    # layer in the pool reached the threshold on 2 s -- the case must count
+    # some cells for the comparison to mean anything.
     base = dataclasses.replace(
-        _ml_solver(geom, Q=V_shot / 2.0, num_layers=7), shear_heating_enabled=shear
+        _ml_solver(geom, Q=V_shot / 3.0, num_layers=7), shear_heating_enabled=shear
     )
     one = solve_two_phase_short_shot(dataclasses.replace(base, max_iterations=1), V_shot)
     solve_two_phase_short_shot(dataclasses.replace(base, max_iterations=2), V_shot)

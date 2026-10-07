@@ -177,13 +177,13 @@ T* = D₂ + D₃ P
 ### 層別 Hele-Shaw ソルバー
 
 厚み方向を `N` 層に分け、各層に温度・粘度・剪断速度を持たせる。Neumann 1D の重ね合わせで層ごとの温度を求め、
-Cross-WLF で層ごとの粘度に変換し、Poiseuille のモーメント積分でコンダクタンスにまとめる:
+Cross-WLF で層ごとの粘度に変換し、厚み方向に粘度が変わる流れの潤滑の積分でコンダクタンスにまとめる（層の重みは中央面からの距離の 2 乗）:
 
 ```
 T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(αt))) - 1]
 γ̇_k(x,y) = (6V/h) · |2ζ_k - 1|                               # Poiseuille 解析微分
 η_k(x,y) = cross_wlf_viscosity(material, T_k, γ̇_k, 0)
-S_total(x,y) = (h³/2) · Σ_k m_k / η_k                         # Σ m_k = 1/6
+S_total(x,y) = ∫(z − h/2)²/η dz = h³ · Σ_k m_k / η_k          # m_k = [(ζ − 1/2)³/3]、Σ m_k = 1/12
 ```
 
 `τ ↔ T_k ↔ η_k ↔ S_total` を固定点反復で結合し、体積で重み付けした平均 τ の比（反復後 / ベースライン）で `T_fill` をスケールする。

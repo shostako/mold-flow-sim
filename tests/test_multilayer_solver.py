@@ -1,11 +1,13 @@
 """Tests for the multilayer Hele-Shaw solver (PR-A skeleton).
 
-The current solver is uniform-distribution / single-viscosity only. The
-defining property is that ``num_layers=1`` collapses to the existing
-:class:`HeleShawSolver` (the Poiseuille moment integral with ``m_1 = 1/6``
-matches the closed-form ``S = h³ / (12 η)``). Additional tests cover
-layer-thickness conservation, smoke checks, and the moment-sum identity
-``Σ m_k = 1/6`` that any future ``layer_distribution`` must preserve.
+The defining property is that ``num_layers=1`` collapses to the existing
+:class:`HeleShawSolver` (the flux moment ``m_1 = 1/12`` matches the
+closed-form ``S = h³ / (12 η)``). Additional tests cover layer-thickness
+conservation, smoke checks, the moment-sum identity ``Σ m_k = 1/12`` that
+any future ``layer_distribution`` must preserve, and the conductance of a
+depth-varying viscosity against the lubrication integral solved for the
+velocity profile (v0.61.0: the layers used to be weighted by the Newtonian
+velocity shape ``ζ(1 − ζ)``, which is right only for a uniform η).
 
 Per-layer temperature / viscosity / fixed-point loop tests live in
 ``test_multilayer_thermal.py`` (PR-B and later).
@@ -84,9 +86,9 @@ def test_uniform_zeta_rejects_zero_or_negative_n() -> None:
         _uniform_layer_zeta(-3)
 
 
-def test_poiseuille_layer_moments_sum_to_one_sixth() -> None:
-    """The full-thickness Poiseuille integral is ``Σ m_k = 1/6``, which
-    is exactly the Hele-Shaw factor. Any future ``layer_distribution``
+def test_poiseuille_layer_moments_sum_to_one_twelfth() -> None:
+    """The full-thickness flux integral is ``Σ m_k = ∫(ζ − 1/2)² dζ = 1/12``,
+    which is exactly the Hele-Shaw factor. Any future ``layer_distribution``
     must satisfy this — protect against accidental reshuffling.
     """
     for N in (1, 2, 3, 5, 7, 11, 25):
@@ -94,15 +96,27 @@ def test_poiseuille_layer_moments_sum_to_one_sixth() -> None:
         m = _poiseuille_layer_moments(z)
         assert m.shape == (N,)
         assert np.all(m > 0.0), f"all moments must be positive for N={N}"
-        np.testing.assert_allclose(m.sum(), 1.0 / 6.0, rtol=1e-12)
+        np.testing.assert_allclose(m.sum(), 1.0 / 12.0, rtol=1e-12)
 
 
-def test_n1_moment_equals_one_sixth() -> None:
-    """``N=1`` is the calibration anchor: ``m_1 = 1/6`` exactly."""
+def test_n1_moment_equals_one_twelfth() -> None:
+    """``N=1`` is the calibration anchor: ``m_1 = 1/12`` exactly."""
     z = _uniform_layer_zeta(1)
     m = _poiseuille_layer_moments(z)
     assert m.shape == (1,)
-    np.testing.assert_allclose(m[0], 1.0 / 6.0, rtol=1e-14)
+    np.testing.assert_allclose(m[0], 1.0 / 12.0, rtol=1e-14)
+
+
+def test_layer_moments_weight_the_walls_not_the_midplane() -> None:
+    """The flux weight is the squared distance from the midplane: per unit
+    thickness it is largest in the wall layers and smallest in the centre,
+    and it is mirror-symmetric. (The Newtonian velocity shape ``ζ(1 − ζ)``
+    used up to v0.60.1 had it the other way round.)"""
+    for z in (_uniform_layer_zeta(6), _wall_refined_layer_zeta(7)):
+        density = _poiseuille_layer_moments(z) / np.diff(z)
+        assert np.argmax(density) in (0, len(density) - 1)
+        assert np.argmin(density) in (len(density) // 2, (len(density) - 1) // 2)
+        np.testing.assert_allclose(density, density[::-1], rtol=1e-12)
 
 
 # --------------------------------------------------------------------------
@@ -164,6 +178,71 @@ def test_multilayer_conductance_per_cell_per_layer_eta() -> None:
     h_m = h_mm * 1e-3
     expected = (h_m**3) / (12.0 * 50.0)
     np.testing.assert_allclose(S, expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize("frozen", [np.inf, 1e300])
+def test_a_frozen_skin_conducts_like_the_molten_core_alone(frozen) -> None:
+    """Freeze the two outer layers on each side of a uniform 10-layer stack:
+    the flow can only shear in the molten core of thickness 0.6·h, so the
+    conductance is the Hele-Shaw value of that core, ``(0.6 h)³ / (12 η)``.
+
+    The layer boundaries sit on the skin edge, so this is exact, not a
+    discretisation estimate. The Newtonian velocity-shape weighting used up
+    to v0.60.1 gave ``1.5/c² − 0.5 = 3.67`` times that. ``inf`` is what
+    ``cross_wlf_viscosity`` returns for a frozen layer (v0.60.0).
+    """
+    h_mm = np.full((2, 3), 0.8)
+    mask = np.ones_like(h_mm, dtype=bool)
+    m = _poiseuille_layer_moments(_uniform_layer_zeta(10))
+    eta = np.array([frozen, frozen] + [40.0] * 6 + [frozen, frozen])
+    S = _multilayer_conductance(h_mm, eta, m, mask)
+    core_m = 0.6 * h_mm * 1e-3
+    np.testing.assert_allclose(S, core_m**3 / (12.0 * 40.0), rtol=1e-12)
+
+
+def _lubrication_conductance(zeta: np.ndarray, eta: np.ndarray, h_m: float) -> float:
+    """Independent oracle: solve the lubrication problem for the velocity.
+
+    ``∂_z(η ∂_z u) = −G`` with no slip on both walls, ``η`` piecewise
+    constant on the layers. Integrate ``∂_z u = G (z₀ − z) / η`` on a fine
+    grid (the layer boundaries are grid points), pick ``z₀`` so that
+    ``u(h) = 0``, integrate the flux ``q = ∫ u dz`` and return ``q / G``.
+    No moment formula is involved.
+    """
+    G = 1.0
+    z = np.unique(np.concatenate([np.linspace(a, b, 4001) for a, b in zip(zeta[:-1], zeta[1:])]))
+    z = z * h_m
+    mid = 0.5 * (z[:-1] + z[1:])
+    layer = np.searchsorted(zeta * h_m, mid) - 1
+    inv_eta = 1.0 / eta[layer]  # per sub-interval; ∂_z u is linear inside each
+    dz = np.diff(z)
+    i0 = np.sum(inv_eta * dz)
+    i1 = np.sum(inv_eta * mid * dz)  # exact: ∫ z dz over a sub-interval is mid·dz
+    z0 = i1 / i0
+    du = G * inv_eta * (z0 - mid) * dz  # exact increment of u over each sub-interval
+    u = np.concatenate([[0.0], np.cumsum(du)])
+    assert abs(u[-1]) < 1e-9 * np.max(np.abs(u))  # no slip at the far wall
+    q = np.sum(0.5 * (u[:-1] + u[1:]) * dz)
+    return q / G
+
+
+def test_conductance_matches_the_lubrication_integral() -> None:
+    """A wall-refined 7-layer stack, cold walls and a hot core (the shape a
+    cooling cell has): the conductance equals the flux of the velocity
+    profile solved layer by layer. The old velocity-shape weighting misses
+    it by more than a factor of 2 on the same stack, so the oracle can tell
+    the two apart."""
+    zeta = _wall_refined_layer_zeta(7)
+    eta = np.array([3.0e4, 2.0e3, 300.0, 120.0, 300.0, 2.0e3, 3.0e4])
+    h_mm = 0.35
+    oracle = _lubrication_conductance(zeta, eta, h_mm * 1e-3)
+    m = _poiseuille_layer_moments(zeta)
+    S = _multilayer_conductance(np.full((1, 1), h_mm), eta, m, np.ones((1, 1), dtype=bool))
+    np.testing.assert_allclose(S[0, 0], oracle, rtol=1e-6)
+
+    old_m = np.diff(zeta**2 / 2.0 - zeta**3 / 3.0)
+    old_S = 0.5 * (h_mm * 1e-3) ** 3 * np.sum(old_m / eta)
+    assert old_S / oracle > 2.0
 
 
 # --------------------------------------------------------------------------
@@ -277,7 +356,7 @@ def test_metadata_carries_layer_fields() -> None:
     assert zeta[0] == 0.0 and zeta[-1] == 1.0
     moments = r.metadata["layer_moments"]
     assert len(moments) == 5
-    assert abs(sum(moments) - 1.0 / 6.0) < 1e-12
+    assert abs(sum(moments) - 1.0 / 12.0) < 1e-12
 
 
 def test_smoke_n5_runs_and_produces_finite_tau() -> None:
@@ -524,13 +603,13 @@ def test_wall_refined_matches_plan_example_n6() -> None:
     assert abs(z[5] - 0.933) < 5e-3
 
 
-def test_wall_refined_moments_sum_to_one_sixth() -> None:
-    """Σ m_k = 1/6 is the Hele-Shaw factor; no distribution may break it."""
+def test_wall_refined_moments_sum_to_one_twelfth() -> None:
+    """Σ m_k = 1/12 is the Hele-Shaw factor; no distribution may break it."""
     for N in (2, 3, 5, 6, 7, 11):
         z = _wall_refined_layer_zeta(N)
         m = _poiseuille_layer_moments(z)
         assert m.shape == (N,)
-        np.testing.assert_allclose(m.sum(), 1.0 / 6.0, rtol=1e-12)
+        np.testing.assert_allclose(m.sum(), 1.0 / 12.0, rtol=1e-12)
 
 
 def test_wall_refined_n1_falls_back_to_uniform() -> None:
@@ -874,7 +953,14 @@ def test_strong_shear_fixed_point_is_a_fixed_point_of_the_lagged_map(monkeypatch
     """Solving the rise with its own viscosity changes the path, not the
     destination. From the converged state (tight tolerance), one round of
     the original update -- the rise on the given viscosity, then η, then τ --
-    must hand back the same τ."""
+    must hand back the same τ.
+
+    The arrival times are held at those of a default solve. The volume-CDF
+    map is a step function of the τ ranking, so near a rank tie the outer
+    loop can end in a 2-cycle of a few cells swapping arrival order instead
+    of reaching 1e-9 (about 1e-4 here after v0.61.0's conductance weights;
+    the old weights did the same at nx = 22, V = 3 m/s). What is under test
+    is the shear-heating update, not the arrival map."""
     from core.materials import cross_wlf_viscosity
     from core.multilayer_thermal import (
         neumann_layer_temperatures,
@@ -890,7 +976,15 @@ def test_strong_shear_fixed_point_is_a_fixed_point_of_the_lagged_map(monkeypatch
         return out
 
     monkeypatch.setattr(MultilayerHeleShawSolver, "_fixed_point", spy)
+    first = _strong_shear_solver()
+    first.solve(num_frames=2)
+    (h0, _, _), out0 = seen.pop(0)
+    held = first._base._arrival_time_field(
+        out0["tau"], ~np.isnan(out0["tau"]), first.geometry.cell_size_mm**2 * h0, out0["T_fill"]
+    )
+
     solver = _strong_shear_solver(convergence_tol=1e-9, max_iterations=60)
+    monkeypatch.setattr(solver._base, "_arrival_time_field", lambda *a, **k: held.copy())
     solver.solve(num_frames=2)
     (h, gates, _), out = seen[0]
     assert out["converged"] is True
@@ -928,6 +1022,23 @@ def test_strong_shear_fixed_point_is_a_fixed_point_of_the_lagged_map(monkeypatch
     m = ~np.isnan(tau)
     rel = np.linalg.norm(tau_next[m] - tau[m]) / np.linalg.norm(tau[m])
     assert rel < 1e-8
+
+
+@pytest.mark.parametrize("distribution", ["wall_refined", "uniform"])
+def test_the_layer_viscosities_are_mirror_symmetric(distribution) -> None:
+    """The conductance weights each layer by its squared distance from the
+    midplane, which is the lubrication flux only when η is symmetric about
+    the midplane (otherwise the zero-shear plane moves off it). Both walls
+    sit at the same mould temperature, the shear rates go as ``|2ζ − 1|``
+    and both distributions are mirror images, so the solved layer
+    viscosities -- shear heating included -- must be too. A change that
+    breaks this (a hot and a cold mould half, say) needs the general form
+    ``S = I₂ − I₁² / I₀`` in ``_multilayer_conductance``."""
+    solver = _strong_shear_solver(layer_distribution=distribution)
+    r = solver.solve(num_frames=2)
+    cav = solver.geometry.mask
+    for field_ in (r.layer_viscosity_Pa_s_field, r.layer_temperature_K):
+        np.testing.assert_allclose(field_[:, cav], field_[::-1][:, cav], rtol=1e-9)
 
 
 # --------------------------------------------------------------------------

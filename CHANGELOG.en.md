@@ -9,6 +9,69 @@ Versions 0.1.0 to 0.14.0 were **assigned retroactively from the development hist
 
 This is a translation of the Japanese `CHANGELOG.md`. If the two disagree, the Japanese file is authoritative.
 
+## [0.61.0] — 2026-10-07
+
+**Fixed the conductance of the multilayer model. When the viscosity varies across the thickness, each layer is now weighted by its squared distance from the midplane, (ζ−1/2)², instead of the Newtonian velocity profile ζ(1−ζ). The old formula overstated the conductance when the walls cooled and stiffened (5.5× with a molten core half the thickness). Multilayer results with thermal coupling (the UI default) shift by a few mm in fill order and in the shape of the front at the end of injection. With a uniform viscosity (no thermal coupling, N=1) nothing changes apart from rounding.**
+
+### Fixed
+
+- `_multilayer_conductance` / `_poiseuille_layer_moments` (`core/multilayer_solver.py`): the layer conductances are summed as `S = h³·Σ m_k/η_k`
+  with `m_k = [(ζ − 1/2)³/3]` (Σ m_k = 1/12). In a lubrication flow whose viscosity varies across the thickness, the momentum balance `∂_z(η ∂_z u) = −G`
+  makes the shear stress proportional to the distance from the midplane, and the flux is `q = G ∫(z − h/2)²/η dz`. The velocity is continuous
+  across the thickness, so a stiff wall layer slows every layer inside it. Up to v0.60.1 the layers were treated as independent parallel channels weighted
+  by the Newtonian velocity profile (`m_k = [ζ²/2 − ζ³/3]`, Σ = 1/6, prefactor h³/2). That gives the same value for a uniform viscosity, but when the
+  walls freeze and only a core of thickness fraction c flows, it overstated the conductance by `1.5/c² − 0.5` (1.84 / 5.5 / 16× at c = 0.8 / 0.5 / 0.3).
+  It underweighted both the drop in conductance from wall cooling and the rise from the shear-thinned viscosity at the walls.
+- The new formula assumes a viscosity symmetric about the midplane. The layer temperatures (both walls at the same mold temperature), the shear rates
+  `|2ζ − 1|` and the layer distributions are all symmetric, so it holds; a test checks that the solved layer viscosities are mirror images. An asymmetric
+  setup would need `S = I₂ − I₁²/I₀` (`I_n = ∫ zⁿ/η dz`).
+- The `layer_moments` metadata returns the new m_k (summing to 1/12).
+- Corrected the formula in the UI equations panel (5-4), the READMEs (Japanese and English) and CLAUDE.md.
+
+### Effect on results
+
+Three geometries re-solved with the UI defaults (multilayer N=7, thermal coupling, viscous heating, two-phase on, 1.0 mm mesh). Front positions are
+distances from the gate-side edge of the product.
+
+| Geometry | Fill time | Two-phase front at the end of injection (centre / edge x = ±135–145 mm) |
+|---|---|---|
+| Film gate 1 | 23.9 → 22.9 ms | unchanged (centre at the top edge / edge 0 mm) |
+| Film gate 9 | 31.7 → 31.2 ms | 36 / 13 → 32 / 16 mm (centre−edge 23 → 16 mm) |
+| Film gate 15 | 31.1 → 31.7 ms | 31 / 20 → 25 / 25 mm (centre−edge 11 → 0 mm) |
+
+- In the main solve, the edge-minus-centre difference in the time the front reaches the top edge of the product (as a fraction of the fill time) goes
+  0.455 → 0.446 for Film gate 1, 0.254 → 0.224 for 9 and 0.210 → 0.134 for 15. The centre leads less.
+- All converge in 2–4 iterations.
+
+### Tests
+
+- Two independent checks of the weights. Ten layers with the outer two on each side frozen match the core alone, `(0.6h)³/(12η)`, to 1e-12 (frozen as
+  both `inf` and 1e300). With the viscosities of seven layers with cold walls and a hot core, the conductance matches the flux of the velocity profile
+  solved on a fine grid to 1e-6 (the old formula is off by more than 2× on the same viscosities, so the reference tells the two apart).
+- The layer weights are largest at the walls, smallest at the centre and mirror-symmetric. The solved layer viscosities and temperatures are mirror images
+  (wall_refined and uniform).
+- The Σ m_k checks go from 1/6 to 1/12.
+- The viscous-heating fixed-point test (one round of the old lagged update leaves τ unchanged at the converged state) now holds the arrival times at
+  those of a default solve. The volume-CDF arrival map is a step function of the τ ranking, so near a rank tie the outer loop falls into a 2-cycle of a few
+  cells swapping arrival order and stops at a residual around 1e-4. This case does so with the new weights; with the old weights a neighbouring setup
+  (nx = 22, 3 m/s) did the same (17 of 18 setups converge to 1e-9 with either weighting).
+- The two-phase multilayer test "on a slow injection the thick runner fills ahead of the opened thin plate" still pins the reversal (the τ order). Its
+  claim about the metered pool changes from "the runner tip is in the pool" to "the slow pool leaves the far plate out and reaches further down the runner
+  than the isothermal one". With the new weights the cooled plate centre counts for little, and the plate cells that fill after the tip drop from 7 to 4
+  (3.4 mm³), short of the 5.2 mm³ the shot leaves out.
+- Two tests whose preconditions the new formula broke get new conditions (the precondition asserts caught both). The centre-solid count (#109) runs a
+  3 s injection instead of 2 s (filling is faster, and with viscous heating no centre layer in the pool reached the threshold in 2 s). The frozen PA66
+  viscosity maps use 1.0 cm³/s instead of 2.0 (the wall layers no longer cooled below D2 − A2).
+
+### Known approximation (unchanged)
+
+- The conductance has no solidification (no-flow temperature). A wall layer cooled close to the mold temperature still flows as a shear-thinned melt
+  (200–300 Pa·s in the wall layer of a 0.85 mm PP plate at 2 s). Now that the weight sits at the walls, this matters more. The gap in conductance between
+  a thin plate that cools through and a thick runner whose core stays hot comes out smaller than with the old formula (the plate-to-runner conductance
+  ratio divided by the isothermal ratio goes 0.10 → 0.37 at 2 s). Solving the layer shear rates consistently with the flow keeps it at 0.37, so the
+  prescribed Newtonian shape `(6V/h)·|2ζ − 1|` is not the cause. Stopping layers colder than 100–120 °C freezes this plate through in 1–2 s (ratio 0).
+  The old value was an accident of weighting the centre layers.
+
 ## [0.60.1] — 2026-10-06
 
 ### Fixed

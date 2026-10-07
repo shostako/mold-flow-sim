@@ -237,14 +237,22 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "$\\dot\\gamma_{\\text{floor}} = 0.01 \\cdot 6V/h$ でクリップ。"
     )
 
-    st.markdown("**5-4. 並列流路統合（Poiseuille モーメント積分）**")
-    st.latex(r"S_{\text{total}}(x,y) = \frac{h(x,y)^3}{2} \sum_{k=1}^{N} \frac{m_k}{\eta_k(x,y)}")
+    st.markdown("**5-4. 層の粘度から導通へ（潤滑の積分）**")
     st.latex(
-        r"m_k = \left[\frac{\zeta^2}{2} - \frac{\zeta^3}{3}\right]_{\zeta_{k-1}}^{\zeta_k},"
-        r"\quad \sum_k m_k = \frac{1}{6}"
+        r"S_{\text{total}}(x,y) = \int_0^{h} \frac{(z - h/2)^2}{\eta(z)}\,dz"
+        r" = h(x,y)^3 \sum_{k=1}^{N} \frac{m_k}{\eta_k(x,y)}"
+    )
+    st.latex(
+        r"m_k = \left[\frac{(\zeta - 1/2)^3}{3}\right]_{\zeta_{k-1}}^{\zeta_k},"
+        r"\quad \sum_k m_k = \frac{1}{12}"
     )
     st.markdown(
-        r"$\sum m_k = 1/6$ が保存するので $N=1$ では従来 $S = h^3/(12\eta)$ と厳密一致（後方互換）。"
+        "重みは中央面からの距離の 2 乗で、壁際の層ほど大きい。流速は厚み方向に連続なので、"
+        "壁際の層が粘ると、その内側の層もまとめて遅くなる。"
+        r"粘度が一様なら $S = h^3/(12\eta)$ に戻り、$N=1$ では従来と厳密に一致する。"
+        "v0.60.1 までは層を独立した流路として扱い、等粘度の流速分布 $\\zeta(1-\\zeta)$ で重み付けしていた。"
+        "壁際が固まると導通を大きく見積もる式で、溶けた芯が厚みの割合 $c$ のとき $1.5/c^2 - 0.5$ 倍"
+        "（$c$ = 0.5 で 5.5 倍）になっていた。"
     )
 
     st.markdown("**5-5. 固定点反復で $\\tau$ と層フィールドを結合**")

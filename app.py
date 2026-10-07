@@ -3209,6 +3209,7 @@ with st.sidebar:
         multilayer_max_iter = 12
         multilayer_tol = 1e-3
         solid_fraction = 0.3
+        fill_method = "tau"
 
         if wall_model == "skin":
             c_skin = st.slider(
@@ -3271,6 +3272,29 @@ with st.sidebar:
                     "設定どおりの充填時間を見たいなら「速度制御」を選んでください。"
                 )
         elif wall_model == "multilayer":
+            fill_method = st.radio(
+                "充填の解き方",
+                options=("tau", "march"),
+                # 既定は従来の一発で解く方（v0.62.0）。時間で追う方は選んだときだけ
+                # 動き、選ばなければ結果はビット単位で v0.61.0 と同じ。
+                index=0,
+                key="fill_method",
+                format_func=lambda m: {
+                    "tau": "一発で解く（従来）: 充填の順番を 1 回の計算で決める",
+                    "march": "時間で追う（試行）: 先端を時間で進める",
+                }[m],
+                help=(
+                    "一発で解く方は、充填の順番を 1 回の楕円型の計算（τ）で決める。速いが、"
+                    "ゲートブロックの深い所を満たしきってから製品に入る癖がある。\n"
+                    "時間で追う方は、射出した量だけ先端を時間で進める。ブロックが埋まりきる前に"
+                    "製品の中央から入り始める前半の動きが出る。9/14 形状の写真 12 枚では、"
+                    "圧縮前の前半（VP 系列）の到達線の RMS が 1.4 mm（一発で解く方は 3.2 mm）。"
+                    "計算は 1.0 mm で 1 回 20 秒前後と、一発で解く方の 20 倍ほどかかる。"
+                    "層の温度の読み方（到着時刻で冷える）は同じで、変わるのは順番の決め方だけ。"
+                    "時計は射出率どおり（速度制御）で、圧力一定の引き伸ばしは無い。"
+                    "下の反復上限と収束判定は、一発で解く方だけに効く。"
+                ),
+            )
             num_layers = st.slider(
                 "層数 N",
                 3,
@@ -3774,6 +3798,7 @@ if do_run:
                 convergence_tol=multilayer_tol,
                 solidification_temperature_fraction=solid_fraction,
                 shear_heating_enabled=shear_heating_enabled,
+                fill_method=fill_method,
             )
         else:
             solver = HeleShawSolver(
@@ -3853,6 +3878,7 @@ if do_run:
                     "convergence_tol": multilayer_tol,
                     "solidification_temperature_fraction": solid_fraction,
                     "shear_heating_enabled": shear_heating_enabled,
+                    "fill_method": fill_method,
                 }
                 if multilayer_on
                 else {"model": "none"}
@@ -4218,11 +4244,15 @@ if "mfs_result" in st.session_state:
                             )
                         )
                 if md2.get("wall_model") == "multilayer":
+                    if md2.get("fill_method") == "march":
+                        _how = f"時間で追う解き方、{md2.get('multilayer_iterations')} 刻み"
+                    else:
+                        _how = f"固定点 {md2.get('multilayer_iterations')} 回" + (
+                            "で収束" if md2.get("multilayer_converged") else "、未収束"
+                        )
                     st.caption(
                         f"層別 {md2.get('num_layers')} 層を射出相に乗せた結果（時計は計量 V/Q 固定、"
-                        f"固定点 {md2.get('multilayer_iterations')} 回"
-                        + ("で収束" if md2.get("multilayer_converged") else "、未収束")
-                        + "）。圧縮相は等温（層ごとの温度は圧縮での前進に効かない）。"
+                        f"{_how}）。圧縮相は等温（層ごとの温度は圧縮での前進に効かない）。"
                     )
                     if md2.get("injection_center_solid_cells", 0) > 0:
                         st.warning(
@@ -4316,11 +4346,15 @@ if "mfs_result" in st.session_state:
         if multilayer_on and layer_T_grid_path is not None:
             with st.expander("層別プロファイル (Multi-layer N=...)"):
                 md = result.metadata
+                _solve_how = (
+                    f"解き方=時間で追う（{md.get('march_steps')} 刻み）, "
+                    if md.get("fill_method") == "march"
+                    else f"反復={md.get('multilayer_iterations')}, 収束={md.get('multilayer_converged')}, "
+                )
                 st.caption(
                     f"層数 N={md.get('num_layers')}, 分布={md.get('layer_distribution')}, "
-                    f"反復={md.get('multilayer_iterations')}, "
-                    f"収束={md.get('multilayer_converged')}, "
-                    f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
+                    + _solve_how
+                    + f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
                     f"ショートショット率={md.get('short_shot_fraction', 0.0):.3f}"
                 )
                 _br_max = md.get("brinkman_number_max", 0.0)

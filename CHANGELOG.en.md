@@ -9,6 +9,68 @@ Versions 0.1.0 to 0.14.0 were **assigned retroactively from the development hist
 
 This is a translation of the Japanese `CHANGELOG.md`. If the two disagree, the Japanese file is authoritative.
 
+## [0.62.0] — 2026-10-08
+
+**Added a "march" fill method to the multilayer model (opt-in; the existing single solve stays the default). The front is advanced in time by the injected volume, so the early stage where the product centre starts filling before the gate block is full comes out. On 12 photos of the 9/14 geometry, the RMS of the early pre-compression fronts (4 VP-series shots) is 1.3 mm (3.2 mm with the single solve) and that of the near-full pre-compression shots (9/23 B, 9/24 C) 2.3 mm (2.2 mm). Without opting in, the results are bit-identical to v0.61.0.**
+
+### Added
+
+- `march_fill` in `core/transient_fill.py`: the marching core (IMPES, pressure implicit, fill explicit). Full cells carry the unknown pressure; cells that are not
+  full but touch a full cell (or already hold melt) are the front (p = 0). The gate cells share one pressure (like the τ Dirichlet), chosen so that exactly what the
+  machine delivered over the step leaves them (linear, so one factorization with two right-hand sides). A full cell balances
+  `Σ S_ij (p_i − p_j) = (V_i − C_i)/dt + q_i`, pushing out what it took beyond its capacity in the previous step, so the volume is conserved to round-off. A cell
+  that fills during a step is stamped with the time its capacity was reached, interpolated linearly, and its conductance is evaluated once at that time and kept.
+  The next step is as long as the next front cells can take without exceeding their capacity (CFL; their inflow is estimated from the neighbours that just filled).
+  Steps never cross a switch of a staged profile, and the last step does not deliver more than the cavity has room for.
+- `MultilayerHeleShawSolver(fill_method="march")` (keyword-only; `march_cfl`, `march_dt_max_fraction`): `_march_state` advances the front instead of
+  `_fixed_point`. The clock has the fixed point's length (the main solve's `T_fill_baseline` with the ICM speed-up, the two-phase injection phase's metered V/Q)
+  and is rate-controlled (no constant-pressure stretching). A staged profile is followed through its volume→time map renormalized onto the clock, as in
+  `_arrival_time_field`. Each cell's layers are read at the time the melt reached it (front cells at the current time), with the fixed point's temperature,
+  shear-rate and viscosity reading; only the way the fill is ordered changes. There is no iteration: the arrival times come out causally. `fill_time_s` holds the
+  arrival times themselves and `pressure_norm` the pressure solved at the end of the fill. The metadata adds `fill_method` and `march_steps`. The last march is
+  memoized with everything it read, so the two-phase model asking for the same injection phase per metered volume runs it once.
+- Two-phase short shot: when the multilayer solver is set to march, the injection phase marches too (`tau1` holds the arrival times; the pool is the volume
+  prefix in that order). The metadata adds `fill_method`.
+- UI: a "充填の解き方" (fill method) radio under the multilayer wall model (default: the single solve). Recorded as `wall_cooling.fill_method` in settings.json;
+  the result captions show the step count.
+- CLI: `_solve_and_export(fill_method=...)` (multilayer only).
+
+### Check against photos
+
+12 photos of the 9/14 geometry (the current design), fitted the same way (the metered volume that covers the same product area as the photo, 1.0 mm,
+392.7 cm³/s). RMS of the fronts (mm):
+
+| Photos | Old formula (v0.60.1), single solve | Current formula, single solve | March |
+|---|---|---|---|
+| Early pre-compression (VP series, 5.8–12.2 g) | 2.1 | 3.2 | 1.3 |
+| Near-full pre-compression (9/24 C, 9/23 B) | 4.0 | 2.2 | 2.3 |
+| After compression (VP series, 10.2–13.7 g) | 3.4 | 3.3 | 3.6 |
+
+- Centre minus edge: the photos give +3.6 / +11.8 / +17.3 / +16.1 / +20.4 / +20.8 mm (5.8, 9.2, 10.7, 12.2, C, B), the march +4.5 / +14.1 / +20.2 / +19.4 /
+  +17.2 / +17.1, the current single solve +1.1 / +7.8 / +8.2 / +8.4 / +20.4 / +26.2. The march follows the photos' shape: opening fast early, then levelling off.
+- Same ranking at 589 cm³/s (early 1.4, C/B 2.0, after compression 3.7). Halving the step (CFL 0.5) moves the RMS by less than 0.02 mm.
+- After compression it is slightly worse: the compression phase is still the isothermal advance of the pool; only the injection phase marches.
+
+### Speed
+
+About 20 s per solve on the 9/14 geometry at 1.0 mm (640 steps), about 20 times the single solve. A 0.5 mm mesh takes several times longer.
+
+### Tests
+
+- `tests/test_transient_fill.py` (11): a strip of uneven cells fills at the cumulative volume over the rate to 1e-9; a staged injection is followed through its
+  volume map to 1e-9; a disc grows with its area (ratio to π r² / Q between 1.0 and 1.08, spread below 0.05, axis and diagonal within 5 %); the volume is conserved
+  around holes and uneven cells; the gate cells share one pressure; argument checks; a deep channel and a thin plate (single solve: the channel ends before the
+  plate; march: the plate in less than half the time of the channel ends); agreement with the fixed point on a strip; the multilayer march reads the layers on its
+  arrival times; the default stays τ; the two-phase model runs one march and its pools nest.
+- `tests/test_fill_method_ui.py` (3, AppTest): the radio sits under the multilayer model only and defaults to the single solve; the march reaches the main solve,
+  the two-phase model and settings.json; the default run records the single solve.
+
+### Known approximations (unchanged)
+
+- The layer temperatures still cool with the arrival time (no heat carried by the flow). The conductance still has no no-flow temperature.
+- The compression phase does not march (still the isothermal advance of the pool).
+- Only the multilayer model has it (not the skin layer or no cooling).
+
 ## [0.61.0] — 2026-10-07
 
 **Fixed the conductance of the multilayer model. When the viscosity varies across the thickness, each layer is now weighted by its squared distance from the midplane, (ζ−1/2)², instead of the Newtonian velocity profile ζ(1−ζ). The old formula overstated the conductance when the walls cooled and stiffened (5.5× with a molten core half the thickness). Multilayer results with thermal coupling (the UI default) shift by a few mm in fill order and in the shape of the front at the end of injection. With a uniform viscosity (no thermal coupling, N=1) nothing changes apart from rounding.**

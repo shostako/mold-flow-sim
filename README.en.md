@@ -33,6 +33,7 @@ Hosted on the free tier of Streamlit Community Cloud. Nothing to install.
   - None: isothermal, one representative viscosity
   - Skin layer: a Stefan/Neumann frozen front `s(t) = c_skin·√(αt)` grows from the walls and only the core `h_core = h - 2s` flows. The wall keeps cooling after the flow front has passed (exposure clock). Reports freeze-off cells and the short shot beyond them
   - Multilayer: splits the thickness into N layers and couples the 1D Neumann temperature profile with per-layer Cross-WLF viscosity by fixed-point iteration. The short shot is judged from the center-layer temperature. Includes a viscous-heating correction (stage 1, a closed-form local approximation) and a Brinkman-number diagnostic
+  - The multilayer fill can be solved two ways (v0.62.0). The default is the existing single solve, which orders the fill with one τ solve. "March" advances the front in time by the injected volume and shows the early stage where the product centre starts filling before the gate block is full (about 20 times slower)
 - An equivalent model of injection-compression molding (ICM): the compression stroke widens the flow path and shortens the fill time
 - Two-phase short-shot model: predicts a short shot made on purpose with a limited shot volume, using the machine settings as they are. It solves an injection phase (filling the mold-open gap up to the shot volume) and a compression phase (closing the mold to push the melt pool forward, conserving volume) with two linear solves. The skin-layer and multilayer models can run in the injection phase
 - Injection conditions are either a direct injection rate or computed from screw diameter and injection speed (the default, which also supports multi-stage injection and the V/P switchover position)
@@ -191,6 +192,11 @@ S_total(x,y) = ∫(z − h/2)²/η dz = h³ · Σ_k m_k / η_k          # m_k = 
 Cells whose center-layer temperature drops below the solidification threshold are marked as short shot.
 Call it with `MultilayerHeleShawSolver(num_layers=5, layer_distribution="wall_refined", thermal_coupling=True)`.
 With `num_layers=1` and `thermal_coupling=False` it is numerically identical to `HeleShawSolver` (covered by tests).
+
+With `fill_method="march"` (v0.62.0) the front is advanced in time instead of the fixed point (`core/transient_fill.py`): the pressure of the full
+cells is solved implicitly and the front cells (p = 0) fill explicitly from their inflow. Each cell's layers are read at the time the melt reached it
+(the same temperature model; only the fill order is decided differently). The clock is rate-controlled. On 12 photos of the 9/14 geometry, the RMS of the
+early pre-compression fronts dropped to 1.3 mm (3.2 mm with the fixed point).
 
 ## License
 

@@ -79,6 +79,7 @@ def _solve_and_export(
     multilayer_convergence_tol: float = 1e-3,
     solidification_temperature_fraction: float = 0.3,
     shear_heating_enabled: bool = False,
+    fill_method: str = "tau",
     two_phase_shot_volume_cm3: float | None = None,
     num_frames: int = 30,
 ) -> None:
@@ -86,6 +87,8 @@ def _solve_and_export(
         raise ValueError(
             "skin_layer and multilayer are mutually exclusive — choose one wall-cooling model"
         )
+    if fill_method != "tau" and not multilayer:
+        raise ValueError("fill_method='march' needs the multilayer solver (multilayer=True)")
     db = MaterialDB()
     if multilayer:
         solver = MultilayerHeleShawSolver(
@@ -107,6 +110,7 @@ def _solve_and_export(
             convergence_tol=multilayer_convergence_tol,
             solidification_temperature_fraction=solidification_temperature_fraction,
             shear_heating_enabled=shear_heating_enabled,
+            fill_method=fill_method,
         )
     else:
         solver = HeleShawSolver(

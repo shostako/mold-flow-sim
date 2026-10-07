@@ -136,7 +136,10 @@ def test_layer_viscosity_maps_draw_a_partly_frozen_melt(tmp_path) -> None:
         melt_temperature_K=sum(mat.T_melt_recommended) / 2,
         mold_temperature_K=sum(mat.T_mold_recommended) / 2,
         injection_velocity_mms=200.0,
-        injection_volume_flow_cm3s=2.0,
+        # 1.0 cm³/s (2.0 until v0.60.1): the midplane-weighted conductance of
+        # v0.61.0 fills this plate faster, and at 2.0 the walls no longer cool
+        # past D2 − A2 -- the preconditions below would catch that.
+        injection_volume_flow_cm3s=1.0,
         num_layers=7,
         layer_distribution="wall_refined",
     ).solve(num_frames=2)

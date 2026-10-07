@@ -178,13 +178,13 @@ Material parameters are in `data/materials.json` (generic values).
 ### Multilayer Hele-Shaw solver
 
 The thickness is split into `N` layers, each with its own temperature, viscosity and shear rate. Layer temperatures come from a superposition of 1D Neumann solutions,
-Cross-WLF turns them into layer viscosities, and the Poiseuille moment integral combines them into one conductance:
+Cross-WLF turns them into layer viscosities, and the lubrication integral for a viscosity that varies across the thickness combines them into one conductance (each layer weighted by its squared distance from the midplane):
 
 ```
 T(z, t) = T_mold + (T_melt - T_mold) · [erf(z/(2√(αt))) + erf((h-z)/(2√(αt))) - 1]
 γ̇_k(x,y) = (6V/h) · |2ζ_k - 1|                               # analytic Poiseuille derivative
 η_k(x,y) = cross_wlf_viscosity(material, T_k, γ̇_k, 0)
-S_total(x,y) = (h³/2) · Σ_k m_k / η_k                         # Σ m_k = 1/6
+S_total(x,y) = ∫(z − h/2)²/η dz = h³ · Σ_k m_k / η_k          # m_k = [(ζ − 1/2)³/3], Σ m_k = 1/12
 ```
 
 `τ ↔ T_k ↔ η_k ↔ S_total` are coupled by fixed-point iteration, and `T_fill` is scaled by the ratio of the volume-weighted mean τ (after iteration / baseline).

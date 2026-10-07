@@ -26,7 +26,8 @@ This is a translation of the Japanese `CHANGELOG.md`. If the two disagree, the J
   `_fixed_point`. The clock has the fixed point's length (the main solve's `T_fill_baseline` with the ICM speed-up, the two-phase injection phase's metered V/Q)
   and is rate-controlled (no constant-pressure stretching). A staged profile is followed through its volume→time map renormalized onto the clock, as in
   `_arrival_time_field`. Each cell's layers are read at the time the melt reached it (front cells at the current time), with the fixed point's temperature,
-  shear-rate and viscosity reading; only the way the fill is ordered changes. There is no iteration: the arrival times come out causally. `fill_time_s` holds the
+  shear-rate and viscosity reading; only the way the fill is ordered changes. There is no iteration: the arrival times come out causally. The stage switches of a staged profile are passed to the marcher on the clock, so no step
+  straddles one (Codex P2 on PR #114). `fill_time_s` holds the
   arrival times themselves and `pressure_norm` the pressure solved at the end of the fill. The metadata adds `fill_method` and `march_steps`. The last march is
   memoized with everything it read, so the two-phase model asking for the same injection phase per metered volume runs it once.
 - Two-phase short shot: when the multilayer solver is set to march, the injection phase marches too (`tau1` holds the arrival times; the pool is the volume
@@ -57,11 +58,12 @@ About 20 s per solve on the 9/14 geometry at 1.0 mm (640 steps), about 20 times 
 
 ### Tests
 
-- `tests/test_transient_fill.py` (11): a strip of uneven cells fills at the cumulative volume over the rate to 1e-9; a staged injection is followed through its
+- `tests/test_transient_fill.py` (12): a strip of uneven cells fills at the cumulative volume over the rate to 1e-9; a staged injection is followed through its
   volume map to 1e-9; a disc grows with its area (ratio to π r² / Q between 1.0 and 1.08, spread below 0.05, axis and diagonal within 5 %); the volume is conserved
   around holes and uneven cells; the gate cells share one pressure; argument checks; a deep channel and a thin plate (single solve: the channel ends before the
   plate; march: the plate in less than half the time of the channel ends); agreement with the fixed point on a strip; the multilayer march reads the layers on its
-  arrival times; the default stays τ; the two-phase model runs one march and its pools nest.
+  arrival times; the default stays τ; the two-phase model runs one march and its pools nest; a staged profile's switches reach the marcher from the solver
+  (with them it lands within one cell-fill time of the fixed point, without them more than three).
 - `tests/test_fill_method_ui.py` (3, AppTest): the radio sits under the multilayer model only and defaults to the single solve; the march reaches the main solve,
   the two-phase model and settings.json; the default run records the single solve.
 
@@ -70,6 +72,9 @@ About 20 s per solve on the 9/14 geometry at 1.0 mm (640 steps), about 20 times 
 - The layer temperatures still cool with the arrival time (no heat carried by the flow). The conductance still has no no-flow temperature.
 - The compression phase does not march (still the isothermal advance of the pool).
 - Only the multilayer model has it (not the skin layer or no cooling).
+- Arrival times are good to about one cell-fill time. The step is sized on a cell's whole capacity, so a partly filled cell can overshoot within a step
+  and its surplus moves on in the next one. Sizing on the room left cost 1.6–5x the steps on FG9, and halving every step moved the photo fronts by under
+  0.02 mm, so speed won.
 
 ## [0.61.0] — 2026-10-07
 

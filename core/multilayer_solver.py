@@ -755,6 +755,14 @@ class MultilayerHeleShawSolver:
             def time_at_mm3(v: float) -> float:
                 return T_clock * float(prof.time_at_volume_mm3(v)) / t_total
 
+        # A staged profile changes the delivery rate at its stage switches; a step
+        # must not straddle one (it would average the two rates and stamp the
+        # arrivals across the jump), so the switches go to the marcher on the clock
+        # (Codex P2 on PR #114). Past V/P the last stage keeps going: no switch there.
+        breakpoints: tuple[float, ...] = ()
+        if prof is not None:
+            switches = np.cumsum(np.asarray(prof.stage_times_s(), dtype=float))[:-1]
+            breakpoints = tuple(float(T_clock * ts / t_total) for ts in switches)
         gates = [(iy, ix) for iy, ix in self.geometry.gates if mask[iy, ix]]
         t_start = time_at_mm3(float(sum(cell_volume[g] for g in gates)))
         alpha = max(float(self.material.thermal_diffusivity_m2_s), 0.0)
@@ -798,6 +806,7 @@ class MultilayerHeleShawSolver:
             t_start_s=t_start,
             dt_max_s=float(self.march_dt_max_fraction) * T_clock,
             cfl=float(self.march_cfl),
+            breakpoints_s=breakpoints,
         )
         if not res.complete:
             raise RuntimeError(f"the march stopped after {res.n_steps} steps with cells unfilled")

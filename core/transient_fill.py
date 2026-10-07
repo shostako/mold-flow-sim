@@ -335,8 +335,13 @@ def _next_step(C, V, m, fa, fb, fr, newly, inflow, cfl, dt_max_s, rate) -> float
         if not nxt.size:
             return float(dt_max_s)
         return max(min(cfl * float(np.min(C[nxt])) * nxt.size / max(rate, 1e-300), dt_max_s), 1e-12)
-    # the whole capacity, not the room left: sizing on the room let nearly full
-    # cells force tiny steps (5x the steps on the FG9 block for the same fill
-    # pattern); a partly filled cell may overshoot by what it already holds, and
-    # the surplus is pushed on in the next step (the volume stays conserved)
+    # Sized on the whole capacity, not the room left. A partly filled cell may then
+    # take up to a cell of melt beyond what fills it; it is stamped at the right
+    # time within the step, but its surplus only moves on in the next step, so the
+    # cells after it come in late by up to one cell-fill time (a strip's earliest
+    # cells, where that is a large fraction of their time, by 14 % with a coarse
+    # step cap). Sizing on the room instead (floored at a tenth / half a cell) cost
+    # 5x / 1.6x the steps on the FG9 block, and halving every step (cfl 0.5) moved
+    # the photo fronts there by under 0.02 mm: the error is grid-scale in time and
+    # does not show in the fill pattern
     return max(min(cfl * float(np.min(C[fed] / est[fed])), dt_max_s), 1e-12)

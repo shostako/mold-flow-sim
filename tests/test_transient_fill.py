@@ -325,3 +325,50 @@ def test_the_two_phase_injection_rides_on_one_march(monkeypatch):
     # above the gate; the τ fill has not left the channel
     tau_pool = solve_two_phase_short_shot(_solver(geom, "tau"), V * 0.3).injection_mask
     assert pools[0][4:6, 30].all() and not tau_pool[4:, :].any()
+
+
+def test_a_staged_profile_reaches_the_marcher_with_its_switches():
+    """With a multi-stage injection profile the solver hands the stage switches,
+    on its clock, to the marcher, so no step straddles a rate jump (Codex P2 on
+    PR #114). On a strip the march then lands on the τ fill's profile-mapped
+    volume-CDF times exactly, slow first stage and all."""
+    from core.injection_profile import InjectionProfile, InjectionStage
+
+    mask = np.zeros((3, 50), dtype=bool)
+    mask[1] = True
+    thk = np.where(mask, 0.5, 0.0)
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=1.0, gates=[(1, 0)])
+    # 10 mm screw: 78.5 mm³ per mm of stroke. 25 mm³ of strip; the switch at 0.1 mm of
+    # stroke (7.9 mm³, a third of the strip) from 1 mm/s to 10 mm/s
+    prof = InjectionProfile(
+        screw_diameter_mm=10.0,
+        metering_position_mm=10.0,
+        stages=(InjectionStage(9.9, 1.0), InjectionStage(5.0, 10.0)),
+    )
+    import core.multilayer_solver as ms
+
+    f_tau = _solver(geom, "tau", injection_profile=prof).solve(num_frames=4).fill_time_s[1]
+    # the slow stage is visible: a third of the strip takes most of the time
+    assert f_tau[15] > 0.7 * f_tau[-1]
+    # a cell of the fast stage fills in C / Q_fast; a march is good to about one cell-fill time.
+    # A long step cap (a fifth of the fill) lets a step reach across the switch if it may
+    t_cell_fast = 0.5 / (prof.area_mm2 * 10.0)
+    r_m = _solver(geom, "march", injection_profile=prof, march_dt_max_fraction=0.2).solve(
+        num_frames=4
+    )
+    assert np.max(np.abs(r_m.fill_time_s[1] - f_tau)) < t_cell_fast
+    # without the switches the step averages the two rates and the strip comes in several cells late
+    real = ms.march_fill
+
+    def no_switches(*a, **k):
+        k.pop("breakpoints_s", None)
+        return real(*a, **k)
+
+    ms.march_fill = no_switches
+    try:
+        r_nb = _solver(geom, "march", injection_profile=prof, march_dt_max_fraction=0.2).solve(
+            num_frames=4
+        )
+    finally:
+        ms.march_fill = real
+    assert np.max(np.abs(r_nb.fill_time_s[1] - f_tau)) > 3 * t_cell_fast
